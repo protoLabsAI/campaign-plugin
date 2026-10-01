@@ -129,3 +129,141 @@ def test_redaction_really_rewrites_the_page(site, tmp_path):
     text = in_thread(check, 60)
     assert "alice" not in text and "sk-abcdef" not in text
     assert "~" in text and "you@example.com" in text and "•••" in text
+
+
+# ── the shoot browser's guards, for real ─────────────────────────────────────
+def _serve(handler_cls):
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+@pytest.fixture
+def host_with_gallery(registry):
+    """A stand-in protoAgent host: the plugin's REAL routers behind a core-like bearer gate on
+    /api (token mode), or open (no gate) — plus a third-party origin that logs what it receives."""
+    import campaign
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    campaign.register(registry)
+    app = FastAPI()
+    for prefix, router in registry.routers:
+        app.include_router(router, prefix=prefix)
+    client = TestClient(app)
+    state = {"token": "", "third_party_auth": [], "host_auth": [], "api_hits": []}
+
+    class ThirdParty(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            state["third_party_auth"].append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.send_header("Content-Type", "image/gif")
+            self.end_headers()
+            self.wfile.write(b"GIF89a")
+
+    tp_srv, tp_url = _serve(ThirdParty)
+
+    class Host(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _go(self, method):
+            if self.path == "/landing":
+                state["host_auth"].append(self.headers.get("Authorization"))
+                body = f'<html><body><h1>app</h1><img src="{tp_url}/pixel.gif"></body></html>'.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path.startswith("/api/"):
+                state["api_hits"].append(self.path)
+                if state["token"] and self.headers.get("Authorization") != f"Bearer {state['token']}":
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+            n = int(self.headers.get("Content-Length") or 0)
+            r = client.request(
+                method,
+                self.path,
+                content=self.rfile.read(n) if n else None,
+                headers={"Content-Type": self.headers.get("Content-Type", "")},
+            )
+            self.send_response(r.status_code)
+            self.send_header("Content-Type", r.headers.get("content-type", "text/plain"))
+            self.end_headers()
+            self.wfile.write(r.content)
+
+        def do_GET(self):
+            self._go("GET")
+
+        def do_POST(self):
+            self._go("POST")
+
+    host_srv, host_url = _serve(Host)
+    state["url"] = host_url
+    yield state
+    host_srv.shutdown()
+    tp_srv.shutdown()
+
+
+def _asset_awaiting_review():
+    from campaign import paths, store
+    from conftest import PNG_1x1
+
+    c = store.create_campaign("Launch")
+    f = paths.campaign_dir(c["id"], "Launch") / "hero.png"
+    f.write_bytes(PNG_1x1)
+    a = store.add_asset(c["id"], "still", "hero", path=str(f), status="captured")
+    return store.update_asset(a["id"], status="ready_for_review")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_real_bearer_reaches_base_url_only_never_a_third_party(host_with_gallery, tmp_path):
+    h = host_with_gallery
+    script = validate(
+        {
+            "base_url": h["url"],
+            "auth": {"bearer_env": "CAMPAIGN_APP_TOKEN"},
+            "steps": [{"goto": "/landing"}, {"wait_for": {"network_idle": True}}],
+        }
+    )
+    shoot.run(script, tmp_path / "t", env={"CAMPAIGN_APP_TOKEN": "app-tok"})
+    assert h["host_auth"] == ["Bearer app-tok"], "the app itself gets the bearer"
+    assert h["third_party_auth"] == [None], "the third-party pixel was fetched WITHOUT the bearer"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+@pytest.mark.parametrize("mode", ["open", "token"])
+def test_real_shoot_browser_cannot_approve_through_the_gallery(host_with_gallery, tmp_path, monkeypatch, mode):
+    from campaign import store
+
+    h = host_with_gallery
+    a = _asset_awaiting_review()
+    env = {}
+    auth = {}
+    if mode == "token":
+        # Even an operator who allowlisted the host token by mistake doesn't hand it over.
+        h["token"] = "operator-secret"
+        env = {"A2A_AUTH_TOKEN": "operator-secret"}
+        auth = {"auth": {"bearer_env": "A2A_AUTH_TOKEN"}}
+    script = validate(
+        {
+            "base_url": h["url"],
+            "step_timeout_ms": 3000,
+            **auth,
+            "steps": [
+                {"goto": "/plugins/campaign/view"},
+                {"click": {"role": "button", "name": "Approve", "exact": True}},
+            ],
+        }
+    )
+    with pytest.raises(shoot.ShootError):
+        shoot.run(script, tmp_path / "t", env=env)
+    assert store.get_asset(a["id"])["status"] == "ready_for_review"
+    assert h["api_hits"] == [], "no request from the shoot browser ever reached the plugin's API"

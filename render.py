@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -36,17 +37,35 @@ FORMATS = ("mp4", "gif", "poster")
 Runner = Callable[[list[str]], subprocess.CompletedProcess]
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
+# Bounds on what one spec may ask ffmpeg for. An 8K-wide scale of a 1280px take, a 10,000 fps
+# GIF, or an output list of hundreds would tie the agent's turn (and the machine) up for hours.
+MAX_WIDTH = 7680
+MAX_FPS = 60
+MAX_OUTPUTS = 12
+FFMPEG_TIMEOUT_S = 600  # one ffmpeg run
+OUTPUT_BUDGET_S = 1200  # one output's whole size ladder
+
 
 class RenderError(RuntimeError):
     pass
 
 
 def _default_runner(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT_S)
+
+
+def _call(runner: Runner, cmd: list[str]) -> subprocess.CompletedProcess:
+    """Run ffmpeg/ffprobe; a timeout or a launch failure becomes a RenderError, never a crash."""
+    try:
+        return runner(cmd)
+    except subprocess.TimeoutExpired:
+        raise RenderError(f"{Path(cmd[0]).name} ran past its {FFMPEG_TIMEOUT_S}s limit and was stopped") from None
+    except OSError as e:
+        raise RenderError(f"couldn't run {Path(cmd[0]).name}: {e}") from None
 
 
 def _ff(runner: Runner, cmd: list[str]) -> None:
-    res = runner(cmd)
+    res = _call(runner, cmd)
     if res.returncode != 0:
         tail = "\n".join((res.stderr or "").strip().splitlines()[-6:])
         raise RenderError(f"ffmpeg failed ({res.returncode}): {tail or 'no output'}")
@@ -60,7 +79,8 @@ def probe(path: str | Path, runner: Runner | None = None) -> dict[str, Any]:
     if not fp:
         raise RenderError("ffprobe isn't available — it ships with ffmpeg; " + deps.ffmpeg_hint())
     p = Path(path)
-    res = runner(
+    res = _call(
+        runner,
         [
             fp,
             "-v",
@@ -72,17 +92,21 @@ def probe(path: str | Path, runner: Runner | None = None) -> dict[str, Any]:
             "-of",
             "json",
             str(p),
-        ]
+        ],
     )
     if res.returncode != 0:
         raise RenderError(f"ffprobe couldn't read {p.name}: {(res.stderr or '').strip()[:300]}")
-    data = json.loads(res.stdout or "{}")
+    try:
+        data = json.loads(res.stdout or "{}")
+    except json.JSONDecodeError:
+        raise RenderError(f"ffprobe returned unreadable output for {p.name}") from None
     stream = (data.get("streams") or [{}])[0]
     dur = _num(stream.get("duration")) or _num((data.get("format") or {}).get("duration"))
     if not dur and p.suffix.lower() in (".webm", ".mkv"):
         # Playwright's webm carries no duration header — read the last packet's timestamp.
-        res2 = runner(
-            [fp, "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(p)]
+        res2 = _call(
+            runner,
+            [fp, "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(p)],
         )
         stamps = [_num(x) for x in (res2.stdout or "").split()]
         stamps = [s for s in stamps if s is not None]
@@ -109,17 +133,35 @@ def resolve_time(value: Any, marks: dict[str, float], what: str) -> float | None
     if value is None or value == "":
         return None
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
+        return _finite(float(value), what)
     s = str(value).strip()
     if s.startswith("mark:"):
         s = s[5:]
     if s in marks:
         return float(marks[s])
     try:
-        return float(s)
+        return _finite(float(s), what)
     except ValueError:
         known = ", ".join(sorted(marks)) or "none recorded"
         raise RenderError(f"{what}: {value!r} is neither seconds nor a mark of this take (marks: {known})") from None
+
+
+def _finite(v: float, what: str) -> float:
+    if v != v or v in (float("inf"), float("-inf")) or v < 0:
+        raise RenderError(f"{what}: {v} isn't a usable time — give seconds from 0 or a mark name")
+    return v
+
+
+def _bounded_int(spec: dict[str, Any], key: str, lo: int, hi: int, name: str) -> int | None:
+    if spec.get(key) in (None, ""):
+        return None
+    try:
+        v = int(spec[key])
+    except (TypeError, ValueError):
+        raise RenderError(f"output {name}: {key} must be an integer") from None
+    if not lo <= v <= hi:
+        raise RenderError(f"output {name}: {key} {v} is outside {lo}..{hi}")
+    return v
 
 
 def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: float) -> dict[str, Any]:
@@ -142,10 +184,13 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
     for r in spec.get("speed") or []:
         a = resolve_time(r.get("from"), marks, f"{name}.speed.from")
         b = resolve_time(r.get("to"), marks, f"{name}.speed.to")
-        f = float(r.get("factor") or 1)
+        try:
+            f = float(r.get("factor") or 1)
+        except (TypeError, ValueError):
+            raise RenderError(f"output {name}: speed factor must be a number") from None
         if a is None or b is None or b <= a:
             raise RenderError(f"output {name}: each speed ramp needs from < to")
-        if not 0.25 <= f <= 32:
+        if not 0.25 <= f <= 32:  # also rejects NaN
             raise RenderError(f"output {name}: speed factor {f} is outside 0.25..32")
         ramps.append((max(a, start), min(b, end) if end is not None else b, f))
     ramps.sort()
@@ -158,9 +203,21 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
             crop = {k: int(crop[k]) for k in ("x", "y", "width", "height")}
         except (KeyError, TypeError, ValueError):
             raise RenderError(f"output {name}: crop needs integer x, y, width, height") from None
+        if crop["x"] < 0 or crop["y"] < 0 or not (2 <= crop["width"] <= MAX_WIDTH and 2 <= crop["height"] <= MAX_WIDTH):
+            raise RenderError(f"output {name}: crop must be inside the frame (x, y ≥ 0; 2..{MAX_WIDTH}px per side)")
         crop["width"] -= crop["width"] % 2
         crop["height"] -= crop["height"] % 2
-    max_bytes = spec.get("max_bytes")
+    max_bytes = _bounded_int(spec, "max_bytes", 1_000, 10**12, name)
+    width = _bounded_int(spec, "width", 16, MAX_WIDTH, name)
+    crf = _bounded_int(spec, "crf", 0, 51, name)
+    fps = None
+    if spec.get("fps") not in (None, ""):
+        try:
+            fps = float(spec["fps"])
+        except (TypeError, ValueError):
+            raise RenderError(f"output {name}: fps must be a number") from None
+        if not 1 <= fps <= MAX_FPS:  # also rejects NaN
+            raise RenderError(f"output {name}: fps {spec['fps']} is outside 1..{MAX_FPS}")
     limit_id = str(spec.get("limit") or "")
     if limit_id:
         row = limits.get(limit_id)
@@ -175,9 +232,9 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
         "end": end,
         "ramps": ramps,
         "crop": crop,
-        "width": int(spec["width"]) if spec.get("width") else None,
-        "fps": float(spec["fps"]) if spec.get("fps") else None,
-        "crf": int(spec.get("crf") or 23),
+        "width": width,
+        "fps": fps,
+        "crf": 23 if crf is None else crf,
         "max_bytes": int(max_bytes) if max_bytes else None,
         "limit": limit_id,
         "at": resolve_time(spec.get("at"), marks, f"{name}.at"),
@@ -331,6 +388,8 @@ def render_output(
     ff = deps.ffmpeg()
     if not ff:
         raise RenderError(deps.ffmpeg_hint())
+    deadline = time.monotonic() + OUTPUT_BUDGET_S
+    out_of_time = False
     src = str(src)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -356,6 +415,9 @@ def render_output(
                 attempts.append({"crf": crf, "width": width, "size_bytes": size})
                 if not spec["max_bytes"] or size <= spec["max_bytes"]:
                     break
+                if time.monotonic() > deadline:
+                    out_of_time = True
+                    break
         else:
             ladder = (
                 gif_ladder(spec["fps"], spec["width"], src_w)
@@ -369,13 +431,18 @@ def render_output(
                 attempts.append({"fps": fps, "width": width, "size_bytes": size})
                 if not spec["max_bytes"] or size <= spec["max_bytes"]:
                     break
+                if time.monotonic() > deadline:
+                    out_of_time = True
+                    break
 
     info = probe(dst, runner) if dst.exists() else {"width": 0, "height": 0, "duration_s": 0, "size_bytes": 0}
     violations: list[str] = []
     if spec["max_bytes"] and info["size_bytes"] > spec["max_bytes"]:
         violations.append(
             f"{limits.human_bytes(info['size_bytes'])} is still over the {limits.human_bytes(spec['max_bytes'])} ceiling "
-            f"after {len(attempts)} attempts — shorten it, crop it, or speed-ramp more dead time"
+            f"after {len(attempts)} attempts"
+            + (f" (stopped at the {OUTPUT_BUDGET_S}s render budget)" if out_of_time else "")
+            + " — shorten it, crop it, or speed-ramp more dead time"
         )
     if spec["limit"]:
         for v in limits.check(

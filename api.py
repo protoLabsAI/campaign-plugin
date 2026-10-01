@@ -14,7 +14,6 @@ Approve/reject lives ONLY here: there is no agent tool for it. It's the operator
 # NOTE: no `from __future__ import annotations` here — the route signatures annotate with
 # classes imported inside the builder (the host-free rule), and FastAPI resolves string
 # annotations against MODULE globals, where those names don't exist.
-import mimetypes
 from typing import Any, Callable
 
 MEDIA_TYPES = {
@@ -23,6 +22,14 @@ MEDIA_TYPES = {
     ".gif": "image/gif",
     ".png": "image/png",
     ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
+# Anything else in the media dir (an .html or .svg someone dropped in and attached) is served
+# as an opaque download — never as a document that could run script on the console's origin.
+SAFE_HEADERS = {
+    "Cache-Control": "private, max-age=60",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; sandbox",
 }
 
 
@@ -105,8 +112,15 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         from pathlib import Path
 
         p = Path(a["path"]).resolve()
-        media = MEDIA_TYPES.get(p.suffix.lower()) or mimetypes.guess_type(p.name)[0] or "application/octet-stream"
-        return FileResponse(p, media_type=media, headers={"Cache-Control": "private, max-age=60"})
+        media = MEDIA_TYPES.get(p.suffix.lower())
+        if media is None:
+            return FileResponse(
+                p,
+                media_type="application/octet-stream",
+                filename=p.name,  # Content-Disposition: attachment
+                headers=SAFE_HEADERS,
+            )
+        return FileResponse(p, media_type=media, headers=SAFE_HEADERS)
 
     @router.post("/assets/{asset_id}/review")
     async def _review(asset_id: int, body: Review) -> JSONResponse:

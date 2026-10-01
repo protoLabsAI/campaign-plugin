@@ -25,13 +25,23 @@ approval state and only the operator approves (in the gallery — there is no ag
 plugin's job (brand kit, queue, linter, disclosure, export); browsing a site is core's
 `agent_browser`. Both are referenced by tool *name* (in skills and the producer's allowlist),
 never imported. Cards read Social Studio's brand-kit YAML *file* for colours/fonts/logo if it
-exists.
+exists — its `visual:` section (`colors: {primary, accent, background, foreground}`,
+`fonts: {heading, body}`, `logo: {path, dark, light}` relative to the kit file, `wordmark`).
+Missing or malformed fields fall back to this plugin's brand settings, then neutral defaults;
+`logo.dark` is used on a dark card and `logo.light` on a light one; font `*_url`s are never
+fetched (cards load nothing from the network).
+
+**The recording browser's guards.** A shot script is agent-written, so the browser it drives
+never reaches this plugin's own data API (on any host — it can't open the gallery and click
+Approve), and a script's bearer token goes only to its `base_url` origin, read only from an env
+var named `CAMPAIGN_*` or listed in the **Shot-script bearer env vars** setting. The host's own
+operator/fleet token is always refused.
 
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.1.0`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.1.0`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.1.1`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.1.1`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Install dependencies** installs the `playwright` Python package into the agent.
@@ -96,7 +106,10 @@ steps:
 Steps: `goto`, `click`, `fill`, `type` (per-char delay), `press`, `hover`, `wait_for`
 (selector/text/role/network idle/ms), `hold`, `scroll`, `mark`, `screenshot`, `mask`, `redact`.
 Targets prefer accessible roles and text over CSS. Tokens never go in a script: use
-`auth: {bearer_env: VAR}` or `auth: {storage_state: path}`.
+`auth: {bearer_env: CAMPAIGN_APP_TOKEN}` (a `CAMPAIGN_*` env var, or one named in the
+`bearer_envs` setting; sent to the `base_url` origin only) or `auth: {storage_state: path}`.
+Re-recording into an existing asset (`asset_id`) replaces that asset's previous take: its
+stills are removed (any the operator approved are kept).
 
 Then: `campaign_render(asset_id, outputs=[{name: hero, format: mp4, start: start, end: end,
 speed: [{from: start, to: plugins, factor: 2}], limit: github_attachment_video_free}, …])`.
@@ -115,7 +128,8 @@ plan as sourced, dated assumptions.
 
 `data_dir` (blank = the host's per-instance plugin store), `ffmpeg_path`, `brand_kit_path`
 (a Social Studio kit to read; blank auto-detects), `brand_name` / `brand_colors` /
-`brand_fonts` / `brand_logo` (fallbacks), `limit_overrides`, `producer_model`.
+`brand_fonts` / `brand_logo` (fallbacks), `limit_overrides`, `bearer_envs` (extra env-var
+names a shot script may use as its bearer), `producer_model`.
 
 ## Development
 

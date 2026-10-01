@@ -133,3 +133,112 @@ def test_real_og_card_renders_at_size_and_under_1mb(tmp_path):
     import struct
 
     assert struct.unpack(">II", data[16:24]) == (1280, 640)
+
+
+# ── Social Studio's `visual:` contract, read defensively (v0.1.1) ──────────────
+def _kit(tmp_path, monkeypatch, data, *, logos=()):
+    d = tmp_path / "brandkit"
+    d.mkdir(exist_ok=True)
+    for name in logos:
+        (d / name).parent.mkdir(parents=True, exist_ok=True)
+        (d / name).write_bytes(PNG_1x1)
+    kit = d / "brand-kit.yaml"
+    kit.write_text(data if isinstance(data, str) else yaml.safe_dump(data), encoding="utf-8")
+    monkeypatch.setenv("SOCIAL_BRAND_KIT", str(kit))
+    return d
+
+
+def test_the_full_visual_contract(tmp_path, monkeypatch):
+    d = _kit(
+        tmp_path,
+        monkeypatch,
+        """
+brand: Acme
+visual:
+  colors: {primary: "#1F6FEB", accent: "#F78166", background: "#0D1117", foreground: "#E6EDF3"}
+  fonts: {heading: Inter, body: "IBM Plex Sans", heading_url: "https://fonts.example/inter.css"}
+  logo: {path: assets/logo.png, dark: assets/logo-on-dark.png, light: assets/logo-on-light.png}
+  wordmark: "ACME"
+""",
+        logos=("assets/logo.png", "assets/logo-on-dark.png", "assets/logo-on-light.png"),
+    )
+    b = brand.resolve()
+    assert b["colors"] == {"bg": "#0D1117", "fg": "#E6EDF3", "accent": "#F78166", "muted": "#9aa0ac"}
+    assert b["fonts"] == {"heading": "Inter", "body": "IBM Plex Sans"}
+    assert b["name"] == "ACME", "the wordmark is the name as set in type"
+    assert b["logo"] == str(d / "assets/logo-on-dark.png"), "dark card → the logo variant for dark backgrounds"
+    b = brand.resolve({"colors": {"bg": "#ffffff"}})
+    assert b["logo"] == str(d / "assets/logo-on-light.png")
+    html = cards.build_html("og-1280x640", {"title": "t"}, (1280, 640), brand.resolve())
+    assert "fonts.example" not in html, "font stylesheet URLs are never loaded — cards stay offline"
+
+
+def test_primary_stands_in_for_a_missing_accent(tmp_path, monkeypatch):
+    _kit(tmp_path, monkeypatch, {"visual": {"colors": {"primary": "#1F6FEB"}}})
+    assert brand.resolve()["colors"]["accent"] == "#1F6FEB"
+
+
+def test_a_logo_mapping_with_only_a_path_and_a_missing_variant(tmp_path, monkeypatch):
+    d = _kit(tmp_path, monkeypatch, {"visual": {"logo": {"path": "logo.png", "dark": "nope.png"}}}, logos=("logo.png",))
+    assert brand.resolve()["logo"] == str(d / "logo.png"), "a variant that doesn't exist falls back to path"
+
+
+def test_a_nonexistent_kit_logo_falls_back_to_the_setting(tmp_path, monkeypatch):
+    _kit(tmp_path, monkeypatch, {"visual": {"logo": {"path": "gone.png"}}})
+    setting = tmp_path / "cfg-logo.png"
+    setting.write_bytes(PNG_1x1)
+    brand.configure({"brand_logo": str(setting)})
+    assert brand.resolve()["logo"] == str(setting)
+    brand.configure({})
+    assert brand.resolve()["logo"] == ""
+    assert (
+        "logo" not in cards.build_html("og-1280x640", {"title": "t"}, (1280, 640), brand.resolve()).split("<body>")[1]
+    )
+
+
+def test_only_the_kits_own_logo_is_kit_relative(tmp_path, monkeypatch):
+    d = _kit(tmp_path, monkeypatch, {"visual": {"colors": {}}})
+    brand.configure({"brand_logo": "rel/logo.png"})
+    assert brand.resolve()["logo"] == "rel/logo.png", "a setting's path is NOT re-rooted at the kit's dir"
+    assert brand.resolve({"logo": "call.png"})["logo"] == "call.png"
+    assert not brand.resolve()["logo"].startswith(str(d))
+
+
+def test_absolute_and_home_logo_paths_are_kept(tmp_path, monkeypatch):
+    abs_logo = tmp_path / "abs.png"
+    abs_logo.write_bytes(PNG_1x1)
+    _kit(tmp_path, monkeypatch, {"visual": {"logo": {"path": str(abs_logo)}}})
+    assert brand.resolve()["logo"] == str(abs_logo)
+
+
+@pytest.mark.parametrize(
+    "visual",
+    [
+        "not a mapping",
+        ["a", "list"],
+        {"colors": "nope", "fonts": ["Inter"], "logo": 42, "wordmark": {"x": 1}},
+        {"colors": {"primary": None, "background": 12, "foreground": ""}},  # unquoted '#…' parses as None
+        {"colors": None, "fonts": None, "logo": None},
+        {"fonts": {"heading": {"family": "Inter"}, "body": 7}},
+        {"logo": {"path": None, "dark": 3, "light": ""}},
+    ],
+)
+def test_malformed_visual_sections_degrade_to_defaults(tmp_path, monkeypatch, visual):
+    _kit(tmp_path, monkeypatch, {"brand": "Kitco", "visual": visual})
+    b = brand.resolve()
+    assert b["colors"] == brand.DEFAULTS["colors"] and b["logo"] == "" and b["name"] == "Kitco"
+    assert all(isinstance(v, str) for v in b["fonts"].values())
+    cards.build_html("square-1080", {"title": "t"}, (1080, 1080), b)
+
+
+def test_an_invalid_kit_colour_falls_through_to_a_valid_setting(tmp_path, monkeypatch):
+    _kit(tmp_path, monkeypatch, {"visual": {"colors": {"accent": "red", "background": "#12"}}})
+    brand.configure({"brand_colors": "accent=#abcdef, bg=#101010"})
+    b = brand.resolve()
+    assert b["colors"]["accent"] == "#abcdef" and b["colors"]["bg"] == "#101010"
+
+
+def test_the_pre_contract_top_level_shape_still_reads(tmp_path, monkeypatch):
+    d = _kit(tmp_path, monkeypatch, {"colors": ["#ff00ff"], "fonts": "Inter", "logo": "l.png"}, logos=("l.png",))
+    b = brand.resolve()
+    assert b["colors"]["accent"] == "#ff00ff" and b["fonts"]["heading"] == "Inter" and b["logo"] == str(d / "l.png")

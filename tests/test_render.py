@@ -208,3 +208,54 @@ def test_real_render_of_a_tiny_take(tmp_path, monkeypatch):
         source=source,
     )
     assert Path(poster["path"]).read_bytes()[:4] == b"\x89PNG" and poster["width"] == 640
+
+
+# ── hardening (v0.1.1) ─────────────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    "bad, match",
+    [
+        ({"width": 100_000}, "width 100000 is outside"),
+        ({"width": -4}, "width -4 is outside"),
+        ({"fps": 10_000}, "fps 10000 is outside"),
+        ({"fps": "nan"}, "fps nan is outside"),
+        ({"crf": 99}, "crf 99 is outside"),
+        ({"start": "nan"}, "isn't a usable time"),
+        ({"end": "inf"}, "isn't a usable time"),
+        ({"start": -3}, "isn't a usable time"),
+        ({"speed": [{"from": 1, "to": 2, "factor": "nan"}]}, "outside 0.25..32"),
+        ({"crop": {"x": -1, "y": 0, "width": 100, "height": 100}}, "crop must be inside"),
+        ({"crop": {"x": 0, "y": 0, "width": 0, "height": 100}}, "crop must be inside"),
+        ({"max_bytes": 5}, "max_bytes 5 is outside"),
+    ],
+)
+def test_specs_are_bounded(bad, match):
+    with pytest.raises(render.RenderError, match=match):
+        _spec(**bad)
+
+
+def test_an_ffmpeg_timeout_is_a_render_error_not_a_crash(tmp_path):
+    def runner(cmd):
+        raise subprocess.TimeoutExpired(cmd, render.FFMPEG_TIMEOUT_S)
+
+    with pytest.raises(render.RenderError, match="ran past its 600s limit"):
+        render.render_output("/x.webm", tmp_path, _spec(), marks=MARKS, source={"width": 1280}, runner=runner)
+    with pytest.raises(render.RenderError, match="ran past"):
+        render.probe("/x.webm", runner=runner)
+
+
+def test_unreadable_ffprobe_output_is_a_render_error():
+    def runner(cmd):
+        return subprocess.CompletedProcess(cmd, 0, "not json", "")
+
+    with pytest.raises(render.RenderError, match="unreadable"):
+        render.probe("/x.webm", runner=runner)
+
+
+def test_the_size_ladder_stops_at_its_time_budget(tmp_path, monkeypatch):
+    clock = iter([0.0] + [render.OUTPUT_BUDGET_S + 1.0] * 50)
+    monkeypatch.setattr(render.time, "monotonic", lambda: next(clock))
+    ff = FakeFF(sizes=[50_000_000] * 20)
+    r = render.render_output(
+        "/x.webm", tmp_path, _spec(max_bytes=1_000_000), marks=MARKS, source={"width": 1280}, runner=ff
+    )
+    assert len(r["attempts"]) == 1 and "render budget" in r["violations"][0]

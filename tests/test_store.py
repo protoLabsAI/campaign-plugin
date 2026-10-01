@@ -172,3 +172,58 @@ def test_campaign_dir_is_stable_across_renames():
     d1 = paths.campaign_dir(c["id"], "Launch")
     d2 = paths.campaign_dir(c["id"], "Renamed later")
     assert d1 == d2 and d1.parent == paths.media_root()
+
+
+# ── hardening (v0.1.1) ─────────────────────────────────────────────────────────
+def _approved():
+    from campaign import paths
+    from conftest import PNG_1x1
+
+    c = store.create_campaign("Launch")
+    f = paths.campaign_dir(c["id"], "Launch") / "hero.png"
+    f.write_bytes(PNG_1x1)
+    a = store.add_asset(c["id"], "still", "hero", path=str(f), status="captured")
+    store.update_asset(a["id"], status="ready_for_review")
+    return store.review(a["id"], "approve")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"status": "ready_for_review"},
+        {"status": "planned"},
+        {"limit_id": "github_social_preview"},
+        {"width": 9999},
+        {"title": "something else"},
+        {"meta": {"x": 1}},
+    ],
+)
+def test_the_agent_cannot_unapprove_or_edit_an_approved_asset(change):
+    a = _approved()
+    with pytest.raises(ValueError, match="approved"):
+        store.update_asset(a["id"], **change)
+    assert store.get_asset(a["id"])["status"] == "approved"
+
+
+def test_the_agent_may_still_annotate_an_approved_asset():
+    a = _approved()
+    assert store.update_asset(a["id"], notes="posted to the README")["notes"] == "posted to the README"
+
+
+def test_an_approval_landing_mid_update_is_not_overwritten(monkeypatch, tmp_path):
+    # The agent read the row while it was ready_for_review; the operator approves; then the
+    # agent's write lands. The freeze must be checked against the row UNDER the write lock.
+    a = _approved()
+    stale = {**store.get_asset(a["id"]), "status": "ready_for_review"}
+    monkeypatch.setattr(store, "get_asset", lambda _id: dict(stale))
+    other = tmp_path / "other.png"
+    other.write_bytes(b"x")
+    with pytest.raises(ValueError, match="approved"):
+        store.update_asset(a["id"], path=str(other))
+
+
+def test_delete_assets_never_removes_an_approved_one():
+    a = _approved()
+    b = store.add_asset(a["campaign_id"], "still", "draft")
+    assert store.delete_assets([a["id"], b["id"]]) == 1
+    assert store.get_asset(a["id"]) and store.get_asset(b["id"]) is None

@@ -50,6 +50,52 @@ def _lane_id(campaign_id: int, lane: str) -> int:
     return row["id"]
 
 
+def _own_asset(campaign_id: int, asset_id: int) -> dict[str, Any]:
+    """The asset ``asset_id`` — which must belong to ``campaign_id`` and not be approved."""
+    a = store.get_asset(asset_id)
+    if a is None or a["campaign_id"] != int(campaign_id):
+        raise ValueError(f"no asset #{asset_id} in campaign {campaign_id} — campaign_assets lists them")
+    if a["status"] == "approved":
+        raise ValueError(f"asset #{asset_id} is approved — leave asset_id off to register the new file as a new asset")
+    return a
+
+
+def _supersede_take(old: dict[str, Any], new_take_dir: str) -> list[str]:
+    """Re-recording into an asset replaces its previous take: drop the old take's stills.
+
+    Stills the operator APPROVED stay (their call stands) and so does the old take dir that
+    holds them; every other still of the old take is removed — row and file — and the old take
+    dir goes once nothing references it. Returns notes for the tool's reply.
+    """
+    notes: list[str] = []
+    old_dir = (old.get("meta") or {}).get("take_dir") or (str(Path(old["path"]).parent) if old.get("path") else "")
+    stills = [
+        s
+        for s in store.list_assets(old["campaign_id"], kind="still")
+        if s["parent_id"] == old["id"] and s.get("path") and old_dir and Path(s["path"]).parent == Path(old_dir)
+    ]
+    kept = [s for s in stills if s["status"] == "approved"]
+    gone = [s for s in stills if s["status"] != "approved"]
+    store.delete_assets([s["id"] for s in gone])
+    if gone:
+        notes.append(f"superseded {len(gone)} still(s) of the previous take: " + ", ".join(f"#{s['id']}" for s in gone))
+    if kept:
+        notes.append(
+            "kept the previous take's APPROVED still(s) "
+            + ", ".join(f"#{s['id']}" for s in kept)
+            + " — the operator's call stands"
+        )
+    if old_dir and not kept and Path(old_dir) != Path(new_take_dir) and paths.is_contained(old_dir):
+        still_used = any(
+            a.get("path") and Path(a["path"]).parent == Path(old_dir) for a in store.list_assets(old["campaign_id"])
+        )
+        if not still_used:
+            import shutil
+
+            shutil.rmtree(old_dir, ignore_errors=True)
+    return notes
+
+
 def _asset_line(a: dict[str, Any]) -> str:
     dims = f" {a['width']}×{a['height']}" if a.get("width") else ""
     dur = f" {a['duration_s']:.1f}s" if a.get("duration_s") else ""
@@ -513,6 +559,7 @@ def build_tools(registry):
             if not script_id:
                 script_id = store.save_script(campaign_id, norm["name"], data)["id"]
             lane_id = _lane_id(campaign_id, lane)
+            previous = _own_asset(campaign_id, asset_id) if asset_id else None
         except shotscript.ScriptError as e:
             return "Script is invalid — nothing was recorded:\n" + "\n".join(f"- {p}" for p in e.problems)
         except ValueError as e:
@@ -520,7 +567,7 @@ def build_tools(registry):
 
         c = store.require_campaign(campaign_id)
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        out_dir = paths.campaign_dir(campaign_id, c["name"]) / "shots" / f"{norm['name']}-{stamp}"
+        out_dir = paths.unique_dir(paths.campaign_dir(campaign_id, c["name"]) / "shots", f"{norm['name']}-{stamp}")
         try:
             res = shoot.run(norm, out_dir)
         except shoot.ShootError as e:
@@ -556,11 +603,14 @@ def build_tools(registry):
             **{k: v for k, v in facts.items() if k != "duration_s"},
             duration_s=facts.get("duration_s") or res["duration_s"],
         )
+        superseded: list[str] = []
         if asset_id:
             try:
                 take = store.update_asset(asset_id, **fields)
             except ValueError as e:
                 return f"Recorded to {res['dir']} but couldn't attach it to asset #{asset_id}: {e}"
+            if previous and previous.get("path") and previous["path"] != take["path"]:
+                superseded = _supersede_take(previous, res["dir"])
         else:
             take = store.add_asset(campaign_id, "clip", title or f"take: {norm['name']}", lane_id=lane_id, **fields)
         still_ids = []
@@ -583,7 +633,9 @@ def build_tools(registry):
             f"Recorded take → asset #{take['id']} ({take['duration_s']:.1f}s, {take['width']}×{take['height']}, "
             f"{limits.human_bytes(take['size_bytes'])})\n"
             f"- video: {res['video']}\n- timing log: {res['timing']}\n- marks: {marks}\n"
-            f"- stills: {', '.join(f'#{i}' for i in still_ids) or 'none'}\n\n"
+            f"- stills: {', '.join(f'#{i}' for i in still_ids) or 'none'}\n"
+            + "".join(f"- {n}\n" for n in superseded)
+            + "\n"
             "Look at the stills before rendering (legible? anything secret on screen?), then cut it with "
             f"campaign_render(asset_id={take['id']}, outputs=[…])."
         )
@@ -618,17 +670,17 @@ def build_tools(registry):
             specs = [specs]
         if not isinstance(specs, list) or not specs:
             return "outputs must be a non-empty list of output specs."
+        if len(specs) > render.MAX_OUTPUTS:
+            return f"{len(specs)} outputs in one call is too many — at most {render.MAX_OUTPUTS}; split the job."
         marks = (take.get("meta") or {}).get("marks") or {}
         try:
             source = render.probe(take["path"])
         except render.RenderError as e:
             return str(e)
         c = store.require_campaign(take["campaign_id"])
-        out_dir = (
-            paths.campaign_dir(c["id"], c["name"])
-            / "renders"
-            / Path(take["path"]).parent.name
-            / datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        out_dir = paths.unique_dir(
+            paths.campaign_dir(c["id"], c["name"]) / "renders" / Path(take["path"]).parent.name,
+            datetime.now(UTC).strftime("%Y%m%d-%H%M%S"),
         )
         lines, made = [], []
         for raw in specs:
@@ -704,13 +756,19 @@ def build_tools(registry):
                 return "data must be a mapping (title, subtitle, url, image, …)."
             if payload.get("image") and not Path(str(payload["image"])).expanduser().is_file():
                 return f"data.image {payload['image']} doesn't exist."
+            if template not in cards.templates():
+                return f"Not rendered — unknown template {template!r} — bundled: {', '.join(cards.templates())}"
+            lane_id = _lane_id(campaign_id, lane)
+            if asset_id:
+                _own_asset(campaign_id, asset_id)
             out = (
-                paths.campaign_dir(c["id"], c["name"])
-                / "cards"
-                / f"{template}-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
+                paths.unique_dir(
+                    paths.campaign_dir(c["id"], c["name"]) / "cards",
+                    f"{template}-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}",
+                )
+                / template
             )
             r = cards.render(template, payload, out, size=size, limit=limit or None)
-            lane_id = _lane_id(campaign_id, lane)
         except ValueError as e:
             return f"Not rendered — {e}"
         except Exception as e:  # noqa: BLE001 — a browser failure should read clearly
@@ -730,10 +788,13 @@ def build_tools(registry):
             },
             notes=("VIOLATES: " + "; ".join(r["violations"])) if r["violations"] else "",
         )
-        if asset_id:
-            a = store.update_asset(asset_id, **fields)
-        else:
-            a = store.add_asset(campaign_id, "card", payload.get("title") or template, lane_id=lane_id, **fields)
+        try:
+            if asset_id:
+                a = store.update_asset(asset_id, **fields)
+            else:
+                a = store.add_asset(campaign_id, "card", payload.get("title") or template, lane_id=lane_id, **fields)
+        except ValueError as e:
+            return f"Rendered to {r['path']} but couldn't register it — {e}"
         _emit("asset_registered", {"campaign_id": campaign_id, "asset_id": a["id"], "status": a["status"]})
         flag = f"\n⚠ {'; '.join(r['violations'])}" if r["violations"] else ""
         mime = "image/jpeg" if r["format"] in ("jpg", "jpeg") else "image/png"

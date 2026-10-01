@@ -434,6 +434,8 @@ def validate(text_or_obj: Any) -> dict[str, Any]:
             if not re.match(r"^[A-Z_][A-Z0-9_]*$", str(auth["bearer_env"])):
                 problems.append("auth.bearer_env must be an environment variable NAME like MY_TOKEN")
             out["auth"]["bearer_env"] = str(auth["bearer_env"])
+            if not base:
+                problems.append("auth.bearer_env needs a base_url — the bearer is sent to that origin only")
         if auth.get("storage_state"):
             out["auth"]["storage_state"] = str(auth["storage_state"])
 
