@@ -31,7 +31,7 @@ if PKG not in sys.modules:
 
 @pytest.fixture(autouse=True)
 def isolated_data_dir(tmp_path, monkeypatch):
-    from campaign import brand, deps, limits, paths, shoot
+    from campaign import brand, deps, interpreter, limits, paths, shoot
 
     data = tmp_path / "data"
     monkeypatch.setenv("CAMPAIGN_DIR", str(data))
@@ -44,6 +44,11 @@ def isolated_data_dir(tmp_path, monkeypatch):
     deps.configure("")
     brand.configure({}, None)
     shoot.configure("")
+    # No real managed runtime (~/.protoagent/…) may be picked up; probes start fresh.
+    monkeypatch.setattr(interpreter, "managed_python", lambda: None)
+    interpreter.invalidate()
+    monkeypatch.setattr(deps, "_REGISTRY", None)
+    monkeypatch.setattr(deps, "_LAST_SIG", None)
     yield data
 
 
@@ -333,9 +338,23 @@ def have_ffmpeg() -> bool:
 
 
 def have_chromium() -> bool:
+    """A Python with playwright + its Chromium resolvable the way production resolves it."""
     try:
-        from campaign import deps
+        from campaign import interpreter
 
-        return deps.playwright_installed() and deps.chromium_installed()
+        return interpreter.resolve().ready
     except Exception:  # noqa: BLE001
         return False
+
+
+def in_process_worker(pw):
+    """A ``shoot.run_worker`` stand-in that runs the REAL worker code in-process against the
+    fake browser — the job still round-trips through JSON, exactly as on the wire."""
+    import json
+
+    from campaign.worker import pw_worker
+
+    def run_worker(job, timeout, playwright_factory=None):
+        return pw_worker.run_job(json.loads(json.dumps(job)), playwright_factory or pw)
+
+    return run_worker

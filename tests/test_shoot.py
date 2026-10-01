@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from campaign import shoot
 from campaign.shotscript import validate
+from campaign.worker import pw_worker
 from conftest import FakePlaywright
 
 
@@ -205,7 +206,7 @@ def test_total_budget_stops_between_steps(tmp_path, monkeypatch):
     pw = FakePlaywright()
     s = _script({"hold": 100}, {"hold": 100}, total_timeout_s=5)
     clock = iter([0, 0, 0] + [1000.0] * 50)
-    monkeypatch.setattr(shoot.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(pw_worker.time, "monotonic", lambda: next(clock))
     with pytest.raises(shoot.ShootError, match="total_timeout_s=5 spent"):
         shoot.run(s, tmp_path, playwright_factory=pw)
 

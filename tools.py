@@ -502,9 +502,11 @@ def build_tools(registry):
 
     @tool
     def campaign_setup() -> str:
-        """Check what media production needs on this machine — the playwright package, its
-        headless Chromium, and ffmpeg/ffprobe — and say exactly how to fix anything missing.
-        Installing is the operator's call (setup banner buttons); this never installs."""
+        """Check what media production needs on this machine — a Python with the playwright
+        package (the browser runs out of process), its headless Chromium, and ffmpeg/ffprobe —
+        and say exactly how to fix anything missing. Installing is the operator's call (setup
+        banner buttons); this never installs."""
+        deps.recheck(lambda: deps.report(registry))
         return deps.brief()
 
     # ── shot scripts ─────────────────────────────────────────────────────────
