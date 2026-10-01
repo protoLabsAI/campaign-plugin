@@ -23,6 +23,7 @@ MEDIA_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
 }
 # Anything else in the media dir (an .html or .svg someone dropped in and attached) is served
 # as an opaque download — never as a document that could run script on the console's origin.
@@ -106,12 +107,16 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         a = store.get_asset(asset_id)
         if a is None or not a.get("path"):
             raise HTTPException(404, "no file for this asset")
-        if not paths.is_contained(a["path"]):
-            # Either missing, or outside the media root (a traversal / symlink escape).
-            raise HTTPException(403, "file is outside the campaign media directory or missing")
         from pathlib import Path
 
-        p = Path(a["path"]).resolve()
+        # Resolve ONCE and serve exactly what was checked — no second resolution in between.
+        try:
+            p = Path(a["path"]).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError):
+            p = None
+        if p is None or not paths.is_contained(p):
+            # Either missing, or outside the media root (a traversal / symlink escape).
+            raise HTTPException(403, "file is outside the campaign media directory or missing")
         media = MEDIA_TYPES.get(p.suffix.lower())
         if media is None:
             return FileResponse(

@@ -346,3 +346,12 @@ def test_skill_frontmatter_is_valid_and_names_real_tools(skill_path, registry):
     for name in front.get("tools", []):
         if name.startswith("campaign_"):
             assert name in known, f"{skill_path.parent.name} declares unknown tool {name}"
+
+
+def test_webp_is_served_inline(client):
+    c = store.create_campaign("Launch")
+    p = paths.campaign_dir(c["id"], "Launch") / "still.webp"
+    p.write_bytes(b"RIFF....WEBP")
+    a = store.add_asset(c["id"], "still", "t", path=str(p))
+    r = client.get(f"/api/plugins/campaign/file/{a['id']}")
+    assert r.headers["content-type"] == "image/webp" and "content-disposition" not in r.headers

@@ -227,3 +227,25 @@ def test_delete_assets_never_removes_an_approved_one():
     b = store.add_asset(a["campaign_id"], "still", "draft")
     assert store.delete_assets([a["id"], b["id"]]) == 1
     assert store.get_asset(a["id"]) and store.get_asset(b["id"]) is None
+
+
+def test_renaming_a_lane_onto_another_is_a_clear_error():
+    c = store.create_campaign("L")
+    store.upsert_lane(c["id"], "a")
+    b = store.upsert_lane(c["id"], "b")
+    with pytest.raises(ValueError, match="already has a lane named 'a'"):
+        store.upsert_lane(c["id"], "a", lane_id=b["id"])
+
+
+def test_in_thread_propagates_errors_and_bounds_a_wedge():
+    from campaign.threads import Wedged, in_thread
+
+    assert in_thread(lambda: 42, 5) == 42
+    with pytest.raises(KeyError):
+        in_thread(lambda: {}["x"], 5)
+    import threading
+
+    gate = threading.Event()
+    with pytest.raises(Wedged, match="didn't finish within"):
+        in_thread(gate.wait, 0.2)
+    gate.set()

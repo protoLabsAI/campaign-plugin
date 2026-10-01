@@ -1,6 +1,6 @@
 id: campaign
 name: Campaign Studio
-version: 0.1.0
+version: 0.1.1
 description: >-
   Campaign plans and deterministic, repeatable media production for launching ANY app or
   product. Plans hold the goal and its math, lanes, a shot list of assets (who records what),

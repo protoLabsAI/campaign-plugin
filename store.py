@@ -309,10 +309,16 @@ def upsert_lane(
             lane_id = cur.lastrowid
         else:
             lane_id = row["id"]
+            new_name = (name or row["name"]).strip()
+            clash = conn.execute(
+                "SELECT id FROM lanes WHERE campaign_id = ? AND name = ? AND id != ?", (campaign_id, new_name, lane_id)
+            ).fetchone()
+            if clash is not None:
+                raise ValueError(f"campaign {campaign_id} already has a lane named {new_name!r} (lane {clash['id']})")
             conn.execute(
                 "UPDATE lanes SET name = ?, pitch = ?, audience = ?, hero_asset_id = ?, updated = ? WHERE id = ?",
                 (
-                    (name or row["name"]).strip(),
+                    new_name,
                     row["pitch"] if pitch is None else pitch,
                     row["audience"] if audience is None else audience,
                     row["hero_asset_id"] if hero_asset_id is None else int(hero_asset_id),
