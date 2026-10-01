@@ -38,8 +38,6 @@ from .worker.pw_worker import (  # noqa: F401 — re-exported: one definition, h
     video_size,
 )
 
-_redact_init_js = pw_worker.redact_init_js
-_mask_init_js = pw_worker.mask_init_js
 
 # Seconds past total_timeout_s before the worker is killed: browser launch + context close
 # (which finalizes the video) + interpreter start-up.

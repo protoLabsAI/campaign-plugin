@@ -125,7 +125,8 @@ def test_install_step_uses_the_worker_interpreter(state):
 
     out = deps.install_chromium(lambda: refreshed.append(1), runner=runner)
     assert out["ok"] and out["pending"] and "/rt/bin/python3" in out["message"]
-    deps._LAST_THREAD.join(5)
+    deps._LAST_THREAD.join(30)
+    assert not deps._LAST_THREAD.is_alive(), "the install thread finished"
     assert seen == [("/rt/bin/python3", ["-m", "playwright", "install", "chromium"])]
     assert deps._INSTALL["state"] == "done" and len(refreshed) >= 2
 
@@ -133,7 +134,8 @@ def test_install_step_uses_the_worker_interpreter(state):
 def test_install_failure_lands_on_the_banner(registry, state):
     state["res"] = NO_CHROMIUM
     out = deps.install_chromium(None, runner=lambda py, a: subprocess.CompletedProcess(a, 1, "", "disk full"))
-    deps._LAST_THREAD.join(5)
+    deps._LAST_THREAD.join(30)
+    assert not deps._LAST_THREAD.is_alive(), "the install thread finished"
     assert out["pending"] and deps._INSTALL["state"] == "failed"
     deps.report(registry)
     assert "disk full" in registry.gaps["chromium"][0]
@@ -143,7 +145,8 @@ def test_an_install_that_overruns_is_reported(state):
     state["res"] = NO_CHROMIUM
     done = interpreter.Completed(returncode=-9, stdout="", stderr="", timed_out=True)
     deps.install_chromium(None, runner=lambda py, a: done)
-    deps._LAST_THREAD.join(5)
+    deps._LAST_THREAD.join(30)
+    assert not deps._LAST_THREAD.is_alive(), "the install thread finished"
     assert deps._INSTALL["state"] == "failed" and "overran" in deps._INSTALL["error"]
 
 

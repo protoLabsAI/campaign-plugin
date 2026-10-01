@@ -282,6 +282,7 @@ class Probe:
 
 _PROBES: dict[str, tuple[float, Probe]] = {}
 _PROBE_LOCK = threading.Lock()
+_PATH_LOCKS: dict[str, threading.Lock] = {}
 
 
 def invalidate() -> None:
@@ -290,16 +291,21 @@ def invalidate() -> None:
 
 
 def probe(python: str) -> Probe:
-    """Ask ``python`` (via the worker's ``--probe``) whether it has playwright + Chromium."""
-    now = time.monotonic()
+    """Ask ``python`` (via the worker's ``--probe``) whether it has playwright + Chromium.
+
+    One probe per interpreter at a time: concurrent callers for the same path wait for the
+    first one's answer instead of each spawning their own."""
     with _PROBE_LOCK:
-        hit = _PROBES.get(python)
-        if hit and now - hit[0] < PROBE_TTL_S:
-            return hit[1]
-    p = _probe_uncached(python)
-    with _PROBE_LOCK:
-        _PROBES[python] = (time.monotonic(), p)
-    return p
+        lock = _PATH_LOCKS.setdefault(python, threading.Lock())
+    with lock:
+        with _PROBE_LOCK:
+            hit = _PROBES.get(python)
+            if hit and time.monotonic() - hit[0] < PROBE_TTL_S:
+                return hit[1]
+        p = _probe_uncached(python)
+        with _PROBE_LOCK:
+            _PROBES[python] = (time.monotonic(), p)
+        return p
 
 
 def _probe_uncached(python: str) -> Probe:
@@ -390,12 +396,14 @@ def resolve() -> Resolution:
             return _from_probe(p, SOURCE_MANAGED, considered)
 
     if not frozen():
-        considered.append(f"{SOURCE_HOST}: {sys.executable}")
-        if host_has_playwright():
-            p = probe(sys.executable)
-            if p.ok and p.playwright:
-                return _from_probe(p, SOURCE_HOST, considered)
-        return Resolution(need="deps", considered=considered)
+        if not host_has_playwright():
+            considered.append(f"{SOURCE_HOST}: {sys.executable} (no playwright)")
+            return Resolution(need="deps", considered=considered)
+        p = probe(sys.executable)
+        considered.append(f"{SOURCE_HOST}: {sys.executable}" + ("" if p.ok else f" ({p.error})"))
+        if p.ok and p.playwright:
+            return _from_probe(p, SOURCE_HOST, considered)
+        return Resolution(need="deps", detail=p.error, considered=considered)
 
     # Frozen desktop app: the managed runtime is the only place playwright can live.
     if not managed:

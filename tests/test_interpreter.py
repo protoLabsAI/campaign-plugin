@@ -222,3 +222,31 @@ def test_an_overrunning_worker_is_killed_with_everything_it_started(tmp_path):
 
 def test_worker_path_is_shipped_beside_the_plugin():
     assert interpreter.WORKER.is_file() and interpreter.WORKER.parent == Path(interpreter.__file__).parent / "worker"
+
+
+def test_a_failed_host_probe_is_explained(probes, monkeypatch):
+    probes[sys.executable] = Probe(sys.executable, ok=False, error="boom: broken venv")
+    monkeypatch.setattr(interpreter, "host_has_playwright", lambda: True)
+    monkeypatch.setattr(interpreter, "frozen", lambda: False)
+    r = interpreter.resolve()
+    assert r.need == "deps" and "boom: broken venv" in " ".join(r.considered) and r.detail == "boom: broken venv"
+
+
+def test_concurrent_probes_of_one_interpreter_spawn_once(monkeypatch):
+    import threading
+
+    calls = []
+
+    def slow(py):
+        calls.append(py)
+        time.sleep(0.3)
+        return Probe(py, ok=True, playwright="1")
+
+    monkeypatch.setattr(interpreter, "_probe_uncached", slow)
+    interpreter.invalidate()
+    ts = [threading.Thread(target=interpreter.probe, args=("/same/py",)) for _ in range(5)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(10)
+    assert calls == ["/same/py"]
