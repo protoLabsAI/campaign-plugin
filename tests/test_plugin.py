@@ -62,22 +62,39 @@ def test_every_config_key_has_a_settings_row_and_vice_versa():
     assert set(MANIFEST["config"]) == {s["key"] for s in MANIFEST["settings"]}
 
 
-def test_playwright_is_declared_host_scoped_and_optional():
+def test_playwright_is_declared_runtime_scoped_and_optional():
+    # NOT host: the host process never imports playwright (a frozen app can't install it), so
+    # install-deps must route it to the managed runtime the worker runs on.
     (entry,) = MANIFEST["requires_pip"]
-    assert entry["pkg"].startswith("playwright") and entry["scope"] == "host" and entry["optional"] is True
+    assert entry["pkg"].startswith("playwright") and entry["scope"] == "runtime" and entry["optional"] is True
+
+
+def test_the_host_side_never_imports_playwright():
+    host_sources = {p.name: p.read_text(encoding="utf-8") for p in ROOT.glob("*.py")}
+    for name, src in host_sources.items():
+        assert not re.search(r"^\s*(from|import)\s+playwright", src, re.M), f"{name} imports playwright in the host"
+    worker = (ROOT / "worker" / "pw_worker.py").read_text(encoding="utf-8")
+    top = [ln for ln in worker.splitlines() if re.match(r"(from|import)\s", ln)]
+    assert not any("playwright" in ln for ln in top), "the worker imports playwright only inside functions"
+
+
+def test_the_interpreter_setting_is_behind_cores_self_config_fence():
+    # core refuses agent writes to any leaf key named interpreter/executable/command/...; a key
+    # called python_path would let an agent point the worker at a program of its choosing.
+    assert "interpreter" in MANIFEST["config"] and "python_path" not in MANIFEST["config"]
 
 
 def test_declared_capabilities_match_reality():
     # The recording browser navigates to whatever a shot script names — like agent_browser,
     # that is "*", not "no network". (v0.1.0 declared [] and under-stated the blast radius.)
     assert MANIFEST["capabilities"] == {"network": ["*"], "filesystem": "scoped"}
-    sources = "\n".join(p.read_text(encoding="utf-8") for p in ROOT.glob("*.py"))
+    sources = "\n".join(p.read_text(encoding="utf-8") for p in [*ROOT.glob("*.py"), *ROOT.glob("worker/*.py")])
     for client in ("import httpx", "import requests", "urllib.request", "aiohttp"):
         assert client not in sources, f"the plugin's Python makes no outbound calls of its own ({client})"
 
 
 def test_no_cross_plugin_imports():
-    sources = "\n".join(p.read_text(encoding="utf-8") for p in ROOT.glob("*.py"))
+    sources = "\n".join(p.read_text(encoding="utf-8") for p in [*ROOT.glob("*.py"), *ROOT.glob("worker/*.py")])
     assert not re.search(r"^\s*(from|import)\s+(social|plugins\.|agent_browser|artifact)", sources, re.M)
 
 
@@ -86,7 +103,7 @@ def test_register_contributes_tools_routers_and_the_setup_step(registry):
     campaign.register(registry)
     assert set(registry.tool_names()) == TOOLS
     assert [p for p, _ in registry.routers] == ["/plugins/campaign", "/api/plugins/campaign"]
-    assert list(registry.steps) == ["install-chromium"]
+    assert list(registry.steps) == ["install-chromium", "check-setup"]
 
 
 def test_register_survives_the_host_only_pieces_being_absent(registry):

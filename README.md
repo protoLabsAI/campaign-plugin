@@ -31,22 +31,44 @@ Missing or malformed fields fall back to this plugin's brand settings, then neut
 `logo.dark` is used on a dark card and `logo.light` on a light one; font `*_url`s are never
 fetched (cards load nothing from the network).
 
-**The recording browser's guards.** A shot script is agent-written, so the browser it drives
-never reaches this plugin's own data API (on any host — it can't open the gallery and click
-Approve), and a script's bearer token goes only to its `base_url` origin, read only from an env
-var named `CAMPAIGN_*` or listed in the **Shot-script bearer env vars** setting. The host's own
-operator/fleet token is always refused.
+**Playwright runs out of process.** The agent's own process never imports playwright. Every
+take and card is rendered by `worker/pw_worker.py`, a small self-contained script run under a
+Python that *has* playwright, picked in this order:
+
+1. the **Browser worker Python** setting (`interpreter`) when set — strict: a bad value is
+   reported, never silently replaced;
+2. the desktop app's **managed Python runtime** (Settings ▸ Tools) — where *Install
+   dependencies* puts playwright on the desktop app (the dep is declared `scope: runtime`);
+3. the agent's **own Python**, on a source/venv install (never a frozen app's binary).
+
+The job (and any bearer) goes to the worker on stdin — never argv; the worker gets an
+allowlisted environment (no host credentials); its output is bounded; and if it overruns, its
+whole process tree — Node driver and Chromium included — is killed. Chromium lives in
+Playwright's default machine-wide cache (`~/Library/Caches/ms-playwright`,
+`~/.cache/ms-playwright`, `%LOCALAPPDATA%\ms-playwright`), or `PLAYWRIGHT_BROWSERS_PATH` if
+you set it; *Install Chromium* uses the same interpreter as the worker, so they always agree.
+
+**The recording browser's guards** (enforced inside the worker). A shot script is
+agent-written, so the browser it drives never reaches this plugin's own data API (on any host —
+it can't open the gallery and click Approve), and a script's bearer token goes only to its
+`base_url` origin, read only from an env var named `CAMPAIGN_*` or listed in the **Shot-script
+bearer env vars** setting. The host's own operator/fleet token is always refused. A card page
+loads nothing from the network at all.
 
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.1.1`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.1.1`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.2.0`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.2.0`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
-   - **Install dependencies** installs the `playwright` Python package into the agent.
-   - **Install Chromium** downloads Playwright's headless Chromium (~150 MB). Only ever from
-     that button — never as a side effect of a tool call.
+   - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —
+     that's where playwright runs. The banner says so, with a button to get there.
+   - **Install dependencies** installs the `playwright` package — into the managed runtime on
+     the desktop app, into the agent's venv on a source install.
+   - **Install Chromium** downloads Playwright's headless Chromium (~150 MB) with that same
+     Python. Only ever from that button — never as a side effect of a tool call.
+   - **Check again** re-probes after a fix made elsewhere (any media tool call does too).
    - **ffmpeg** is a system binary: `brew install ffmpeg` / `sudo apt install ffmpeg` /
      `winget install Gyan.FFmpeg`, or set **ffmpeg path**.
    Planning works without any of these; the media tools say exactly what's missing.
@@ -126,7 +148,9 @@ plan as sourced, dated assumptions.
 
 ## Settings
 
-`data_dir` (blank = the host's per-instance plugin store), `ffmpeg_path`, `brand_kit_path`
+`data_dir` (blank = the host's per-instance plugin store), `ffmpeg_path`, `interpreter` (a
+Python with playwright for the browser worker; blank = managed runtime, else the agent's own —
+named so core's agent self-config fence refuses agent writes to it), `brand_kit_path`
 (a Social Studio kit to read; blank auto-detects), `brand_name` / `brand_colors` /
 `brand_fonts` / `brand_logo` (fallbacks), `limit_overrides`, `bearer_envs` (extra env-var
 names a shot script may use as its bearer), `producer_model`.
@@ -141,9 +165,13 @@ uv run ruff check . && uv run ruff format --check .
 ```
 
 The suite is host-free: it bootstraps the plugin as a synthetic package (`tests/conftest.py`),
-mocks Playwright at `sync_playwright()` and ffmpeg at its runner, and keeps ONE real
-end-to-end take (a tiny local page → real Chromium → real ffmpeg) marked `integration`. CI runs
-both: the unit job, and an integration job that installs Chromium + ffmpeg.
+runs the REAL worker code in-process against a fake `sync_playwright()` (the job still
+round-trips through JSON), fakes ffmpeg at its runner, and exercises the subprocess machinery
+for real (interpreter probe, stdin-only secrets, bounded output, kill of an overrunning process
+tree). The `integration` tests drive real Chromium through the real worker process: a take →
+render, the fence + bearer scoping inside the worker, a card that can't phone home, a hung
+browser that gets killed, and a shoot + card from a host process that is forbidden to import
+playwright. CI runs both: the unit job, and an integration job that installs Chromium + ffmpeg.
 
 **Release ritual:** bump `version` in `protoagent.plugin.yaml`, `pyproject.toml` and
 `__init__.__version__` together (a test enforces lockstep), `uv lock`, and land a

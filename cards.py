@@ -1,4 +1,4 @@
-"""Cards — branded HTML/CSS templates rendered to PNG through Playwright.
+"""Cards — branded HTML/CSS templates rendered to PNG by the out-of-process Playwright worker.
 
 Bundled templates live in ``templates/<id>.html``; each id ends in its pixel size, which is
 the default render size. Every value from ``data`` is HTML-escaped before it reaches the
@@ -8,6 +8,9 @@ the network.
 A card that must meet a hard limit (``limit``, e.g. ``github_social_preview`` < 1 MB) is
 re-rendered as JPEG at stepped quality when the PNG is over — and reported, not silently
 shipped, if even that doesn't fit.
+
+The page is built HERE (escaping, brand look, inlined images); only the finished HTML goes to
+the worker, which aborts every network request the page makes.
 """
 
 from __future__ import annotations
@@ -19,10 +22,12 @@ from typing import Any, Callable
 
 from . import brand as brandmod
 from . import limits
+from .worker import pw_worker
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 DEFAULT_LIMITS = {"og-1280x640": "github_social_preview"}
 TEXT_KEYS = ("title", "subtitle", "eyebrow", "url", "footer", "brand")
+CARD_TIMEOUT_S = 120.0
 _SIZE_RE = re.compile(r"^(\d{2,4})x(\d{2,4})$")
 
 BASE_CSS = """
@@ -175,12 +180,6 @@ def build_html(template: str, data: dict[str, Any], size: tuple[int, int], look:
     )
 
 
-def _default_factory():
-    from playwright.sync_api import sync_playwright
-
-    return sync_playwright()
-
-
 def render(
     template: str,
     data: dict[str, Any],
@@ -204,39 +203,22 @@ def render(
     max_bytes = int(row["max_bytes"]) if row and row.get("max_bytes") else None
     out_path = Path(out_path).with_suffix(".png")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    factory = playwright_factory or _default_factory
+    from . import shoot  # the worker runner (and its fence) lives with the shoot
 
-    def _work() -> dict[str, Any]:
-        attempts: list[dict[str, Any]] = []
-        with factory() as pw:
-            browser = pw.chromium.launch(headless=True)
-            try:
-                page = browser.new_page(viewport={"width": w, "height": h}, device_scale_factor=1)
-                page.set_content(page_html, wait_until="load")
-                try:
-                    page.evaluate("document.fonts && document.fonts.ready.then(() => true)")
-                except Exception:  # noqa: BLE001 — fonts.ready is a nicety
-                    pass
-                page.screenshot(path=str(out_path), type="png")
-                final = out_path
-                attempts.append({"format": "png", "size_bytes": out_path.stat().st_size})
-                if max_bytes and out_path.stat().st_size > max_bytes:
-                    jpg = out_path.with_suffix(".jpg")
-                    for q in (92, 86, 80, 72, 64):
-                        page.screenshot(path=str(jpg), type="jpeg", quality=q)
-                        attempts.append({"format": "jpeg", "quality": q, "size_bytes": jpg.stat().st_size})
-                        final = jpg
-                        if jpg.stat().st_size <= max_bytes:
-                            break
-                    if final == jpg:
-                        out_path.unlink(missing_ok=True)
-            finally:
-                browser.close()
-        return {"path": str(final), "attempts": attempts}
-
-    from .threads import in_thread
-
-    res = in_thread(_work, 120, name="campaign-card")
+    job = {
+        "v": pw_worker.JOB_VERSION,
+        "kind": "card",
+        "html": page_html,
+        "out_path": str(out_path),
+        "width": w,
+        "height": h,
+        "max_bytes": max_bytes,
+        "fence": shoot.fence(),
+    }
+    report = shoot.run_worker(job, CARD_TIMEOUT_S, playwright_factory)
+    if not report.get("ok"):
+        raise shoot.WorkerError(f"the card didn't render: {report.get('error') or 'unknown error'}")
+    res = report["result"]
     final = Path(res["path"])
     size_bytes = final.stat().st_size
     violations = (

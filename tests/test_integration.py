@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from campaign import render, shoot
 from campaign.shotscript import validate
+from campaign.worker import pw_worker
 from conftest import have_chromium, have_ffmpeg
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>tiny</title>
@@ -118,7 +119,7 @@ def test_redaction_really_rewrites_the_page(site, tmp_path):
         with sync_playwright() as pw:
             b = pw.chromium.launch(headless=True)
             ctx = b.new_context()
-            ctx.add_init_script(shoot._redact_init_js(shoot.redact_rules(script["redact"])))
+            ctx.add_init_script(pw_worker.redact_init_js(pw_worker.redact_rules(script["redact"])))
             page = ctx.new_page()
             page.goto(site + "/index.html")
             page.wait_for_timeout(200)

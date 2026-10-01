@@ -20,7 +20,7 @@ import logging
 
 log = logging.getLogger("protoagent.plugins.campaign")
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 
 def _host_store(registry) -> str:
@@ -45,7 +45,7 @@ def register(registry) -> None:
         paths.configure(str(cfg.get("data_dir", "") or ""), _host_store(registry))
         for w in limits.configure(cfg.get("limit_overrides", "")):
             log.warning("[campaign] %s", w)
-        deps.configure(str(cfg.get("ffmpeg_path", "") or ""))
+        deps.configure(str(cfg.get("ffmpeg_path", "") or ""), str(cfg.get("interpreter", "") or ""))
         shoot.configure(cfg.get("bearer_envs", ""))
 
         # registry.host's services are populated by the server AFTER register() runs, so
@@ -58,8 +58,9 @@ def register(registry) -> None:
     except Exception:
         log.exception("[campaign] configuring failed")
 
-    # Setup: the Install Chromium button (registered BEFORE the first report so its banner
-    # button already works), then the probe → setup-gap banners. Never installs on its own.
+    # Setup: the Install Chromium + Check again buttons (registered BEFORE the first report so
+    # the banner's buttons already work), then the probe → setup-gap banners. Never installs on
+    # its own. Probing spawns the candidate interpreter once (stdlib-only, no browser).
     def _refresh() -> None:
         deps.report(registry)
 
@@ -67,12 +68,15 @@ def register(registry) -> None:
     if callable(add_step):
         try:
             add_step(deps.STEP_INSTALL_CHROMIUM, lambda: deps.install_chromium(_refresh))
+            add_step(deps.STEP_RECHECK, lambda: deps.recheck(_refresh))
         except Exception:
             log.exception("[campaign] registering the setup step failed")
     try:
         probe = deps.report(registry)
         log.info(
-            "[campaign] setup: playwright=%s chromium=%s ffmpeg=%s",
+            "[campaign] setup: worker python=%s (%s) playwright=%s chromium=%s ffmpeg=%s",
+            probe["python"] or "-",
+            probe["python_source"] or "none",
             probe["playwright"],
             probe["chromium"],
             probe["ffmpeg"],

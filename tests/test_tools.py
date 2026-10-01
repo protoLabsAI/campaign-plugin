@@ -8,7 +8,7 @@ from pathlib import Path
 import campaign
 import pytest
 from campaign import deps, render, shoot, store
-from conftest import FakePlaywright
+from conftest import FakePlaywright, in_process_worker
 from test_render import FakeFF
 
 
@@ -22,10 +22,7 @@ def tools(registry):
 def browser_ok(monkeypatch):
     pw = FakePlaywright()
     monkeypatch.setattr(deps, "need_browser", lambda: None)
-    monkeypatch.setattr(shoot, "_default_factory", pw)
-    from campaign import cards
-
-    monkeypatch.setattr(cards, "_default_factory", pw)
+    monkeypatch.setattr(shoot, "run_worker", in_process_worker(pw))
     return pw
 
 
@@ -134,7 +131,9 @@ def test_shoot_failure_is_actionable(tools, browser_ok):
 
 
 def test_shoot_without_a_browser_says_how_to_fix_it(tools, monkeypatch):
-    monkeypatch.setattr(deps, "playwright_installed", lambda: False)
+    from campaign.interpreter import Resolution
+
+    monkeypatch.setattr(deps, "resolve", lambda: Resolution(need="deps"))
     call(tools, "campaign_create", name="L")
     assert "Install dependencies" in call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT)
 

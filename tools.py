@@ -142,12 +142,13 @@ def campaign_brief(campaign_id: int) -> str:
         for m in store.milestones(campaign_id)
     ] or ["(none yet)"]
     out.append("\n## Decisions")
-    for d in store.decisions(campaign_id):
+    decisions = store.decisions(campaign_id)
+    for d in decisions:
         opts = " / ".join(d["options"]) if d["options"] else ""
         ans = f" → **{d['answer']}**" if d["answer"] else " → (open)"
         rec = f" (recommend: {d['recommendation']})" if d["recommendation"] else ""
         out.append(f"- #{d['id']} {d['question']} [{opts}]{rec}{ans}")
-    if not store.decisions(campaign_id):
+    if not decisions:
         out.append("(none yet)")
     scripts = store.scripts(campaign_id)
     if scripts:
@@ -502,9 +503,11 @@ def build_tools(registry):
 
     @tool
     def campaign_setup() -> str:
-        """Check what media production needs on this machine — the playwright package, its
-        headless Chromium, and ffmpeg/ffprobe — and say exactly how to fix anything missing.
-        Installing is the operator's call (setup banner buttons); this never installs."""
+        """Check what media production needs on this machine — a Python with the playwright
+        package (the browser runs out of process), its headless Chromium, and ffmpeg/ffprobe —
+        and say exactly how to fix anything missing. Installing is the operator's call (setup
+        banner buttons); this never installs."""
+        deps.recheck(lambda: deps.report(registry))
         return deps.brief()
 
     # ── shot scripts ─────────────────────────────────────────────────────────

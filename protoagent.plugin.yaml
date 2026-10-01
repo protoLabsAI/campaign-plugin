@@ -1,6 +1,6 @@
 id: campaign
 name: Campaign Studio
-version: 0.1.1
+version: 0.2.0
 description: >-
   Campaign plans and deterministic, repeatable media production for launching ANY app or
   product. Plans hold the goal and its math, lanes, a shot list of assets (who records what),
@@ -22,25 +22,33 @@ min_protoagent_version: "0.188.0"
 # Declarative posture (ADR 0071). The plugin's Python makes no outbound calls and holds no
 # credentials — but its recording browser (Playwright) loads whatever `base_url` / `goto` URLs a
 # shot script names, and that page pulls in whatever it links to. So, like agent_browser: "*".
-# Guards: the browser never reaches this plugin's own data API (no self-approval), and a script's
-# bearer goes only to its base_url origin, read only from CAMPAIGN_* / `bearer_envs` env vars.
-# Card rendering loads nothing remote (images are inlined; brand-kit font URLs are not fetched).
+# Guards (enforced inside the out-of-process browser worker): the browser never reaches this
+# plugin's own data API (no self-approval), and a script's bearer goes only to its base_url
+# origin, read only from CAMPAIGN_* / `bearer_envs` env vars and handed to the worker on stdin.
+# Card rendering loads nothing remote (every request from a card page is aborted).
 capabilities:
   network: ["*"]
   filesystem: scoped        # the plan db + every take/render/card, under the plugin data dir
 enabled: false              # author default — operators opt in via plugins.enabled
 
-# Declared, NOT auto-installed (ADR 0027 D4). `scope: host` because the tools import
-# playwright IN THIS PROCESS; `optional` because planning works without it and every media tool
-# degrades to an actionable message. Its Chromium (~150 MB) installs only from the setup
-# banner's Install Chromium button. ffmpeg is a system binary — the banner says how to get it.
+# Declared, NOT auto-installed (ADR 0027 D4). `scope: runtime` because the plugin NEVER imports
+# playwright in the host process: every browser runs in worker/pw_worker.py under a separate
+# interpreter (interpreter setting → the managed Python runtime → the agent's own Python when
+# not frozen). So on the desktop app Install dependencies pips it into the managed runtime
+# (ADR 0094 P2 — provision it first in Settings ▸ Tools); on a source install, into the agent's
+# venv. A frozen app can't add playwright to ITSELF (platform wheels + a Node driver), which is
+# why v0.1's `scope: host` could never be satisfied there. `optional` because planning works
+# without it and every media tool degrades to an actionable message. Its Chromium (~150 MB)
+# installs only from the banner's Install Chromium button, with that same interpreter. ffmpeg is
+# a system binary — the banner says how to get it.
 requires_pip:
-  - { pkg: "playwright>=1.45", optional: true, scope: host }
+  - { pkg: "playwright>=1.45", optional: true, scope: runtime }
 
 config_section: campaign
 config:
   data_dir: ""              # plan db + media; blank = the host's per-instance plugin store
   ffmpeg_path: ""           # blank = ffmpeg on PATH (ffprobe is looked up beside it)
+  interpreter: ""           # Python that runs the browser worker; blank = managed runtime, else the agent's own
   brand_kit_path: ""        # Social Studio brand-kit YAML to READ colours/fonts/logo from; blank = auto-detect
   brand_name: ""            # fallbacks when no brand kit sets them
   brand_colors: ""          # "bg=#0d0f14, fg=#f4f5f7, accent=#7c5cff, muted=#9aa0ac"
@@ -52,6 +60,7 @@ config:
 settings:
   - { key: data_dir, label: "Data directory", type: string, group: "Campaign Studio", description: "Where the campaign database and every take, render and card live. Blank uses the host's per-instance plugin store." }
   - { key: ffmpeg_path, label: "ffmpeg path", type: string, group: "Campaign Studio", description: "Absolute path to ffmpeg when it isn't on PATH. ffprobe is looked up next to it." }
+  - { key: interpreter, label: "Browser worker Python", type: string, group: "Campaign Studio", description: "Absolute path to a Python interpreter that has the playwright package, used to run the out-of-process browser worker. Blank uses the desktop app's managed Python runtime (Settings ▸ Tools), or the agent's own Python on a source install." }
   - { key: brand_kit_path, label: "Brand kit file", type: string, group: "Brand look", description: "A Social Studio brand-kit YAML to read card colours, fonts and logo from (visual.colors / visual.fonts / visual.logo). Blank auto-detects Social Studio's kit. Read-only — this plugin never writes it." }
   - { key: brand_name, label: "Brand name", type: string, group: "Brand look", description: "Fallback brand name for cards when no brand kit provides one." }
   - { key: brand_colors, label: "Brand colours", type: string, group: "Brand look", description: "Fallback card colours as hex pairs, e.g. bg=#0d0f14, fg=#f4f5f7, accent=#7c5cff, muted=#9aa0ac." }
