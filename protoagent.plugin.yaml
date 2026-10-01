@@ -1,6 +1,6 @@
 id: campaign
 name: Campaign Studio
-version: 0.2.0
+version: 0.2.1
 description: >-
   Campaign plans and deterministic, repeatable media production for launching ANY app or
   product. Plans hold the goal and its math, lanes, a shot list of assets (who records what),
@@ -57,10 +57,14 @@ config:
   limit_overrides: ""       # YAML: {limit_id: {max_bytes: 100000000, source: ..., as_of: ...}}
   producer_model: ""        # model override for the campaign_producer subagent; blank = host routing
   bearer_envs: ""           # extra env-var NAMES a shot script may use as auth.bearer_env (CAMPAIGN_* always may)
+# `spawns: true` marks a setting that names a program this plugin RUNS, so the agent's own
+# set_config tool refuses to write it (protoAgent ADR 0019 §3b) — the operator sets it from
+# Settings. `interpreter` is also fenced by name; `ffmpeg_path` is fenced only by the marker.
+# Older cores ignore the field.
 settings:
   - { key: data_dir, label: "Data directory", type: string, group: "Campaign Studio", description: "Where the campaign database and every take, render and card live. Blank uses the host's per-instance plugin store." }
-  - { key: ffmpeg_path, label: "ffmpeg path", type: string, group: "Campaign Studio", description: "Absolute path to ffmpeg when it isn't on PATH. ffprobe is looked up next to it." }
-  - { key: interpreter, label: "Browser worker Python", type: string, group: "Campaign Studio", description: "Absolute path to a Python interpreter that has the playwright package, used to run the out-of-process browser worker. Blank uses the desktop app's managed Python runtime (Settings ▸ Tools), or the agent's own Python on a source install." }
+  - { key: ffmpeg_path, label: "ffmpeg path", type: string, spawns: true, group: "Campaign Studio", description: "Absolute path to ffmpeg when it isn't on PATH. ffprobe is looked up next to it." }
+  - { key: interpreter, label: "Browser worker Python", type: string, spawns: true, group: "Campaign Studio", description: "Absolute path to a Python interpreter that has the playwright package, used to run the out-of-process browser worker. Blank uses the desktop app's managed Python runtime (Settings ▸ Tools), or the agent's own Python on a source install." }
   - { key: brand_kit_path, label: "Brand kit file", type: string, group: "Brand look", description: "A Social Studio brand-kit YAML to read card colours, fonts and logo from (visual.colors / visual.fonts / visual.logo). Blank auto-detects Social Studio's kit. Read-only — this plugin never writes it." }
   - { key: brand_name, label: "Brand name", type: string, group: "Brand look", description: "Fallback brand name for cards when no brand kit provides one." }
   - { key: brand_colors, label: "Brand colours", type: string, group: "Brand look", description: "Fallback card colours as hex pairs, e.g. bg=#0d0f14, fg=#f4f5f7, accent=#7c5cff, muted=#9aa0ac." }

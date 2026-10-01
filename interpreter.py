@@ -7,9 +7,9 @@ that HAS playwright, resolved in this order:
 1. **``interpreter`` setting** — explicit, and strict: if it's set, it's the only candidate,
    and a bad value is reported rather than silently replaced by another interpreter.
 2. **The managed Python runtime** (ADR 0094 P2, Settings ▸ Tools) — where the desktop app's
-   *Install dependencies* puts a ``scope: runtime`` dep. Read through core's
-   ``infra.python_runtime.managed_python_exe()`` (lazy + guarded — there is no plugin SDK
-   accessor for it yet). Counts only if playwright is installed in it.
+   *Install dependencies* puts a ``scope: runtime`` dep. Read through the SDK's
+   ``sdk.managed_python_exe()``, or core's ``infra.python_runtime.managed_python_exe()`` on
+   a core that predates it (lazy + guarded). Counts only if playwright is installed in it.
 3. **This process's own interpreter** — only when NOT frozen (a frozen ``sys.executable`` is
    the server binary, not a Python) and playwright is findable here. That's every source /
    venv install, where *Install dependencies* pips into the agent's own venv.
@@ -71,15 +71,12 @@ def frozen() -> bool:
 def managed_python() -> str | None:
     """The managed runtime's interpreter, or None (not provisioned / host too old / no host).
 
-    SEAM: core has no public plugin-SDK accessor for this; ``infra.python_runtime`` is what
-    core's own execute_code uses. Imported lazily and fully guarded so a refactor there
-    degrades to "not provisioned", never an exception."""
-    try:
-        import infra.python_runtime as pr  # host import — lazy
-    except Exception:  # noqa: BLE001 — no host (tests, standalone)
-        return None
-    fn = getattr(pr, "managed_python_exe", None)
-    if not callable(fn):
+    SEAM: prefers the public ``graph.sdk.managed_python_exe()`` (protoAgent#3992). On an
+    older core without it, falls back to ``infra.python_runtime.managed_python_exe()`` —
+    the internal that execute_code uses. Both are imported lazily and fully guarded, so a
+    missing host or a refactor degrades to "not provisioned", never an exception."""
+    fn = _managed_python_lookup()
+    if fn is None:
         return None
     try:
         exe = fn()
@@ -87,6 +84,25 @@ def managed_python() -> str | None:
         log.debug("[campaign] managed runtime lookup failed", exc_info=True)
         return None
     return str(exe) if exe else None
+
+
+def _managed_python_lookup():
+    """The host's managed-runtime lookup: the SDK accessor when the core has it, else the
+    ``infra`` internal (cores before protoAgent#3992), else None (no host)."""
+    try:
+        from graph import sdk  # host import — lazy
+
+        fn = getattr(sdk, "managed_python_exe", None)
+        if callable(fn):
+            return fn
+    except Exception:  # noqa: BLE001 — no host, or an SDK that fails to import
+        pass
+    try:
+        import infra.python_runtime as pr  # host import — lazy; the pre-SDK fallback
+    except Exception:  # noqa: BLE001 — no host (tests, standalone)
+        return None
+    fn = getattr(pr, "managed_python_exe", None)
+    return fn if callable(fn) else None
 
 
 def host_has_playwright() -> bool:

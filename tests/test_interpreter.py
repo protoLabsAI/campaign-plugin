@@ -106,6 +106,55 @@ def test_managed_python_seam_reads_cores_function(monkeypatch, tmp_path):
     assert interpreter.managed_python() is None, "a renamed seam degrades, it doesn't raise"
 
 
+def _fake_host(monkeypatch, *, sdk_fn=None, infra_fn=None):
+    """Install a fake `graph.sdk` (with or without the accessor) and `infra.python_runtime`."""
+    import types
+
+    graph = types.ModuleType("graph")
+    sdk = types.ModuleType("graph.sdk")
+    if sdk_fn is not None:
+        sdk.managed_python_exe = sdk_fn
+    graph.sdk = sdk
+    monkeypatch.setitem(sys.modules, "graph", graph)
+    monkeypatch.setitem(sys.modules, "graph.sdk", sdk)
+    pr = types.ModuleType("infra.python_runtime")
+    if infra_fn is not None:
+        pr.managed_python_exe = infra_fn
+    monkeypatch.setitem(sys.modules, "infra", types.ModuleType("infra"))
+    monkeypatch.setitem(sys.modules, "infra.python_runtime", pr)
+
+
+def test_managed_python_prefers_the_public_sdk_accessor(monkeypatch, tmp_path):
+    monkeypatch.setattr(interpreter, "managed_python", REAL_MANAGED_PYTHON)
+    _fake_host(
+        monkeypatch, sdk_fn=lambda: tmp_path / "sdk" / "python3", infra_fn=lambda: tmp_path / "infra" / "python3"
+    )
+    assert interpreter.managed_python() == str(tmp_path / "sdk" / "python3")
+
+
+def test_managed_python_falls_back_to_infra_on_an_older_core(monkeypatch, tmp_path):
+    """A core before protoAgent#3992 has `graph.sdk` but no `managed_python_exe` on it."""
+    monkeypatch.setattr(interpreter, "managed_python", REAL_MANAGED_PYTHON)
+    _fake_host(monkeypatch, sdk_fn=None, infra_fn=lambda: tmp_path / "infra" / "python3")
+    assert interpreter.managed_python() == str(tmp_path / "infra" / "python3")
+
+
+def test_sdk_accessor_saying_not_provisioned_is_final(monkeypatch, tmp_path):
+    """None from the SDK means not provisioned — no second opinion from the internal."""
+    monkeypatch.setattr(interpreter, "managed_python", REAL_MANAGED_PYTHON)
+    _fake_host(monkeypatch, sdk_fn=lambda: None, infra_fn=lambda: tmp_path / "infra" / "python3")
+    assert interpreter.managed_python() is None
+
+
+def test_a_raising_sdk_accessor_degrades(monkeypatch):
+    def boom():
+        raise OSError("nope")
+
+    monkeypatch.setattr(interpreter, "managed_python", REAL_MANAGED_PYTHON)
+    _fake_host(monkeypatch, sdk_fn=boom)
+    assert interpreter.managed_python() is None
+
+
 # ── the real probe ────────────────────────────────────────────────────────────
 def test_the_worker_probe_runs_for_real_on_this_interpreter():
     interpreter.invalidate()

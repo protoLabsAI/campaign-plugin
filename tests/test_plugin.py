@@ -62,6 +62,14 @@ def test_every_config_key_has_a_settings_row_and_vice_versa():
     assert set(MANIFEST["config"]) == {s["key"] for s in MANIFEST["settings"]}
 
 
+def test_settings_that_name_a_program_to_run_are_marked_spawns():
+    """The agent's set_config may tune this plugin, but must never point it at a binary it
+    then runs (protoAgent ADR 0019 §3b). `ffmpeg_path` has no name the core fence can see,
+    so the marker is the only thing fencing it; data paths must stay unmarked."""
+    spawns = {s["key"] for s in MANIFEST["settings"] if s.get("spawns") is True}
+    assert spawns == {"ffmpeg_path", "interpreter"}
+
+
 def test_playwright_is_declared_runtime_scoped_and_optional():
     # NOT host: the host process never imports playwright (a frozen app can't install it), so
     # install-deps must route it to the managed runtime the worker runs on.
