@@ -1,0 +1,59 @@
+name: CI
+
+# Lint + test the plugin. Runs on the org's Namespace Linux profile (not a GitHub-hosted
+# runner) to keep CI cost down; a fork without the profile overrides the NSC_RUNNER variable.
+#
+# Two jobs: `test` is the host-free unit suite (Playwright mocked at its boundary — the
+# integration tests skip themselves). `integration` installs a real headless Chromium and
+# ffmpeg and runs ONLY the `integration`-marked tests: a real take of a tiny local page, a
+# real render, a real card.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ vars.NSC_RUNNER || 'namespace-profile-protolabs-linux' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt ruff
+
+      - name: Lint
+        run: ruff check . && ruff format --check .
+
+      - name: Test
+        run: pytest -q -m "not integration"
+
+  integration:
+    runs-on: ${{ vars.NSC_RUNNER || 'namespace-profile-protolabs-linux' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dev deps
+        run: pip install -r requirements-dev.txt
+
+      - name: Install Chromium + ffmpeg
+        run: |
+          python -m playwright install --with-deps chromium
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          fi
+          ffmpeg -version | head -1
+
+      - name: Integration tests
+        # -rs prints skip reasons: a green run that silently skipped everything proves nothing.
+        run: pytest -q -m integration -rs
