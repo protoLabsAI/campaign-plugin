@@ -46,8 +46,14 @@ def register(registry) -> None:
         for w in limits.configure(cfg.get("limit_overrides", "")):
             log.warning("[campaign] %s", w)
         deps.configure(str(cfg.get("ffmpeg_path", "") or ""))
-        host = getattr(registry, "host", None)
-        brand.configure(cfg, getattr(host, "config", None) if host is not None else None)
+
+        # registry.host's services are populated by the server AFTER register() runs, so
+        # resolve host.config at call time rather than capturing a None now.
+        def _host_config():
+            fn = getattr(getattr(registry, "host", None), "config", None)
+            return fn() if callable(fn) else None
+
+        brand.configure(cfg, _host_config)
     except Exception:
         log.exception("[campaign] configuring failed")
 

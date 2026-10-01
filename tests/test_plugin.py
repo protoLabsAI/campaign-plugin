@@ -110,6 +110,27 @@ def test_register_threads_config_through(tmp_path, registry, monkeypatch):
     assert brand.resolve()["name"] == "Acme"
 
 
+def test_social_kit_lookup_reads_host_config_lazily(tmp_path, registry):
+    # The server fills registry.host AFTER register() — the lookup must not capture a None.
+    from campaign import brand
+
+    kit = tmp_path / "s" / "brand-kit.yaml"
+    kit.parent.mkdir()
+    kit.write_text("brand: Lateco\n")
+
+    class Host:
+        config = None
+
+    registry.host = Host()
+    campaign.register(registry)
+
+    class Cfg:
+        plugin_config = {"social": {"data_dir": str(kit.parent)}}
+
+    registry.host.config = lambda: Cfg()
+    assert brand.resolve()["name"] == "Lateco"
+
+
 def test_every_tool_ships_a_real_description(registry):
     campaign.register(registry)
     for t in registry.tools:
