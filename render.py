@@ -1,0 +1,386 @@
+"""Render — a recorded take → shareable outputs, via ffmpeg on PATH.
+
+Each output spec says what to cut and how to ship it::
+
+    {"name": "hero", "format": "mp4",           # mp4 | gif | poster
+     "start": "start", "end": "end",            # seconds, or a mark name from the take
+     "speed": [{"from": "typed", "to": "dialog", "factor": 4}],   # ramp dead time
+     "crop": {"x": 0, "y": 0, "width": 2560, "height": 1440},     # source pixels
+     "width": 1280, "fps": 30,
+     "limit": "github_attachment_video_free",   # a hard-limit id (limits.py) …
+     "max_bytes": 8000000}                      # … and/or an explicit ceiling
+
+* **mp4** — H.264, yuv420p, ``+faststart``; when there's a size ceiling it steps CRF up,
+  then width down, until the file fits.
+* **gif** — palettegen/paletteuse (``stats_mode=diff``, bayer dither, rectangle diffs);
+  steps fps and width down until the file fits.
+* **poster** — one PNG frame at ``at`` (default: the start).
+
+An output that still doesn't fit after its ladder is kept (so the operator can look) but is
+reported with its violations, and the review gate refuses to offer it as ready.
+
+The ffmpeg runner is injectable so the suite tests command building with no ffmpeg present.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+from pathlib import Path
+from typing import Any, Callable
+
+from . import deps, limits
+
+FORMATS = ("mp4", "gif", "poster")
+Runner = Callable[[list[str]], subprocess.CompletedProcess]
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+class RenderError(RuntimeError):
+    pass
+
+
+def _default_runner(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+
+def _ff(runner: Runner, cmd: list[str]) -> None:
+    res = runner(cmd)
+    if res.returncode != 0:
+        tail = "\n".join((res.stderr or "").strip().splitlines()[-6:])
+        raise RenderError(f"ffmpeg failed ({res.returncode}): {tail or 'no output'}")
+
+
+# ── probing ──────────────────────────────────────────────────────────────────
+def probe(path: str | Path, runner: Runner | None = None) -> dict[str, Any]:
+    """{width, height, duration_s, size_bytes} for a media file (ffprobe)."""
+    runner = runner or _default_runner
+    fp = deps.ffprobe()
+    if not fp:
+        raise RenderError("ffprobe isn't available — it ships with ffmpeg; " + deps.ffmpeg_hint())
+    p = Path(path)
+    res = runner(
+        [
+            fp,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,duration:format=duration",
+            "-of",
+            "json",
+            str(p),
+        ]
+    )
+    if res.returncode != 0:
+        raise RenderError(f"ffprobe couldn't read {p.name}: {(res.stderr or '').strip()[:300]}")
+    data = json.loads(res.stdout or "{}")
+    stream = (data.get("streams") or [{}])[0]
+    dur = _num(stream.get("duration")) or _num((data.get("format") or {}).get("duration"))
+    if not dur and p.suffix.lower() in (".webm", ".mkv"):
+        # Playwright's webm carries no duration header — read the last packet's timestamp.
+        res2 = runner(
+            [fp, "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(p)]
+        )
+        stamps = [_num(x) for x in (res2.stdout or "").split()]
+        stamps = [s for s in stamps if s is not None]
+        dur = max(stamps) if stamps else 0.0
+    return {
+        "width": int(stream.get("width") or 0),
+        "height": int(stream.get("height") or 0),
+        "duration_s": round(float(dur or 0), 3),
+        "size_bytes": p.stat().st_size if p.exists() else 0,
+    }
+
+
+def _num(v: Any) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f else None  # NaN guard
+
+
+# ── spec handling ────────────────────────────────────────────────────────────
+def resolve_time(value: Any, marks: dict[str, float], what: str) -> float | None:
+    """Seconds from a number, a mark name, or ``mark:<name>``. None = not given."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    s = str(value).strip()
+    if s.startswith("mark:"):
+        s = s[5:]
+    if s in marks:
+        return float(marks[s])
+    try:
+        return float(s)
+    except ValueError:
+        known = ", ".join(sorted(marks)) or "none recorded"
+        raise RenderError(f"{what}: {value!r} is neither seconds nor a mark of this take (marks: {known})") from None
+
+
+def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: float) -> dict[str, Any]:
+    if not isinstance(spec, dict):
+        raise RenderError(f"each output must be a mapping, got {spec!r}")
+    name = str(spec.get("name") or "")
+    if not _NAME_RE.match(name):
+        raise RenderError(f"output name {name!r} must be short: letters, digits, - _ .")
+    fmt = str(spec.get("format") or "").lower()
+    if fmt not in FORMATS:
+        raise RenderError(f"output {name}: format must be one of {', '.join(FORMATS)}")
+    start = resolve_time(spec.get("start"), marks, f"{name}.start") or 0.0
+    end = resolve_time(spec.get("end"), marks, f"{name}.end")
+    end = duration if end is None or (duration and end > duration) else end
+    if duration and start >= duration:
+        raise RenderError(f"output {name}: start {start:.2f}s is past the end of the take ({duration:.2f}s)")
+    if end is not None and end <= start:
+        raise RenderError(f"output {name}: end ({end:.2f}s) must be after start ({start:.2f}s)")
+    ramps = []
+    for r in spec.get("speed") or []:
+        a = resolve_time(r.get("from"), marks, f"{name}.speed.from")
+        b = resolve_time(r.get("to"), marks, f"{name}.speed.to")
+        f = float(r.get("factor") or 1)
+        if a is None or b is None or b <= a:
+            raise RenderError(f"output {name}: each speed ramp needs from < to")
+        if not 0.25 <= f <= 32:
+            raise RenderError(f"output {name}: speed factor {f} is outside 0.25..32")
+        ramps.append((max(a, start), min(b, end) if end is not None else b, f))
+    ramps.sort()
+    for (a1, b1, _), (a2, _b2, _) in zip(ramps, ramps[1:]):
+        if a2 < b1:
+            raise RenderError(f"output {name}: speed ramps overlap ({a1:.2f}–{b1:.2f} and {a2:.2f}…)")
+    crop = spec.get("crop")
+    if crop is not None:
+        try:
+            crop = {k: int(crop[k]) for k in ("x", "y", "width", "height")}
+        except (KeyError, TypeError, ValueError):
+            raise RenderError(f"output {name}: crop needs integer x, y, width, height") from None
+        crop["width"] -= crop["width"] % 2
+        crop["height"] -= crop["height"] % 2
+    max_bytes = spec.get("max_bytes")
+    limit_id = str(spec.get("limit") or "")
+    if limit_id:
+        row = limits.get(limit_id)
+        if row is None:
+            raise RenderError(f"output {name}: unknown limit {limit_id!r} — campaign_limits lists them")
+        if row.get("max_bytes"):
+            max_bytes = min(int(max_bytes), int(row["max_bytes"])) if max_bytes else int(row["max_bytes"])
+    return {
+        "name": name,
+        "format": fmt,
+        "start": start,
+        "end": end,
+        "ramps": ramps,
+        "crop": crop,
+        "width": int(spec["width"]) if spec.get("width") else None,
+        "fps": float(spec["fps"]) if spec.get("fps") else None,
+        "crf": int(spec.get("crf") or 23),
+        "max_bytes": int(max_bytes) if max_bytes else None,
+        "limit": limit_id,
+        "at": resolve_time(spec.get("at"), marks, f"{name}.at"),
+        "title": str(spec.get("title") or ""),
+    }
+
+
+def segments(
+    start: float, end: float | None, ramps: list[tuple[float, float, float]]
+) -> list[tuple[float, float | None, float]]:
+    """Split [start, end] into (a, b, speed) pieces around the ramps."""
+    out: list[tuple[float, float | None, float]] = []
+    cur = start
+    for a, b, f in ramps:
+        if end is not None and a >= end:
+            break
+        if a > cur:
+            out.append((cur, a, 1.0))
+        out.append((max(a, cur), b, f))
+        cur = b
+    if end is None or cur < end:
+        out.append((cur, end, 1.0))
+    return [s for s in out if s[1] is None or s[1] - s[0] > 0.01]
+
+
+def _fmt(t: float) -> str:
+    return f"{t:.3f}".rstrip("0").rstrip(".") or "0"
+
+
+def timeline_filter(segs: list[tuple[float, float | None, float]], crop: dict | None, width: int | None) -> str:
+    """The filter_complex up to ``[base]`` — cut, speed, concat, crop, scale."""
+    parts: list[str] = []
+    n = len(segs)
+    labels = [f"s{i}" for i in range(n)]
+    src = "[0:v]"
+    if n > 1:
+        parts.append(f"[0:v]split={n}" + "".join(f"[{lab}]" for lab in labels))
+    for i, (a, b, f) in enumerate(segs):
+        inp = f"[{labels[i]}]" if n > 1 else src
+        trim = f"trim=start={_fmt(a)}" + (f":end={_fmt(b)}" if b is not None else "")
+        pts = "setpts=PTS-STARTPTS" + (f",setpts=PTS/{_fmt(f)}" if f != 1.0 else "")
+        parts.append(f"{inp}{trim},{pts}[v{i}]")
+    if n > 1:
+        parts.append("".join(f"[v{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0[cat]")
+        tail_in = "[cat]"
+    else:
+        tail_in = "[v0]"
+    post = []
+    if crop:
+        post.append(f"crop={crop['width']}:{crop['height']}:{crop['x']}:{crop['y']}")
+    if width:
+        post.append(f"scale={int(width) // 2 * 2}:-2:flags=lanczos")
+    parts.append(f"{tail_in}{','.join(post) if post else 'null'}[base]")
+    return ";".join(parts)
+
+
+def mp4_cmd(ff: str, src: str, dst: str, base_filter: str, *, crf: int, fps: float) -> list[str]:
+    fc = f"{base_filter};[base]fps={_fmt(fps)},format=yuv420p[out]"
+    return [
+        ff, "-y", "-hide_banner", "-loglevel", "error", "-i", src, "-filter_complex", fc, "-map", "[out]",
+        "-an", "-c:v", "libx264", "-preset", "slow", "-crf", str(crf), "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart", dst,
+    ]  # fmt: skip
+
+
+def gif_cmd(ff: str, src: str, dst: str, base_filter: str, *, fps: float) -> list[str]:
+    fc = (
+        f"{base_filter};[base]fps={_fmt(fps)},split[g1][g2];"
+        "[g1]palettegen=stats_mode=diff:max_colors=256[pal];"
+        "[g2][pal]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle[out]"
+    )
+    return [
+        ff,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        src,
+        "-filter_complex",
+        fc,
+        "-map",
+        "[out]",
+        "-loop",
+        "0",
+        dst,
+    ]
+
+
+def poster_cmd(ff: str, src: str, dst: str, at: float, crop: dict | None, width: int | None) -> list[str]:
+    vf = []
+    if crop:
+        vf.append(f"crop={crop['width']}:{crop['height']}:{crop['x']}:{crop['y']}")
+    if width:
+        vf.append(f"scale={int(width) // 2 * 2}:-2:flags=lanczos")
+    cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-ss", _fmt(at), "-i", src]
+    if vf:
+        cmd += ["-vf", ",".join(vf)]
+    return cmd + ["-frames:v", "1", "-update", "1", dst]
+
+
+def mp4_ladder(crf: int, width: int | None, src_width: int) -> list[tuple[int, int | None]]:
+    """(crf, width) attempts in order — quality first, then size."""
+    w = width or src_width or None
+    steps: list[tuple[int, int | None]] = [(min(crf + d, 40), w) for d in (0, 4, 8, 12)]
+    if w:
+        for factor, c in ((0.8, crf + 8), (0.8, crf + 12), (0.64, crf + 12), (0.5, crf + 12)):
+            steps.append((min(c, 40), int(w * factor) // 2 * 2))
+    seen, out = set(), []
+    for s in steps:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def gif_ladder(fps: float | None, width: int | None, src_width: int) -> list[tuple[float, int | None]]:
+    """(fps, width) attempts in order."""
+    f = fps or 15.0
+    w = width or src_width or None
+    plan = [
+        (1.0, f),
+        (1.0, min(f, 12)),
+        (0.85, min(f, 12)),
+        (0.85, min(f, 10)),
+        (0.72, min(f, 10)),
+        (0.6, min(f, 10)),
+        (0.6, min(f, 8)),
+        (0.5, min(f, 8)),
+    ]
+    seen, out = set(), []
+    for factor, ff in plan:
+        step = (ff, int(w * factor) // 2 * 2 if w else None)
+        if step not in seen:
+            seen.add(step)
+            out.append(step)
+    return out
+
+
+def render_output(
+    src: str | Path,
+    out_dir: str | Path,
+    spec: dict[str, Any],
+    *,
+    marks: dict[str, float],
+    source: dict[str, Any],
+    runner: Runner | None = None,
+) -> dict[str, Any]:
+    """Render ONE normalized output. Returns {path, size_bytes, width, height, duration_s, attempts, violations}."""
+    runner = runner or _default_runner
+    ff = deps.ffmpeg()
+    if not ff:
+        raise RenderError(deps.ffmpeg_hint())
+    src = str(src)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    src_w = (spec["crop"] or {}).get("width") or int(source.get("width") or 0)
+    ext = {"mp4": "mp4", "gif": "gif", "poster": "png"}[spec["format"]]
+    dst = out_dir / f"{spec['name']}.{ext}"
+    attempts: list[dict[str, Any]] = []
+
+    if spec["format"] == "poster":
+        at = spec["at"] if spec["at"] is not None else spec["start"]
+        _ff(runner, poster_cmd(ff, src, str(dst), at, spec["crop"], spec["width"]))
+        attempts.append({"at": at})
+    else:
+        segs = segments(spec["start"], spec["end"], spec["ramps"])
+        if spec["format"] == "mp4":
+            ladder = (
+                mp4_ladder(spec["crf"], spec["width"], src_w) if spec["max_bytes"] else [(spec["crf"], spec["width"])]
+            )
+            for crf, width in ladder:
+                base = timeline_filter(segs, spec["crop"], width if width != src_w else None)
+                _ff(runner, mp4_cmd(ff, src, str(dst), base, crf=crf, fps=spec["fps"] or 30))
+                size = dst.stat().st_size if dst.exists() else 0
+                attempts.append({"crf": crf, "width": width, "size_bytes": size})
+                if not spec["max_bytes"] or size <= spec["max_bytes"]:
+                    break
+        else:
+            ladder = (
+                gif_ladder(spec["fps"], spec["width"], src_w)
+                if spec["max_bytes"]
+                else [(spec["fps"] or 15.0, spec["width"])]
+            )
+            for fps, width in ladder:
+                base = timeline_filter(segs, spec["crop"], width if width != src_w else None)
+                _ff(runner, gif_cmd(ff, src, str(dst), base, fps=fps))
+                size = dst.stat().st_size if dst.exists() else 0
+                attempts.append({"fps": fps, "width": width, "size_bytes": size})
+                if not spec["max_bytes"] or size <= spec["max_bytes"]:
+                    break
+
+    info = probe(dst, runner) if dst.exists() else {"width": 0, "height": 0, "duration_s": 0, "size_bytes": 0}
+    violations: list[str] = []
+    if spec["max_bytes"] and info["size_bytes"] > spec["max_bytes"]:
+        violations.append(
+            f"{limits.human_bytes(info['size_bytes'])} is still over the {limits.human_bytes(spec['max_bytes'])} ceiling "
+            f"after {len(attempts)} attempts — shorten it, crop it, or speed-ramp more dead time"
+        )
+    if spec["limit"]:
+        for v in limits.check(
+            spec["limit"], size=info["size_bytes"], width=info["width"], height=info["height"], fmt=ext
+        ):
+            if v not in violations and "over the" not in v:
+                violations.append(v)
+    return {"path": str(dst), **info, "attempts": attempts, "violations": violations, "format": spec["format"]}

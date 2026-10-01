@@ -1,0 +1,210 @@
+"""Render: ffmpeg command building + the size ladders (fake runner), and one real render."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+from campaign import deps, render
+from conftest import have_ffmpeg
+
+MARKS = {"start": 1.0, "typed": 3.0, "dialog": 7.0, "end": 9.0}
+
+
+class FakeFF:
+    """Pretends to be ffmpeg/ffprobe: ffmpeg writes its output at the next queued size."""
+
+    def __init__(self, sizes=(), probe=None):
+        self.sizes = list(sizes)
+        self.cmds: list[list[str]] = []
+        self.probe = probe or {"width": 1280, "height": 800, "duration": "8.0"}
+
+    def __call__(self, cmd):
+        self.cmds.append(cmd)
+        if cmd[0].endswith("ffprobe"):
+            out = {
+                "streams": [
+                    {"width": self.probe["width"], "height": self.probe["height"], "duration": self.probe["duration"]}
+                ]
+            }
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(out), "")
+        dst = Path(cmd[-1])
+        dst.write_bytes(b"0" * (self.sizes.pop(0) if self.sizes else 1000))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+
+@pytest.fixture(autouse=True)
+def fake_bins(monkeypatch):
+    monkeypatch.setattr(deps, "ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(deps, "ffprobe", lambda: "/usr/bin/ffprobe")
+
+
+def _spec(**kw):
+    base = {"name": "hero", "format": "mp4"}
+    base.update(kw)
+    return render.normalize_output(base, MARKS, 10.0)
+
+
+def test_times_resolve_from_marks_or_seconds():
+    assert render.resolve_time("typed", MARKS, "x") == 3.0
+    assert render.resolve_time("mark:dialog", MARKS, "x") == 7.0
+    assert render.resolve_time(2.5, MARKS, "x") == 2.5
+    assert render.resolve_time("4", MARKS, "x") == 4.0
+    with pytest.raises(render.RenderError, match="marks: dialog, end, start, typed"):
+        render.resolve_time("nope", MARKS, "x")
+
+
+def test_segments_split_around_speed_ramps():
+    segs = render.segments(1.0, 9.0, [(3.0, 7.0, 4.0)])
+    assert segs == [(1.0, 3.0, 1.0), (3.0, 7.0, 4.0), (7.0, 9.0, 1.0)]
+    assert render.segments(0.0, None, []) == [(0.0, None, 1.0)]
+
+
+def test_spec_validation():
+    with pytest.raises(render.RenderError, match="format"):
+        _spec(format="mov")
+    with pytest.raises(render.RenderError, match="end"):
+        _spec(start="dialog", end="typed")
+    with pytest.raises(render.RenderError, match="overlap"):
+        _spec(speed=[{"from": 1, "to": 5, "factor": 2}, {"from": 4, "to": 6, "factor": 2}])
+    with pytest.raises(render.RenderError, match="unknown limit"):
+        _spec(limit="nope")
+    with pytest.raises(render.RenderError, match="past the end"):
+        _spec(start=12)
+    s = _spec(
+        limit="github_attachment_video_free", max_bytes=8_000_000, crop={"x": 0, "y": 0, "width": 1001, "height": 601}
+    )
+    assert s["max_bytes"] == 8_000_000, "the tighter of max_bytes and the limit wins"
+    assert s["crop"]["width"] == 1000 and s["crop"]["height"] == 600, "crop dims forced even"
+
+
+def test_filter_graph_trims_ramps_concats_crops_and_scales():
+    s = _spec(
+        start="start",
+        end="end",
+        speed=[{"from": "typed", "to": "dialog", "factor": 4}],
+        crop={"x": 10, "y": 20, "width": 800, "height": 600},
+    )
+    fc = render.timeline_filter(render.segments(s["start"], s["end"], s["ramps"]), s["crop"], 640)
+    assert fc.startswith("[0:v]split=3[s0][s1][s2]")
+    assert "[s1]trim=start=3:end=7,setpts=PTS-STARTPTS,setpts=PTS/4[v1]" in fc
+    assert "[v0][v1][v2]concat=n=3:v=1:a=0[cat]" in fc
+    assert fc.endswith("[cat]crop=800:600:10:20,scale=640:-2:flags=lanczos[base]")
+
+
+def test_mp4_command_is_h264_yuv420p_faststart():
+    cmd = render.mp4_cmd("ffmpeg", "in.webm", "out.mp4", "[0:v]null[base]", crf=23, fps=30)
+    joined = " ".join(cmd)
+    for flag in ("-c:v libx264", "-pix_fmt yuv420p", "-movflags +faststart", "-crf 23", "-an"):
+        assert flag in joined
+    assert "fps=30,format=yuv420p[out]" in joined
+
+
+def test_gif_command_uses_palettegen_and_paletteuse():
+    joined = " ".join(render.gif_cmd("ffmpeg", "in.webm", "out.gif", "[0:v]null[base]", fps=12))
+    assert "palettegen=stats_mode=diff" in joined and "paletteuse=dither=bayer" in joined and "fps=12" in joined
+
+
+def test_mp4_ladder_steps_crf_then_width_until_it_fits(tmp_path):
+    ff = FakeFF(sizes=[12_000_000, 11_000_000, 9_500_000])
+    s = _spec(limit="github_attachment_video_free")
+    r = render.render_output("in.webm", tmp_path, s, marks=MARKS, source={"width": 2560}, runner=ff)
+    assert [a["crf"] for a in r["attempts"]] == [23, 27, 31]
+    assert r["violations"] == [] and r["size_bytes"] == 9_500_000
+    assert ladder_monotonic(render.mp4_ladder(23, None, 2560))
+
+
+def ladder_monotonic(ladder):
+    return all(b[0] >= a[0] or (b[1] or 0) < (a[1] or 0) for a, b in zip(ladder, ladder[1:]))
+
+
+def test_gif_ladder_steps_fps_then_width(tmp_path):
+    ff = FakeFF(sizes=[30_000_000, 20_000_000, 9_000_000])
+    s = _spec(format="gif", limit="github_attachment_image", width=1280)
+    r = render.render_output("in.webm", tmp_path, s, marks=MARKS, source={"width": 2560}, runner=ff)
+    assert [(a["fps"], a["width"]) for a in r["attempts"]] == [(15.0, 1280), (12, 1280), (12, 1088)]
+    assert r["violations"] == []
+
+
+def test_an_output_that_never_fits_is_reported_not_hidden(tmp_path):
+    ff = FakeFF(sizes=[50_000_000] * 20)
+    s = _spec(format="gif", limit="github_attachment_image")
+    r = render.render_output("in.webm", tmp_path, s, marks=MARKS, source={"width": 1280}, runner=ff)
+    assert len(r["attempts"]) == len(render.gif_ladder(None, None, 1280))
+    assert r["violations"] and "still over the 10.00 MB ceiling" in r["violations"][0]
+
+
+def test_no_ceiling_means_one_attempt(tmp_path):
+    ff = FakeFF(sizes=[99_000_000])
+    r = render.render_output("in.webm", tmp_path, _spec(), marks=MARKS, source={"width": 1280}, runner=ff)
+    assert len(r["attempts"]) == 1 and r["violations"] == []
+
+
+def test_poster_seeks_to_its_mark(tmp_path):
+    ff = FakeFF()
+    s = _spec(format="poster", at="dialog", width=1280)
+    r = render.render_output("in.webm", tmp_path, s, marks=MARKS, source={"width": 2560}, runner=ff)
+    cmd = ff.cmds[0]
+    assert cmd[cmd.index("-ss") + 1] == "7" and "-frames:v" in cmd and r["path"].endswith("hero.png")
+
+
+def test_ffmpeg_failure_surfaces_its_stderr(tmp_path):
+    def broken(cmd):
+        return subprocess.CompletedProcess(cmd, 1, "", "line1\nInvalid argument")
+
+    with pytest.raises(render.RenderError, match="Invalid argument"):
+        render.render_output("in.webm", tmp_path, _spec(), marks=MARKS, source={}, runner=broken)
+
+
+def test_missing_ffmpeg_is_actionable(tmp_path, monkeypatch):
+    monkeypatch.setattr(deps, "ffmpeg", lambda: None)
+    with pytest.raises(render.RenderError, match="ffmpeg isn't on PATH"):
+        render.render_output("in.webm", tmp_path, _spec(), marks=MARKS, source={})
+
+
+# ── the real thing ───────────────────────────────────────────────────────────
+@pytest.mark.integration
+@pytest.mark.skipif(not have_ffmpeg(), reason="ffmpeg/ffprobe not installed")
+def test_real_render_of_a_tiny_take(tmp_path, monkeypatch):
+    import shutil
+
+    monkeypatch.setattr(deps, "ffmpeg", lambda: shutil.which("ffmpeg"))
+    monkeypatch.setattr(deps, "ffprobe", lambda: shutil.which("ffprobe"))
+    src = tmp_path / "take.webm"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x400:rate=25", "-t", "4",
+         "-c:v", "libvpx-vp9", "-b:v", "300k", str(src)],
+        check=True,
+    )  # fmt: skip
+    marks = {"a": 0.5, "b": 1.5, "c": 3.5}
+    source = render.probe(src)
+    assert source["width"] == 640 and 3.5 < source["duration_s"] <= 4.1
+    out = tmp_path / "out"
+    mp4 = render.render_output(
+        src, out, render.normalize_output({"name": "clip", "format": "mp4", "start": "a", "end": "c",
+                                           "speed": [{"from": "b", "to": "c", "factor": 4}],
+                                           "limit": "github_attachment_video_free"}, marks, source["duration_s"]),
+        marks=marks, source=source,
+    )  # fmt: skip
+    # 1s at 1× + 2s at 4× = 1.5s
+    assert 1.3 <= mp4["duration_s"] <= 1.7 and mp4["violations"] == []
+    gif = render.render_output(
+        src,
+        out,
+        render.normalize_output(
+            {"name": "loop", "format": "gif", "width": 320, "max_bytes": 400_000}, marks, source["duration_s"]
+        ),
+        marks=marks,
+        source=source,
+    )
+    assert gif["width"] <= 320 and gif["size_bytes"] <= 400_000 and gif["violations"] == []
+    poster = render.render_output(
+        src,
+        out,
+        render.normalize_output({"name": "poster", "format": "poster", "at": "b"}, marks, source["duration_s"]),
+        marks=marks,
+        source=source,
+    )
+    assert Path(poster["path"]).read_bytes()[:4] == b"\x89PNG" and poster["width"] == 640
