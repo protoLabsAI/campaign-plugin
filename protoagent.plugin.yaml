@@ -1,0 +1,74 @@
+id: campaign
+name: Campaign Studio
+version: 0.1.0
+description: >-
+  Campaign plans and deterministic, repeatable media production for launching ANY app or
+  product. Plans hold the goal and its math, lanes, a shot list of assets (who records what),
+  milestones, and the decisions only the operator can make. Declarative shot scripts drive
+  headless Chromium (Playwright) to record takes with named marks and stills; ffmpeg cuts
+  them into H.264 mp4s, palette-optimised GIFs and posters held under documented hard size
+  limits; branded HTML cards render to PNG (social preview, 16:9, square, end slide). Adds a
+  background producer subagent, three skills, and an asset gallery for approving what ships.
+  Draft-only: it never posts, holds no platform credentials, and only the operator approves.
+  Copy is Social Studio's job and browsing is agent_browser's — referenced by name, never
+  imported.
+# Provenance (ADR 0027) — shown in the install review when added by git URL.
+repository: "https://github.com/protoLabsAI/campaign-plugin"
+guide_url: "https://github.com/protoLabsAI/campaign-plugin#quick-start"
+# register_setup_step (the Install Chromium banner button) shipped in v0.165.0; we floor at the
+# current core so the gallery's DS kit, sdk.plugin_store and the install_deps action are all there.
+min_protoagent_version: "0.188.0"
+
+# Declarative posture (ADR 0071). The plugin itself makes no outbound calls and holds no
+# credentials. HONESTLY: Playwright's browser loads whatever `base_url` / `goto` URLs a shot
+# script names — targets the operator (or the agent, on the operator's instruction) specifies,
+# typically the operator's own app. Card rendering loads nothing remote (images are inlined).
+capabilities:
+  network: []
+  filesystem: scoped        # the plan db + every take/render/card, under the plugin data dir
+enabled: false              # author default — operators opt in via plugins.enabled
+
+# Declared, NOT auto-installed (ADR 0027 D4). `scope: host` because the tools import
+# playwright IN THIS PROCESS; `optional` because planning works without it and every media tool
+# degrades to an actionable message. Its Chromium (~150 MB) installs only from the setup
+# banner's Install Chromium button. ffmpeg is a system binary — the banner says how to get it.
+requires_pip:
+  - { pkg: "playwright>=1.45", optional: true, scope: host }
+
+config_section: campaign
+config:
+  data_dir: ""              # plan db + media; blank = the host's per-instance plugin store
+  ffmpeg_path: ""           # blank = ffmpeg on PATH (ffprobe is looked up beside it)
+  brand_kit_path: ""        # Social Studio brand-kit YAML to READ colours/fonts/logo from; blank = auto-detect
+  brand_name: ""            # fallbacks when no brand kit sets them
+  brand_colors: ""          # "bg=#0d0f14, fg=#f4f5f7, accent=#7c5cff, muted=#9aa0ac"
+  brand_fonts: ""           # "heading=Inter, body=Inter" (installed font family names)
+  brand_logo: ""            # path to a logo image (png/svg/jpg)
+  limit_overrides: ""       # YAML: {limit_id: {max_bytes: 100000000, source: ..., as_of: ...}}
+  producer_model: ""        # model override for the campaign_producer subagent; blank = host routing
+settings:
+  - { key: data_dir, label: "Data directory", type: string, group: "Campaign Studio", description: "Where the campaign database and every take, render and card live. Blank uses the host's per-instance plugin store." }
+  - { key: ffmpeg_path, label: "ffmpeg path", type: string, group: "Campaign Studio", description: "Absolute path to ffmpeg when it isn't on PATH. ffprobe is looked up next to it." }
+  - { key: brand_kit_path, label: "Brand kit file", type: string, group: "Brand look", description: "A Social Studio brand-kit YAML to read card colours, fonts and logo from (visual.colors / visual.fonts / visual.logo). Blank auto-detects Social Studio's kit. Read-only — this plugin never writes it." }
+  - { key: brand_name, label: "Brand name", type: string, group: "Brand look", description: "Fallback brand name for cards when no brand kit provides one." }
+  - { key: brand_colors, label: "Brand colours", type: string, group: "Brand look", description: "Fallback card colours as hex pairs, e.g. bg=#0d0f14, fg=#f4f5f7, accent=#7c5cff, muted=#9aa0ac." }
+  - { key: brand_fonts, label: "Brand fonts", type: string, group: "Brand look", description: "Fallback font families installed on this machine, e.g. heading=Inter, body=Inter." }
+  - { key: brand_logo, label: "Brand logo", type: string, group: "Brand look", description: "Fallback logo image path (png, svg or jpg) for cards." }
+  - { key: limit_overrides, label: "Hard-limit overrides", type: string, group: "Campaign Studio", description: "YAML mapping of limit id → fields to override or add, e.g. github_attachment_video_free: {max_bytes: 100000000, source: <url>, as_of: 2026-10-01} on a paid plan. Each row should carry its source and date." }
+  - { key: producer_model, label: "Producer model", type: string, group: "Crew models", description: "Model override for the campaign_producer subagent. Blank rides the host's aux-model routing." }
+
+# Console rail view (ADR 0026) — browsing only: every asset of a campaign, playable, with
+# status/size/dims and the operator-only approve/reject buttons.
+views:
+  - { id: gallery, label: "Campaign Studio", icon: "Clapperboard", path: /plugins/campaign/view }
+
+public_paths:
+  - /plugins/campaign/view
+
+# Event bus (ADR 0039) — auto-namespaced campaign.*.
+emits:
+  - campaign_changed
+  - asset_registered
+  - shoot_finished
+  - render_finished
+  - asset_reviewed

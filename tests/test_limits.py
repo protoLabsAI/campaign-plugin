@@ -1,0 +1,52 @@
+"""The hard-limit table: every row sourced and dated; overrides merge; checks are exact."""
+
+from __future__ import annotations
+
+from campaign import limits
+
+
+def test_every_default_row_has_a_source_url_and_an_as_of_date():
+    for key, row in limits.DEFAULT_LIMITS.items():
+        assert row["source"].startswith("https://"), key
+        assert len(row["as_of"]) == 10, key
+        assert row.get("max_bytes"), key
+
+
+def test_documented_github_numbers():
+    assert limits.get("github_attachment_image")["max_bytes"] == 10_000_000
+    assert limits.get("github_attachment_video_free")["max_bytes"] == 10_000_000
+    og = limits.get("github_social_preview")
+    assert og["max_bytes"] == 1_000_000 and (og["min_width"], og["min_height"]) == (640, 320)
+
+
+def test_check_reports_size_format_and_dimension_violations():
+    assert limits.check("github_social_preview", size=900_000, width=1280, height=640, fmt="png") == []
+    probs = limits.check("github_social_preview", size=1_200_000, width=600, height=300, fmt="webp")
+    assert len(probs) == 4
+    assert any("over the 1.00 MB" in p for p in probs)
+    assert limits.check("nope", size=1) and "unknown limit" in limits.check("nope", size=1)[0]
+
+
+def test_overrides_merge_add_and_mark_rows():
+    warnings = limits.configure(
+        "github_attachment_video_free: {max_bytes: 100000000, as_of: '2026-10-01'}\n"
+        "my_cdn: {label: CDN clip, max_bytes: 5000000, source: 'https://cdn.test/docs'}"
+    )
+    assert warnings == []
+    assert limits.get("github_attachment_video_free")["max_bytes"] == 100_000_000
+    assert limits.get("github_attachment_video_free")["source"].startswith("https://docs.github.com")
+    assert limits.get("my_cdn")["overridden"] is True
+    assert "*(override)*" in limits.brief()
+
+
+def test_bad_overrides_warn_and_fall_back():
+    assert limits.configure("{{nope")
+    assert limits.get("github_social_preview")["max_bytes"] == 1_000_000
+    assert limits.configure("- a list")
+
+
+def test_no_soft_norms_live_in_the_table():
+    # A guard against drift: only hard caps / dims here — never "ideal length" style keys.
+    soft = {"ideal_seconds", "sweet_spot", "best_length", "recommended_length"}
+    for row in limits.DEFAULT_LIMITS.values():
+        assert not soft & set(row)
