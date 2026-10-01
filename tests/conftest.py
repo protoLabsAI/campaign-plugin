@@ -31,7 +31,7 @@ if PKG not in sys.modules:
 
 @pytest.fixture(autouse=True)
 def isolated_data_dir(tmp_path, monkeypatch):
-    from campaign import brand, deps, limits, paths
+    from campaign import brand, deps, limits, paths, shoot
 
     data = tmp_path / "data"
     monkeypatch.setenv("CAMPAIGN_DIR", str(data))
@@ -43,6 +43,7 @@ def isolated_data_dir(tmp_path, monkeypatch):
     limits.configure("")
     deps.configure("")
     brand.configure({}, None)
+    shoot.configure("")
     yield data
 
 
@@ -182,7 +183,11 @@ class FakeContext:
         self.calls = browser.pw.calls
         self.fail_on = browser.pw.fail_on
         self.init_scripts = []
+        self.routes = []  # (url matcher, handler) — the request guards shoot installs
         self.page = None
+
+    def route(self, matcher, handler):
+        self.routes.append((matcher, handler))
 
     def set_default_timeout(self, ms):
         self.calls.append(("default_timeout", ms))

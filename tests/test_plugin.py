@@ -68,10 +68,12 @@ def test_playwright_is_declared_host_scoped_and_optional():
 
 
 def test_declared_capabilities_match_reality():
-    assert MANIFEST["capabilities"] == {"network": [], "filesystem": "scoped"}
+    # The recording browser navigates to whatever a shot script names — like agent_browser,
+    # that is "*", not "no network". (v0.1.0 declared [] and under-stated the blast radius.)
+    assert MANIFEST["capabilities"] == {"network": ["*"], "filesystem": "scoped"}
     sources = "\n".join(p.read_text(encoding="utf-8") for p in ROOT.glob("*.py"))
     for client in ("import httpx", "import requests", "urllib.request", "aiohttp"):
-        assert client not in sources, f"the plugin makes no outbound calls of its own ({client})"
+        assert client not in sources, f"the plugin's Python makes no outbound calls of its own ({client})"
 
 
 def test_no_cross_plugin_imports():
@@ -102,8 +104,12 @@ def test_register_threads_config_through(tmp_path, registry, monkeypatch):
         "limit_overrides": "github_attachment_video_free: {max_bytes: 100000000}",
         "ffmpeg_path": "/opt/ff/ffmpeg",
         "brand_name": "Acme",
+        "bearer_envs": "STAGING_TOKEN",
     }
     campaign.register(registry)
+    from campaign import shoot
+
+    assert shoot.bearer_env_problem("STAGING_TOKEN") is None and shoot.bearer_env_problem("OPENAI_API_KEY")
     assert paths.data_dir() == tmp_path / "custom"
     assert limits.get("github_attachment_video_free")["max_bytes"] == 100_000_000
     assert deps._FFMPEG_OVERRIDE == "/opt/ff/ffmpeg"
@@ -254,6 +260,36 @@ def test_file_route_refuses_traversal_strings(client):
     assert client.get("/api/plugins/campaign/file/99999").status_code == 404
 
 
+@pytest.mark.parametrize("name", ["evil.html", "evil.svg", "evil.htm", "notes.txt"])
+def test_file_route_never_serves_a_document_that_could_run_script(client, name):
+    c = store.create_campaign("Launch")
+    p = paths.campaign_dir(c["id"], "Launch") / name
+    p.write_text("<script>parent.fetch('/api/plugins/campaign/assets/1/review')</script>")
+    a = store.add_asset(c["id"], "still", "t", path=str(p))
+    r = client.get(f"/api/plugins/campaign/file/{a['id']}")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/octet-stream"
+    assert r.headers["content-disposition"].startswith("attachment")
+    assert r.headers["x-content-type-options"] == "nosniff" and "sandbox" in r.headers["content-security-policy"]
+
+
+def test_media_is_served_sandboxed_too(client):
+    a = _asset_with_file()
+    r = client.get(f"/api/plugins/campaign/file/{a['id']}")
+    assert r.headers["x-content-type-options"] == "nosniff" and "sandbox" in r.headers["content-security-policy"]
+
+
+def test_no_agent_tool_can_set_approved_or_rejected(registry):
+    # Behavioural, not a source grep: drive every status-bearing tool with every operator status.
+    campaign.register(registry)
+    a = _asset_with_file()
+    store.update_asset(a["id"], status="ready_for_review")
+    for status in ("approved", "rejected", "APPROVED", " approved "):
+        out = registry.tool("campaign_asset_update").invoke({"asset_id": a["id"], "status": status})
+        assert "Not updated" in out, out
+    assert store.get_asset(a["id"])["status"] == "ready_for_review"
+
+
 def test_assets_route_flags_unservable_files(client, tmp_path):
     a = _asset_with_file(tmp_path, outside=True)
     data = client.get(f"/api/plugins/campaign/campaigns/{a['campaign_id']}/assets").json()
@@ -310,3 +346,12 @@ def test_skill_frontmatter_is_valid_and_names_real_tools(skill_path, registry):
     for name in front.get("tools", []):
         if name.startswith("campaign_"):
             assert name in known, f"{skill_path.parent.name} declares unknown tool {name}"
+
+
+def test_webp_is_served_inline(client):
+    c = store.create_campaign("Launch")
+    p = paths.campaign_dir(c["id"], "Launch") / "still.webp"
+    p.write_bytes(b"RIFF....WEBP")
+    a = store.add_asset(c["id"], "still", "t", path=str(p))
+    r = client.get(f"/api/plugins/campaign/file/{a['id']}")
+    assert r.headers["content-type"] == "image/webp" and "content-disposition" not in r.headers

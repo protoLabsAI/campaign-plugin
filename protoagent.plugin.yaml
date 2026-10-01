@@ -1,6 +1,6 @@
 id: campaign
 name: Campaign Studio
-version: 0.1.0
+version: 0.1.1
 description: >-
   Campaign plans and deterministic, repeatable media production for launching ANY app or
   product. Plans hold the goal and its math, lanes, a shot list of assets (who records what),
@@ -19,12 +19,14 @@ guide_url: "https://github.com/protoLabsAI/campaign-plugin#quick-start"
 # current core so the gallery's DS kit, sdk.plugin_store and the install_deps action are all there.
 min_protoagent_version: "0.188.0"
 
-# Declarative posture (ADR 0071). The plugin itself makes no outbound calls and holds no
-# credentials. HONESTLY: Playwright's browser loads whatever `base_url` / `goto` URLs a shot
-# script names — targets the operator (or the agent, on the operator's instruction) specifies,
-# typically the operator's own app. Card rendering loads nothing remote (images are inlined).
+# Declarative posture (ADR 0071). The plugin's Python makes no outbound calls and holds no
+# credentials — but its recording browser (Playwright) loads whatever `base_url` / `goto` URLs a
+# shot script names, and that page pulls in whatever it links to. So, like agent_browser: "*".
+# Guards: the browser never reaches this plugin's own data API (no self-approval), and a script's
+# bearer goes only to its base_url origin, read only from CAMPAIGN_* / `bearer_envs` env vars.
+# Card rendering loads nothing remote (images are inlined; brand-kit font URLs are not fetched).
 capabilities:
-  network: []
+  network: ["*"]
   filesystem: scoped        # the plan db + every take/render/card, under the plugin data dir
 enabled: false              # author default — operators opt in via plugins.enabled
 
@@ -46,6 +48,7 @@ config:
   brand_logo: ""            # path to a logo image (png/svg/jpg)
   limit_overrides: ""       # YAML: {limit_id: {max_bytes: 100000000, source: ..., as_of: ...}}
   producer_model: ""        # model override for the campaign_producer subagent; blank = host routing
+  bearer_envs: ""           # extra env-var NAMES a shot script may use as auth.bearer_env (CAMPAIGN_* always may)
 settings:
   - { key: data_dir, label: "Data directory", type: string, group: "Campaign Studio", description: "Where the campaign database and every take, render and card live. Blank uses the host's per-instance plugin store." }
   - { key: ffmpeg_path, label: "ffmpeg path", type: string, group: "Campaign Studio", description: "Absolute path to ffmpeg when it isn't on PATH. ffprobe is looked up next to it." }
@@ -55,6 +58,7 @@ settings:
   - { key: brand_fonts, label: "Brand fonts", type: string, group: "Brand look", description: "Fallback font families installed on this machine, e.g. heading=Inter, body=Inter." }
   - { key: brand_logo, label: "Brand logo", type: string, group: "Brand look", description: "Fallback logo image path (png, svg or jpg) for cards." }
   - { key: limit_overrides, label: "Hard-limit overrides", type: string, group: "Campaign Studio", description: "YAML mapping of limit id → fields to override or add, e.g. github_attachment_video_free: {max_bytes: 100000000, source: <url>, as_of: 2026-10-01} on a paid plan. Each row should carry its source and date." }
+  - { key: bearer_envs, label: "Shot-script bearer env vars", type: string, group: "Campaign Studio", description: "Comma-separated environment variable NAMES a shot script may send as its bearer token (auth.bearer_env), besides any CAMPAIGN_* variable. The token goes only to the script's base_url origin. The host's own operator/fleet tokens are always refused." }
   - { key: producer_model, label: "Producer model", type: string, group: "Crew models", description: "Model override for the campaign_producer subagent. Blank rides the host's aux-model routing." }
 
 # Console rail view (ADR 0026) — browsing only: every asset of a campaign, playable, with

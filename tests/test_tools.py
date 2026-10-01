@@ -184,3 +184,91 @@ def test_card_tool_registers_a_card(tools, browser_ok):
 def test_limits_and_setup_tools(tools):
     assert "github_social_preview" in call(tools, "campaign_limits")
     assert "Campaign Studio setup" in call(tools, "campaign_setup")
+
+
+# ── hardening (v0.1.1) ─────────────────────────────────────────────────────────
+SCRIPT_TWO_STILLS = SCRIPT.replace("  - screenshot: result\n", "  - screenshot: result\n  - screenshot: detail\n")
+
+
+def test_rerecording_into_an_asset_supersedes_the_previous_takes_stills(tools, browser_ok, ffmpeg_ok):
+    call(tools, "campaign_create", name="L")
+    call(tools, "campaign_asset_add", campaign_id=1, kind="clip", title="hero")
+    call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT_TWO_STILLS, asset_id=1)
+    first = store.get_asset(1)
+    old_dir = Path(first["meta"]["take_dir"])
+    old_stills = store.list_assets(1, kind="still")
+    assert len(old_stills) == 2 and old_dir.is_dir()
+
+    out = call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT, asset_id=1)
+    assert "superseded 2 still(s) of the previous take" in out, out
+    stills = store.list_assets(1, kind="still")
+    assert len(stills) == 1 and stills[0]["parent_id"] == 1
+    assert Path(stills[0]["path"]).parent == Path(store.get_asset(1)["meta"]["take_dir"]) != old_dir
+    assert not old_dir.exists(), "the superseded take's files go with it"
+    assert all(store.get_asset(s["id"]) is None for s in old_stills)
+
+
+def test_rerecording_keeps_a_still_the_operator_approved(tools, browser_ok, ffmpeg_ok):
+    call(tools, "campaign_create", name="L")
+    call(tools, "campaign_asset_add", campaign_id=1, kind="clip", title="hero")
+    call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT_TWO_STILLS, asset_id=1)
+    keep, drop = store.list_assets(1, kind="still")
+    store.update_asset(keep["id"], status="ready_for_review")
+    store.review(keep["id"], "approve")
+    out = call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT, asset_id=1)
+    assert f"kept the previous take's APPROVED still(s) #{keep['id']}" in out, out
+    assert store.get_asset(keep["id"])["status"] == "approved" and Path(keep["path"]).is_file()
+    assert store.get_asset(drop["id"]) is None
+
+
+def test_a_take_or_card_cannot_land_in_another_campaigns_asset(tools, browser_ok, ffmpeg_ok):
+    call(tools, "campaign_create", name="One")
+    call(tools, "campaign_create", name="Two")
+    call(tools, "campaign_asset_add", campaign_id=1, kind="card", title="one's card")
+    out = call(tools, "campaign_card", campaign_id=2, template="og-1280x640", data={"title": "x"}, asset_id=1)
+    assert "no asset #1 in campaign 2" in out and store.get_asset(1)["path"] == ""
+    out = call(tools, "campaign_shoot", campaign_id=2, script=SCRIPT, asset_id=1)
+    assert "no asset #1 in campaign 2" in out and browser_ok.browser is None, "refused before recording"
+
+
+def test_filling_an_approved_asset_is_refused_not_raised(tools, browser_ok, ffmpeg_ok):
+    call(tools, "campaign_create", name="L")
+    call(tools, "campaign_card", campaign_id=1, template="og-1280x640", data={"title": "x"})
+    store.update_asset(1, status="ready_for_review")
+    store.review(1, "approve")
+    before = store.get_asset(1)["path"]
+    out = call(tools, "campaign_card", campaign_id=1, template="og-1280x640", data={"title": "y"}, asset_id=1)
+    assert "approved" in out and store.get_asset(1)["path"] == before
+    out = call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT, asset_id=1)
+    assert "approved" in out
+
+
+def test_same_second_renders_never_overwrite_each_other(tools, browser_ok, ffmpeg_ok, monkeypatch):
+    from datetime import UTC, datetime
+
+    from campaign import tools as toolsmod
+
+    frozen = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(toolsmod, "datetime", type("D", (), {"now": staticmethod(lambda tz=None: frozen)}))
+    call(tools, "campaign_create", name="L")
+    call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT)
+    call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT)
+    takes = [a for a in store.list_assets(1, kind="clip")]
+    assert len({a["path"] for a in takes}) == 2, "two takes in one second got two directories"
+    spec = [{"name": "hero", "format": "mp4"}]
+    call(tools, "campaign_render", asset_id=1, outputs=spec)
+    call(tools, "campaign_render", asset_id=1, outputs=spec)
+    renders = [a for a in store.list_assets(1, kind="clip") if a["parent_id"] == 1]
+    assert len({a["path"] for a in renders}) == 2
+    call(tools, "campaign_card", campaign_id=1, template="square-1080", data={"title": "a"})
+    call(tools, "campaign_card", campaign_id=1, template="square-1080", data={"title": "b"})
+    cards_ = store.list_assets(1, kind="card")
+    assert len({a["path"] for a in cards_}) == 2
+
+
+def test_render_caps_the_number_of_outputs(tools, browser_ok, ffmpeg_ok):
+    call(tools, "campaign_create", name="L")
+    call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT)
+    outs = [{"name": f"o{i}", "format": "poster"} for i in range(render.MAX_OUTPUTS + 1)]
+    assert "too many" in call(tools, "campaign_render", asset_id=1, outputs=outs)
+    assert ffmpeg_ok.cmds and all(c[0].endswith("ffprobe") for c in ffmpeg_ok.cmds), "no ffmpeg run started"

@@ -73,8 +73,11 @@ mask it — then CHECK the stills; redaction is a safety net, not proof.
 
 ## Auth
 
-Never put a token in a script (it's stored in the plan). Use `auth: {bearer_env: VAR_NAME}`
-(the agent's environment) or `auth: {storage_state: /path/state.json}` from a logged-in session.
+Never put a token in a script (it's stored in the plan). Use `auth: {bearer_env: CAMPAIGN_APP_TOKEN}`
+— only env vars named `CAMPAIGN_*` (or listed in the operator's `bearer_envs` setting) are
+allowed, it needs a `base_url`, and the token is sent to that origin only. If the target needs a
+token and none is set up, ask the operator to create one; never reach for another secret. Or use
+`auth: {storage_state: /path/state.json}` from a logged-in session.
 
 ## When a take fails
 

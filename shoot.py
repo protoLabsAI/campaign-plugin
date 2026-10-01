@@ -21,11 +21,13 @@ mock the browser at this boundary.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import unquote, urlsplit
 
 from .shotscript import describe_step, resolve_url
 
@@ -95,6 +97,89 @@ REDACT_PRESET_RULES: dict[str, list[tuple[str, str]]] = {
         )
     ],
 }
+
+
+# ── what the shoot browser may carry and reach ─────────────────────────────────
+# A shot script is agent-written. Two things it must never be able to do:
+#
+# 1. Lift an arbitrary secret out of the host's environment. ``auth.bearer_env`` may only
+#    name a variable the operator set up FOR this purpose: ``CAMPAIGN_*``, or one listed in
+#    the ``bearer_envs`` setting. The host's own operator/fleet credentials are refused even
+#    if listed — with one, the shoot browser IS the operator.
+# 2. Act as the operator. The browser never reaches this plugin's data API (where the
+#    approve/reject route lives) on ANY host, so a script can't open the gallery and click
+#    Approve — in open mode (no bearer) as much as with a stolen one.
+#
+# And the bearer it does carry goes ONLY to the script's own ``base_url`` origin — never to a
+# CDN, an analytics pixel, or whatever third-party origin the page pulls in.
+BEARER_ENV_PREFIX = "CAMPAIGN_"
+FORBIDDEN_BEARER_ENVS = frozenset({"A2A_AUTH_TOKEN", "PROTOAGENT_FLEET_TOKEN", "FEDERATION_TOKEN"})
+_ALLOWED_BEARER_ENVS: frozenset[str] = frozenset()
+_OWN_API = re.compile(r"/api/plugins/campaign(?:/|$)")
+
+
+def configure(bearer_envs: Any = "") -> None:
+    """Extra env-var NAMES (besides ``CAMPAIGN_*``) a shot script may use as its bearer."""
+    global _ALLOWED_BEARER_ENVS
+    if isinstance(bearer_envs, (list, tuple, set)):
+        names = [str(n) for n in bearer_envs]
+    else:
+        names = re.split(r"[,\s]+", str(bearer_envs or ""))
+    _ALLOWED_BEARER_ENVS = frozenset(n.strip() for n in names if n.strip())
+
+
+def bearer_env_problem(name: str) -> str | None:
+    """Why ``name`` may not be used as a shot script's bearer (None = it may)."""
+    if name in FORBIDDEN_BEARER_ENVS or name.endswith("_FLEET_TOKEN"):
+        return (
+            f"auth.bearer_env {name} is the host's own operator credential — a recording browser "
+            "never carries it. Create a separate token for the target app."
+        )
+    if name.startswith(BEARER_ENV_PREFIX) or name in _ALLOWED_BEARER_ENVS:
+        return None
+    return (
+        f"auth.bearer_env {name} isn't allowed: a shot script may only read env vars named "
+        f"{BEARER_ENV_PREFIX}* or listed in the plugin's bearer_envs setting (so a script can't lift "
+        "an unrelated secret out of the agent's environment). Ask the operator to set one up."
+    )
+
+
+def origin(url: str) -> str:
+    """``scheme://host:port`` (default ports made explicit) — '' for a non-http(s) URL."""
+    try:
+        u = urlsplit(url)
+        port = u.port or {"http": 80, "https": 443}.get(u.scheme.lower())
+    except ValueError:
+        return ""
+    if u.scheme.lower() not in ("http", "https") or not u.hostname:
+        return ""
+    return f"{u.scheme.lower()}://{u.hostname.lower()}:{port}"
+
+
+def is_own_api(url: str) -> bool:
+    """True for any request into this plugin's data API, on any host or fleet-proxy prefix."""
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return False
+    # Starlette routes on the DECODED path, so match that — and collapse // runs.
+    return bool(_OWN_API.search(re.sub(r"/{2,}", "/", unquote(path))))
+
+
+def _guard_context(context, base_url: str, bearer: str) -> None:
+    """Install the request guards: block our own API; scope the bearer to base_url's origin."""
+    context.route(is_own_api, lambda route: route.abort("blockedbyclient"))
+    if bearer:
+        home = origin(base_url)
+
+        def _same_origin(url: str) -> bool:
+            return bool(home) and origin(url) == home and not is_own_api(url)
+
+        def _with_bearer(route) -> None:
+            headers = {**route.request.headers, "authorization": f"Bearer {bearer}"}
+            route.continue_(headers=headers)
+
+        context.route(_same_origin, _with_bearer)
 
 
 class ShootError(RuntimeError):
@@ -237,13 +322,14 @@ def _run(script: dict[str, Any], out_dir: Path, playwright_factory: Callable | N
                 "locale": script["locale"],
                 "record_video_dir": str(video_tmp),
                 "record_video_size": video_size(script),
+                # Service workers would answer requests outside the route guards below.
+                "service_workers": "block",
             }
-            if bearer:
-                ctx_kw["extra_http_headers"] = {"Authorization": f"Bearer {bearer}"}
             if script["auth"].get("storage_state"):
                 ctx_kw["storage_state"] = str(Path(script["auth"]["storage_state"]).expanduser())
             context = browser.new_context(**ctx_kw)
             try:
+                _guard_context(context, script.get("base_url") or "", bearer)
                 context.set_default_timeout(step_timeout)
                 if script.get("cursor", True):
                     context.add_init_script(CURSOR_JS)
@@ -418,7 +504,13 @@ def run(
     env = os.environ if env is None else env
     bearer = ""
     if script["auth"].get("bearer_env"):
-        bearer = env.get(script["auth"]["bearer_env"], "")
+        name = script["auth"]["bearer_env"]
+        problem = bearer_env_problem(name)
+        if problem is None and not origin(script.get("base_url") or ""):
+            problem = "auth.bearer_env needs a base_url — the bearer is sent to that origin only"
+        if problem:
+            raise ShootError(problem, {"steps": [], "error": "bearer refused"})
+        bearer = env.get(name, "")
         if not bearer:
             raise ShootError(
                 f"auth.bearer_env names {script['auth']['bearer_env']}, which isn't set in the agent's environment",

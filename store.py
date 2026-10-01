@@ -309,10 +309,16 @@ def upsert_lane(
             lane_id = cur.lastrowid
         else:
             lane_id = row["id"]
+            new_name = (name or row["name"]).strip()
+            clash = conn.execute(
+                "SELECT id FROM lanes WHERE campaign_id = ? AND name = ? AND id != ?", (campaign_id, new_name, lane_id)
+            ).fetchone()
+            if clash is not None:
+                raise ValueError(f"campaign {campaign_id} already has a lane named {new_name!r} (lane {clash['id']})")
             conn.execute(
                 "UPDATE lanes SET name = ?, pitch = ?, audience = ?, hero_asset_id = ?, updated = ? WHERE id = ?",
                 (
-                    (name or row["name"]).strip(),
+                    new_name,
                     row["pitch"] if pitch is None else pitch,
                     row["audience"] if audience is None else audience,
                     row["hero_asset_id"] if hero_asset_id is None else int(hero_asset_id),
@@ -409,21 +415,25 @@ ASSET_UPDATABLE = (
 )
 
 
+# What the agent may still touch on an asset the operator APPROVED: its notes. Everything
+# else — status, file, dims, limit, spec — is what was approved, and stays that way.
+APPROVED_MUTABLE = ("notes",)
+
+
 def update_asset(asset_id: int, **fields: Any) -> dict[str, Any]:
-    """Agent-side update. Refuses approve/reject and enforces the ready-for-review gate."""
-    row = get_asset(asset_id)
-    if row is None:
-        raise ValueError(f"no asset with id {asset_id}")
+    """Agent-side update. Refuses approve/reject and enforces the ready-for-review gate.
+
+    An APPROVED asset is frozen for the agent (only ``notes`` may change): it can't be moved
+    back to an earlier status, re-pointed at another file, or have its limit swapped. Every
+    check runs against the row as it is INSIDE the write lock, so an operator approval that
+    lands between the agent's read and its write can't be overwritten.
+    """
     changes = {k: v for k, v in fields.items() if k in ASSET_UPDATABLE and v is not None}
     if "status" in changes:
         wanted = str(changes["status"]).strip().lower()
         if wanted in ("approved", "rejected"):
             raise ValueError("only the operator approves or rejects — mark it ready_for_review and ask them")
         changes["status"] = _choice(wanted, AGENT_ASSET_STATUSES, "status")
-    if row["status"] == "approved" and any(k in changes for k in ("path", "spec", "size_bytes")):
-        raise ValueError(
-            "this asset is approved — register the new take as a new asset instead of changing what was approved"
-        )
     if "owner" in changes:
         changes["owner"] = _choice(changes["owner"], OWNERS, "owner")
     if changes.get("limit_id") and limits.get(changes["limit_id"]) is None:
@@ -432,16 +442,41 @@ def update_asset(asset_id: int, **fields: Any) -> dict[str, Any]:
         changes["spec"] = _spec_text(changes["spec"])
     if "meta" in changes:
         changes["meta"] = json.dumps(changes["meta"] or {})
-    merged = {**row, **changes}
-    if changes.get("status") == "ready_for_review":
-        problems = review_gate(merged)
-        if problems:
-            raise ValueError("not ready for review: " + "; ".join(problems))
-    if changes:
-        sets = ", ".join(f"{k} = ?" for k in changes)
-        with _write() as conn:
-            conn.execute(f"UPDATE assets SET {sets}, updated = ? WHERE id = ?", (*changes.values(), _now(), asset_id))
+    with _write() as conn:
+        cur = conn.execute("SELECT * FROM assets WHERE id = ?", (int(asset_id),)).fetchone()
+        if cur is None:
+            raise ValueError(f"no asset with id {asset_id}")
+        row = _row(cur)
+        if row["status"] == "approved":
+            frozen = sorted(k for k in changes if k not in APPROVED_MUTABLE)
+            if frozen:
+                raise ValueError(
+                    f"asset #{asset_id} is approved — the agent can't change its {', '.join(frozen)}. "
+                    "Register the new take as a new asset instead of changing what was approved"
+                )
+        merged = {**row, **changes}
+        if changes.get("status") == "ready_for_review":
+            problems = review_gate(merged)
+            if problems:
+                raise ValueError("not ready for review: " + "; ".join(problems))
+        if changes:
+            sets = ", ".join(f"{k} = ?" for k in changes)
+            conn.execute(
+                f"UPDATE assets SET {sets}, updated = ? WHERE id = ?", (*changes.values(), _now(), int(asset_id))
+            )
     return get_asset(asset_id)  # type: ignore[return-value]
+
+
+def delete_assets(asset_ids: list[int]) -> int:
+    """Remove asset rows (never an approved one). Returns how many went."""
+    ids = [int(i) for i in asset_ids]
+    if not ids:
+        return 0
+    with _write() as conn:
+        cur = conn.execute(
+            f"DELETE FROM assets WHERE status != 'approved' AND id IN ({', '.join('?' * len(ids))})", ids
+        )
+        return cur.rowcount
 
 
 def review_gate(asset: dict[str, Any]) -> list[str]:
@@ -468,21 +503,23 @@ def review_gate(asset: dict[str, Any]) -> list[str]:
 
 def review(asset_id: int, decision: str, note: str = "") -> dict[str, Any]:
     """OPERATOR-only: approve or reject. Called from the gated gallery route, never a tool."""
-    row = get_asset(asset_id)
-    if row is None:
-        raise ValueError(f"no asset with id {asset_id}")
     decision = (decision or "").strip().lower()
     status = {"approve": "approved", "approved": "approved", "reject": "rejected", "rejected": "rejected"}.get(decision)
     if status is None:
         raise ValueError("decision must be approve or reject")
-    if status == "approved":
-        problems = review_gate(row)
-        if problems:
-            raise ValueError("can't approve: " + "; ".join(problems))
     with _write() as conn:
+        # Gate the row as it is under the lock — not a copy read before an agent write landed.
+        cur = conn.execute("SELECT * FROM assets WHERE id = ?", (int(asset_id),)).fetchone()
+        if cur is None:
+            raise ValueError(f"no asset with id {asset_id}")
+        if status == "approved":
+            problems = review_gate(_row(cur))
+            if problems:
+                raise ValueError("can't approve: " + "; ".join(problems))
+        now = _now()
         conn.execute(
             "UPDATE assets SET status = ?, review_note = ?, reviewed_at = ?, updated = ? WHERE id = ?",
-            (status, note or "", _now(), _now(), asset_id),
+            (status, note or "", now, now, int(asset_id)),
         )
     return get_asset(asset_id)  # type: ignore[return-value]
 

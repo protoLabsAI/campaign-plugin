@@ -9,10 +9,22 @@ Source order (first that has a value wins, per field):
 2. This plugin's ``brand_*`` settings.
 3. Neutral defaults.
 
-The social kit's schema is about voice, so visual keys are optional there. Recognised
-shapes: ``visual: {colors, fonts, logo}`` or top-level ``colors`` / ``fonts`` / ``logo``;
-colours as a mapping (``background``/``bg``, ``text``/``fg``, ``accent``/``primary``,
-``muted``/``secondary``) or a list of hex strings (first = accent).
+The social kit's schema is about voice, so visual keys are optional there. Social Studio's
+``visual:`` contract is::
+
+    visual:
+      colors:   {primary, accent, background, foreground}   # quoted hex
+      fonts:    {heading, body, heading_url, body_url}      # family names (+ stylesheet URLs)
+      logo:     {path, dark, light}                         # relative to the kit file, or absolute
+      wordmark: "Acme"                                      # the name as set in type
+
+Read defensively — any of it may be absent, half-filled, or the wrong type, and a bad value
+falls through to the next source instead of winning. Also accepted: top-level ``colors`` /
+``fonts`` / ``logo`` (the pre-contract shape); colours as a list of hex strings (first =
+accent); ``logo`` as a bare path string. Relative logo paths resolve against the KIT FILE's
+directory; ``logo.dark`` is chosen on a dark card background and ``logo.light`` on a light
+one, falling back to ``logo.path``; a logo file that doesn't exist is skipped. The
+``*_url`` font stylesheets are deliberately NOT loaded — cards load nothing from the network.
 """
 
 from __future__ import annotations
@@ -105,43 +117,86 @@ def social_kit_path() -> Path | None:
     return None
 
 
-def _kit_visual(kit: dict[str, Any]) -> dict[str, Any]:
+def _str(v: Any) -> str:
+    return v.strip() if isinstance(v, str) else ""
+
+
+def _kit_visual(kit: dict[str, Any], kit_dir: Path | None = None) -> dict[str, Any]:
+    """The usable visual bits of a brand kit. Invalid values are dropped, never passed on."""
     visual = kit.get("visual") if isinstance(kit.get("visual"), dict) else {}
-    out: dict[str, Any] = {"colors": {}, "fonts": {}, "logo": "", "name": ""}
-    colors = visual.get("colors", kit.get("colors"))
+    out: dict[str, Any] = {"colors": {}, "fonts": {}, "logos": {}, "name": ""}
+
+    colors = visual.get("colors") if visual.get("colors") is not None else kit.get("colors")
     if isinstance(colors, list):
-        hexes = [c for c in colors if isinstance(c, str) and _HEX.match(c.strip())]
+        hexes = [c.strip() for c in colors if isinstance(c, str) and _HEX.match(c.strip())]
         if hexes:
             out["colors"]["accent"] = hexes[0]
     elif isinstance(colors, dict):
         low = {str(k).lower(): v for k, v in colors.items()}
         for slot, names in _COLOR_ALIASES.items():
             for n in names:
-                if isinstance(low.get(n), str) and low[n].strip():
-                    out["colors"][slot] = low[n].strip()
+                v = _str(low.get(n))
+                if v and _HEX.match(v):  # an invalid value falls through to the next alias/source
+                    out["colors"][slot] = v
                     break
-    fonts = visual.get("fonts", kit.get("fonts"))
+
+    fonts = visual.get("fonts") if visual.get("fonts") is not None else kit.get("fonts")
     if isinstance(fonts, dict):
         for slot in ("heading", "body"):
-            if fonts.get(slot):
-                out["fonts"][slot] = str(fonts[slot])
-    elif isinstance(fonts, str) and fonts.strip():
-        out["fonts"] = {"heading": fonts.strip(), "body": fonts.strip()}
-    logo = visual.get("logo", kit.get("logo"))
+            if _str(fonts.get(slot)):
+                out["fonts"][slot] = _str(fonts.get(slot))
+    elif _str(fonts):
+        out["fonts"] = {"heading": _str(fonts), "body": _str(fonts)}
+
+    logo = visual.get("logo") if visual.get("logo") is not None else kit.get("logo")
     if isinstance(logo, str):
-        out["logo"] = logo
+        logo = {"path": logo}
+    if isinstance(logo, dict):
+        for key in ("path", "dark", "light"):
+            v = _str(logo.get(key))
+            if not v:
+                continue
+            lp = Path(v).expanduser()
+            if not lp.is_absolute() and kit_dir is not None:
+                lp = kit_dir / lp
+            out["logos"][key] = str(lp)
+
     b = kit.get("brand")
+    name = ""
     if isinstance(b, dict):
-        out["name"] = str(b.get("name") or "")
+        name = next((_str(b.get(k)) for k in ("name", "brand", "title", "product") if _str(b.get(k))), "")
     elif isinstance(b, str):
-        out["name"] = b
+        name = b.strip()
+    out["name"] = _str(visual.get("wordmark")) or name
     return out
+
+
+def is_dark(hex_color: str) -> bool:
+    """Relative luminance < 0.5 (sRGB, no gamma — good enough to pick a logo variant)."""
+    h = hex_color.lstrip("#")
+    if len(h) in (3, 4):
+        h = "".join(c * 2 for c in h[:3])
+    try:
+        r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return True
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5
+
+
+def _pick_logo(logos: dict[str, str], dark_bg: bool) -> str:
+    """The kit's logo for this background: the matching variant, else ``path`` — if it exists."""
+    order = ("dark", "path", "light") if dark_bg else ("light", "path", "dark")
+    for key in order[:2]:
+        p = logos.get(key)
+        if p and Path(p).is_file():
+            return p
+    return ""
 
 
 def resolve(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     """The effective brand. ``overrides`` (a card call's own data) beat everything."""
     source = "defaults"
-    kit_vis: dict[str, Any] = {"colors": {}, "fonts": {}, "logo": "", "name": ""}
+    kit_vis: dict[str, Any] = {"colors": {}, "fonts": {}, "logos": {}, "name": ""}
     kit_path = social_kit_path()
     if kit_path:
         try:
@@ -149,7 +204,7 @@ def resolve(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
 
             kit = yaml.safe_load(kit_path.read_text(encoding="utf-8")) or {}
             if isinstance(kit, dict):
-                kit_vis = _kit_visual(kit)
+                kit_vis = _kit_visual(kit, kit_path.parent)
                 source = f"social brand kit ({kit_path})"
         except Exception:  # noqa: BLE001 — a broken kit falls back to config, and says so
             source = f"defaults (could not parse {kit_path})"
@@ -157,21 +212,29 @@ def resolve(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg_fonts = parse_pairs(_CONFIG.get("brand_fonts"))
     ov = overrides or {}
     out = {
-        "name": ov.get("brand") or kit_vis["name"] or str(_CONFIG.get("brand_name") or "") or DEFAULTS["name"],
+        "name": _str(ov.get("brand")) or kit_vis["name"] or str(_CONFIG.get("brand_name") or "") or DEFAULTS["name"],
         "colors": {},
         "fonts": {},
-        "logo": ov.get("logo") or kit_vis["logo"] or str(_CONFIG.get("brand_logo") or ""),
+        "logo": "",
         "source": source,
     }
     ov_colors = parse_pairs(ov.get("colors"))
     for slot in DEFAULTS["colors"]:
-        val = ov_colors.get(slot) or kit_vis["colors"].get(slot) or cfg_colors.get(slot) or DEFAULTS["colors"][slot]
-        out["colors"][slot] = val if _HEX.match(val) else DEFAULTS["colors"][slot]
+        # First VALID value wins — a typo in one source must not knock out a good one below it.
+        candidates = (ov_colors.get(slot), kit_vis["colors"].get(slot), cfg_colors.get(slot))
+        out["colors"][slot] = next(
+            (c.strip() for c in candidates if isinstance(c, str) and _HEX.match(c.strip())), DEFAULTS["colors"][slot]
+        )
     ov_fonts = parse_pairs(ov.get("fonts"))
     for slot in ("heading", "body"):
         out["fonts"][slot] = ov_fonts.get(slot) or kit_vis["fonts"].get(slot) or cfg_fonts.get(slot) or ""
-    if kit_path and out["logo"] and not Path(out["logo"]).expanduser().is_absolute():
-        out["logo"] = str(kit_path.parent / out["logo"])
+    # The logo: the call's own, else the kit's variant for this background (resolved against
+    # the KIT's directory), else the plugin setting. Only the kit's paths are kit-relative.
+    out["logo"] = (
+        _str(ov.get("logo"))
+        or _pick_logo(kit_vis["logos"], is_dark(out["colors"]["bg"]))
+        or str(_CONFIG.get("brand_logo") or "").strip()
+    )
     return out
 
 

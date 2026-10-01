@@ -81,3 +81,20 @@ def is_contained(path: str | os.PathLike, root: Path | None = None) -> bool:
     except (OSError, RuntimeError):
         return False
     return resolved == root or root in resolved.parents
+
+
+def unique_dir(parent: Path, stem: str) -> Path:
+    """Create and return a NEW directory ``parent/stem`` (``stem-2``, ``-3`` … if taken).
+
+    Output dirs are stamped to the second; two takes/renders/cards in the same second must
+    never write into — and overwrite — each other's files.
+    """
+    parent.mkdir(parents=True, exist_ok=True)
+    for n in range(1, 1000):
+        p = parent / (stem if n == 1 else f"{stem}-{n}")
+        try:
+            p.mkdir()
+            return p
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"couldn't find a free output directory for {stem!r} in {parent}")
