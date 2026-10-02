@@ -28,11 +28,16 @@ output as a deliberate time-lapse and silences the warning. Any factor in 0.25..
 **Eased ramps.** A ramp switches speed on one frame, and a 1×→4× step reads as a jump even
 when no frame is skipped. ``ease`` (seconds of SOURCE time, or ``true`` for
 ``DEFAULT_EASE_S``) makes the ramp accelerate smoothly from 1× over its first ``ease`` seconds
-and decelerate back to 1× over its last ``ease`` seconds; it's clamped to half the ramp. It's
-a time remap on the ramp's own trimmed piece — ``setpts`` with a closed-form curve whose
-slope (source→output rate) moves along a smoothstep from 1 to 1/factor — so the cut points,
-the frames kept and the continuity guarantees are exactly those of an un-eased ramp; only the
-timestamps in between change, monotonically. An eased ramp of length L and factor f lasts
+and decelerate back to 1× over its last ``ease`` seconds; it's clamped to half the ramp. Its
+piece of the remap is a closed-form curve whose slope (source→output rate) moves along a
+smoothstep from 1 to 1/factor — so the frames kept and the continuity guarantees are exactly
+those of an un-eased ramp; only the timestamps in between change, monotonically.
+
+**One remap, exact boundaries.** The whole run is ONE ``trim`` and ONE ``setpts`` expression
+mapping the source clock onto the output clock, piece by piece, each at the summed computed
+duration of the pieces before it. (Splitting into pieces and concatenating them let concat
+size each piece's last frame as if the speed were flat, drifting every later piece by up to
+(1/f − 1) source frames per ramp, compounding.) An eased ramp of length L and factor f lasts
 ``L/f + ease·(1 − 1/f)`` in the output (a little longer than the un-eased L/f). With
 ``continuous`` on, a ramp of ``EASE_SUGGEST_FACTOR``× or more with no ease is flagged.
 
@@ -382,9 +387,9 @@ def eased_time(t: float, length: float, factor: float, ease: float) -> float:
     return k * L + e * (1 - k) + (t - L)
 
 
-def ease_expr(length: float, factor: float, ease: float) -> str:
-    """:func:`eased_time` as an ffmpeg ``setpts`` expression of ``T`` (seconds from the
-    piece's start), in timebase units. Same formula, branch for branch."""
+def _ease_piece(t: str, length: float, factor: float, ease: float) -> str:
+    """:func:`eased_time` as an ffmpeg expression of the local time ``t`` (a sub-expression,
+    seconds from the piece's start). Same formula, branch for branch."""
     k, e, L = 1.0 / factor, ease, length
     d, m = k - 1.0, L - e
     head = e * (1 + k) / 2
@@ -394,13 +399,18 @@ def ease_expr(length: float, factor: float, ease: float) -> str:
     def big_s(u: str) -> str:
         return f"(pow({u},3)-pow({u},4)/2)"
 
-    u1 = f"(T/{_x(e)})"
-    u3 = f"((T-{_x(m)})/{_x(e)})"
-    first = f"T+{_x(d * e)}*{big_s(u1)}"
-    middle = f"{_x(head)}+{_x(k)}*(T-{_x(e)})"
-    last = f"{_x(mid)}+{_x(k)}*(T-{_x(m)})-{_x(d * e)}*{big_s(u3)}"
-    after = f"{_x(total)}+(T-{_x(L)})"
-    return f"(if(lt(T,{_x(e)}),{first},if(lt(T,{_x(m)}),{middle},if(lt(T,{_x(L)}),{last},{after}))))/TB"
+    u1 = f"({t}/{_x(e)})"
+    u3 = f"(({t}-{_x(m)})/{_x(e)})"
+    first = f"{t}+{_x(d * e)}*{big_s(u1)}"
+    middle = f"{_x(head)}+{_x(k)}*({t}-{_x(e)})"
+    last = f"{_x(mid)}+{_x(k)}*({t}-{_x(m)})-{_x(d * e)}*{big_s(u3)}"
+    after = f"{_x(total)}+({t}-{_x(L)})"
+    return f"if(lt({t},{_x(e)}),{first},if(lt({t},{_x(m)}),{middle},if(lt({t},{_x(L)}),{last},{after})))"
+
+
+def ease_expr(length: float, factor: float, ease: float) -> str:
+    """One eased piece's ``setpts`` expression of ``T`` (seconds from its start), in TB units."""
+    return f"({_ease_piece('T', length, factor, ease)})/TB"
 
 
 def segment_duration(seg: Segment) -> float | None:
@@ -419,37 +429,64 @@ def timeline_duration(segs: list[Segment]) -> float | None:
     return None if any(p is None for p in parts) else sum(parts)  # type: ignore[arg-type]
 
 
-def timeline_filter(segs: list[Segment], crop: dict | None, width: int | None) -> str:
-    """The filter_complex up to ``[base]`` — cut, speed, concat, crop, scale."""
-    parts: list[str] = []
-    n = len(segs)
-    labels = [f"s{i}" for i in range(n)]
-    src = "[0:v]"
-    if n > 1:
-        parts.append(f"[0:v]split={n}" + "".join(f"[{lab}]" for lab in labels))
-    for i, seg in enumerate(segs):
+def timeline_time(segs: list[Segment], t: float) -> float:
+    """Output seconds of SOURCE time ``t`` on the timeline — what :func:`remap_expr` computes."""
+    start, out = segs[0][0], 0.0
+    for seg in segs:
         a, b, f = seg[0], seg[1], seg[2]
         ease = seg[3] if len(seg) > 3 else 0.0
-        inp = f"[{labels[i]}]" if n > 1 else src
-        trim = f"trim=start={_fmt(a)}" + (f":end={_fmt(b)}" if b is not None else "")
-        if ease and b is not None and f != 1.0:
-            # Quoted: the expression's commas must not split the filter chain.
-            pts = f"setpts=PTS-STARTPTS,setpts='{ease_expr(b - a, f, ease)}'"
-        else:
-            pts = "setpts=PTS-STARTPTS" + (f",setpts=PTS/{_fmt(f)}" if f != 1.0 else "")
-        parts.append(f"{inp}{trim},{pts}[v{i}]")
-    if n > 1:
-        parts.append("".join(f"[v{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0[cat]")
-        tail_in = "[cat]"
+        if b is None or t < b or seg is segs[-1]:
+            local = max(0.0, t - a)
+            return out + (eased_time(local, b - a, f, ease) if ease and b is not None else local / f)
+        out += segment_duration(seg) or 0.0
+    return out + max(0.0, t - start)  # unreachable: the last piece always returns
+
+
+def remap_expr(segs: list[Segment]) -> str:
+    """The whole timeline as ONE ``setpts`` expression of the source time ``T``, in TB units.
+
+    Each piece maps its source span onto the output at its exact offset — the sum of the
+    earlier pieces' computed durations — so a boundary lands where the arithmetic says, not
+    where a concat filter guesses from the last frame's duration (which drifts by up to a
+    source frame × (1/f − 1) per ramp, and compounds)."""
+
+    def piece(seg: Segment, offset: float) -> str:
+        a, b, f = seg[0], seg[1], seg[2]
+        ease = seg[3] if len(seg) > 3 else 0.0
+        t = f"(T-{_x(a)})"
+        body = _ease_piece(t, b - a, f, ease) if ease and b is not None else f"{t}/{_x(f)}"
+        return f"{_x(offset)}+({body})"
+
+    offsets, acc = [], 0.0
+    for seg in segs:
+        offsets.append(acc)
+        acc += segment_duration(seg) or 0.0
+    expr = piece(segs[-1], offsets[-1])
+    for seg, off in zip(reversed(segs[:-1]), reversed(offsets[:-1])):
+        expr = f"if(lt(T,{_x(seg[1])}),{piece(seg, off)},{expr})"
+    return f"({expr})/TB"
+
+
+def timeline_filter(segs: list[Segment], crop: dict | None, width: int | None) -> str:
+    """The filter_complex up to ``[base]`` — cut, speed, crop, scale.
+
+    One ``trim`` for the whole run (continuous: there is no interior cut), then — when any
+    piece runs at another speed — one ``setpts`` remap of the source clock onto the output
+    clock (:func:`remap_expr`). Every frame is kept and stays in order; the ``fps`` pass after
+    this is what thins a sped-up stretch."""
+    start, end = segs[0][0], segs[-1][1]
+    trim = f"trim=start={_fmt(start)}" + (f":end={_fmt(end)}" if end is not None else "")
+    if all(seg[2] == 1.0 for seg in segs):
+        pts = "setpts=PTS-STARTPTS"
     else:
-        tail_in = "[v0]"
-    post = []
+        # Quoted: the expression's commas must not split the filter chain.
+        pts = f"setpts='{remap_expr(segs)}'"
+    post = [trim, pts]
     if crop:
         post.append(f"crop={crop['width']}:{crop['height']}:{crop['x']}:{crop['y']}")
     if width:
         post.append(f"scale={int(width) // 2 * 2}:-2:flags=lanczos")
-    parts.append(f"{tail_in}{','.join(post) if post else 'null'}[base]")
-    return ";".join(parts)
+    return f"[0:v]{','.join(post)}[base]"
 
 
 def mp4_cmd(ff: str, src: str, dst: str, base_filter: str, *, crf: int, fps: float) -> list[str]:

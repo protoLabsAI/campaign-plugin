@@ -107,7 +107,7 @@ def test_a_jump_cut_warning_reaches_the_render_report_without_blocking(tmp_path)
     assert r["violations"] == [] and r["warnings"] and "jump cut" in r["warnings"][0]
 
 
-def test_filter_graph_trims_ramps_concats_crops_and_scales():
+def test_filter_graph_trims_once_remaps_ramps_crops_and_scales():
     s = _spec(
         start="start",
         end="end",
@@ -115,10 +115,13 @@ def test_filter_graph_trims_ramps_concats_crops_and_scales():
         crop={"x": 10, "y": 20, "width": 800, "height": 600},
     )
     fc = render.timeline_filter(render.segments(s["start"], s["end"], s["ramps"]), s["crop"], 640)
-    assert fc.startswith("[0:v]split=3[s0][s1][s2]")
-    assert "[s1]trim=start=3:end=7,setpts=PTS-STARTPTS,setpts=PTS/4[v1]" in fc
-    assert "[v0][v1][v2]concat=n=3:v=1:a=0[cat]" in fc
-    assert fc.endswith("[cat]crop=800:600:10:20,scale=640:-2:flags=lanczos[base]")
+    # One trim (continuous — no interior cut, no concat), one setpts remap of the source clock.
+    assert fc.startswith("[0:v]trim=start=1:end=9,setpts='(if(lt(T,(3.000000000)),")
+    assert "split" not in fc and "concat" not in fc
+    assert "(T-(3.000000000))/(4.000000000)" in fc, "the ramp's span runs at 1/4"
+    assert fc.endswith(")/TB',crop=800:600:10:20,scale=640:-2:flags=lanczos[base]")
+    plain = render.timeline_filter(render.segments(1.0, 9.0, []), None, None)
+    assert plain == "[0:v]trim=start=1:end=9,setpts=PTS-STARTPTS[base]"
 
 
 # ── eased ramps (v0.3.4) ─────────────────────────────────────────────────────
@@ -177,9 +180,11 @@ def test_an_eased_ramp_is_a_quoted_setpts_remap_and_its_duration_adds_up():
     segs = render.segments(s["start"], s["end"], s["ramps"], s["eases"])
     assert segs == [(1.0, 3.0, 1.0), (3.0, 7.0, 4.0, 0.5), (7.0, 9.0, 1.0)]
     fc = render.timeline_filter(segs, None, None)
-    assert "[s1]trim=start=3:end=7,setpts=PTS-STARTPTS,setpts='(if(lt(T," in fc and ")/TB'[v1]" in fc
-    assert "PTS/4" not in fc, "the eased piece is re-timed by the curve, not a flat factor"
-    assert "[v0][v1][v2]concat=n=3:v=1:a=0[cat]" in fc, "same cut points as an un-eased ramp"
+    assert fc.startswith("[0:v]trim=start=1:end=9,setpts='(") and fc.endswith(")/TB'[base]")
+    assert "pow(" in fc and "/(4.000000000)" not in fc, "the eased piece follows the curve, not a flat 1/4"
+    # Every boundary lands at the sum of the earlier pieces' computed durations.
+    assert render.timeline_time(segs, 3.0) == pytest.approx(2.0)
+    assert render.timeline_time(segs, 7.0) == pytest.approx(2 + 1 + 0.5 * 0.75)
     assert render.timeline_duration(segs) == pytest.approx(2 + (1 + 0.5 * 0.75) + 2)
     plain = render.segments(s["start"], s["end"], s["ramps"])
     assert render.timeline_duration(plain) == pytest.approx(5.0)
@@ -338,16 +343,71 @@ def test_real_eased_ramp_keeps_every_frame_in_order_and_lasts_as_computed(tmp_pa
     assert all(b > a for a, b in zip(eased, eased[1:])), "monotonic timestamps"
     want = render.timeline_duration(segs)  # 1 + (4/4 + 0.5·0.75) + 1 = 3.375
     assert want == pytest.approx(3.375)
-    assert eased[-1] + 0.04 == pytest.approx(want, abs=0.06)
+    assert eased[-1] + 0.04 == pytest.approx(want, abs=0.002)
+    assert eased[125] == pytest.approx(1 + 1 + 0.375, abs=0.002), "the tail starts exactly where the curve ends"
     # Inside the ramp the frame spacing glides from 1× (40 ms) down to 4× (10 ms) and back.
     gaps = [round(b - a, 3) for a, b in zip(eased, eased[1:])]
-    ramp = gaps[25:124]  # frames 25..124 are the ramp's (1.00–4.96 s); 124→125 is concat's join
+    ramp = gaps[25:125]  # frames 25..125: the ramp (1.00–4.96 s) and its join into the 1× tail
     assert ramp[0] > 0.03 and min(ramp) <= 0.011 and ramp[-1] > 0.03
     assert max(abs(b - a) for a, b in zip(ramp, ramp[1:])) < 0.012, "no lurch between neighbouring frames"
+    assert ramp[-1] > 0.035, "and no short frame at the join"
     # And the shipped mp4 lasts what the curve says.
     source = render.probe(src)
     mp4 = render.render_output(src, tmp_path / "out", spec, marks=marks, source=source)
     assert mp4["duration_s"] == pytest.approx(want, abs=0.1) and mp4["violations"] == []
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_ffmpeg(), reason="ffmpeg/ffprobe not installed")
+@pytest.mark.parametrize("factor, tail", [(0.25, 7.5), (4.0, 1.875)])
+def test_real_eased_ramp_tail_starts_on_the_exact_boundary(tmp_path, factor, tail):
+    # Review repro (ffmpeg 8.0.1, 25 fps, ramp 1–3 s, ease 0.5): concat sized the ramp's last
+    # frame as if flat, so the tail started at 7.591 / 1.852 s instead of 7.500 / 1.875 s.
+    import shutil
+
+    ff = shutil.which("ffmpeg")
+    src = tmp_path / "take.webm"
+    subprocess.run(
+        [ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=160x100:rate=25", "-t", "4",
+         "-c:v", "libvpx-vp9", "-b:v", "100k", str(src)],
+        check=True,
+    )  # fmt: skip
+    segs = render.segments(0.0, 4.0, [(1.0, 3.0, factor)], [0.5])
+    assert render.timeline_time(segs, 3.0) == pytest.approx(tail)
+    times = _frame_times(ff, src, render.timeline_filter(segs, None, None))
+    assert len(times) == 100 and all(b > a for a, b in zip(times, times[1:]))
+    assert times[75] == pytest.approx(tail, abs=0.002), "frame at source 3.00 s opens the tail on the boundary"
+    assert times[-1] == pytest.approx(tail + 0.96, abs=0.002)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_ffmpeg(), reason="ffmpeg/ffprobe not installed")
+def test_real_multiple_eased_ramps_do_not_compound_drift(tmp_path, monkeypatch):
+    import shutil
+
+    ff = shutil.which("ffmpeg")
+    monkeypatch.setattr(deps, "ffmpeg", lambda: ff)
+    monkeypatch.setattr(deps, "ffprobe", lambda: shutil.which("ffprobe"))
+    src = tmp_path / "take.webm"
+    subprocess.run(
+        [ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=160x100:rate=25", "-t", "10",
+         "-c:v", "libvpx-vp9", "-b:v", "100k", str(src)],
+        check=True,
+    )  # fmt: skip
+    marks = {}
+    spec = render.normalize_output(
+        {"name": "m", "format": "mp4", "start": 0.5, "end": 9.0, "speed": [
+            {"from": 1, "to": 3, "factor": 4, "ease": 0.5},
+            {"from": 4, "to": 6, "factor": 0.5, "ease": 0.4},
+            {"from": 7, "to": 8.5, "factor": 3, "ease": True}]}, marks, 10.0,
+    )  # fmt: skip
+    segs = render.segments(spec["start"], spec["end"], spec["ramps"], spec["eases"])
+    times = _frame_times(ff, src, render.timeline_filter(segs, None, None))
+    assert len(times) == 212 and all(b > a for a, b in zip(times, times[1:]))
+    for i, ts in enumerate(times):  # every frame where the curve puts it — boundaries included
+        assert ts == pytest.approx(render.timeline_time(segs, 0.52 + i * 0.04), abs=0.002)
+    mp4 = render.render_output(src, tmp_path / "o", spec, marks=marks, source=render.probe(src))
+    assert mp4["duration_s"] == pytest.approx(render.timeline_duration(segs), abs=1 / 30 + 0.01)
 
 
 # ── hardening (v0.1.1) ─────────────────────────────────────────────────────────

@@ -151,6 +151,54 @@ def test_a_failed_take_keeps_a_playable_video_asset_with_its_failure_note(tools,
     assert ("shoot_finished", {"campaign_id": 1, "asset_id": 2, "stills": []}) in tools.events
 
 
+def test_a_failed_take_cannot_go_straight_to_review_without_an_override(tools, browser_ok, ffmpeg_ok):
+    browser_ok.fail_on = lambda action, how, args: action == "click"
+    call(tools, "campaign_create", name="L")
+    call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT)
+    (take,) = store.list_assets(1, kind="clip")
+    out = call(tools, "campaign_asset_update", asset_id=take["id"], status="ready_for_review")
+    assert out.startswith("Not updated") and "FAILED take" in out and "allow_failed_take" in out, out
+    assert store.get_asset(take["id"])["status"] == "captured"
+    out = call(tools, "campaign_asset_update", asset_id=take["id"], status="ready_for_review", allow_failed_take=True)
+    assert store.get_asset(take["id"])["status"] == "ready_for_review", out
+    # A beat RENDERED from it is a normal asset: no override needed.
+    call(tools, "campaign_render", asset_id=take["id"], outputs=[{"name": "beat", "format": "mp4", "end": 4.0}])
+    beat = next(a for a in store.list_assets(1, kind="clip") if a["parent_id"] == take["id"])
+    assert "ready_for_review" in call(tools, "campaign_asset_update", asset_id=beat["id"], status="ready_for_review")
+
+
+def test_a_take_whose_video_cannot_be_finalized_never_fills_the_planned_slot(tools, browser_ok, ffmpeg_ok, monkeypatch):
+    import conftest
+    from test_shoot import _crash_on_close
+
+    monkeypatch.setattr(conftest.FakeContext, "close", _crash_on_close)
+    call(tools, "campaign_create", name="L")
+    call(tools, "campaign_asset_add", campaign_id=1, kind="clip", title="planned hero")
+    out = call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT, asset_id=1)
+    assert out.startswith("Take failed — the recording couldn't be finalized after step 5"), out
+    assert store.get_asset(1)["status"] == "planned" and not store.get_asset(1)["path"]
+    take = store.get_asset(2)
+    assert take["status"] == "captured" and take["notes"].startswith("FAILED at step 5:") and take["meta"]["failed"]
+
+
+def test_a_passing_take_ffprobe_cannot_read_is_registered_as_failed(tools, browser_ok, ffmpeg_ok, monkeypatch):
+    def unreadable(path, runner=None):
+        if str(path).endswith(".webm"):
+            raise render.RenderError("ffprobe couldn't read hero.webm: EBML header parsing failed")
+        return {"width": 1, "height": 1, "duration_s": 0.0, "size_bytes": 1}
+
+    monkeypatch.setattr(render, "probe", unreadable)
+    call(tools, "campaign_create", name="L")
+    call(tools, "campaign_asset_add", campaign_id=1, kind="clip", title="planned hero")
+    out = call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT, asset_id=1)
+    assert out.startswith("Take failed — the recording can't be read") and "EBML" in out, out
+    assert "Recorded take" not in out
+    assert store.get_asset(1)["status"] == "planned" and not store.get_asset(1)["path"], "never fills the slot"
+    take = store.get_asset(2)
+    assert take["notes"].startswith("FAILED: the recording can't be read") and take["meta"]["failed"]
+    assert "Not updated" in call(tools, "campaign_asset_update", asset_id=2, status="ready_for_review")
+
+
 def test_a_beat_renders_from_a_failed_take_up_to_a_reached_mark_or_a_time(tools, browser_ok, ffmpeg_ok):
     browser_ok.fail_on = lambda action, how, args: action == "click"
     call(tools, "campaign_create", name="L")

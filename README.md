@@ -20,7 +20,9 @@ product: the planning + production half of a "Brand & Launch" agent.
 - **Failed takes keep their footage** — a take whose step fails mid-run still finalizes its
   video, `timing.json` and `failure.png`, and registers as a `captured` clip noted
   `FAILED at step N: <error>` with the marks it reached, so `campaign_render` can cut a beat
-  from the footage before the failure.
+  from the footage before the failure. A failed take can't go to review itself (render the
+  good part, or `allow_failed_take=true`); a run whose video couldn't be finalized or that
+  ffprobe can't read counts as failed and never fills a planned asset.
 - **Cards** — branded HTML templates rendered to PNG: `og-1280x640` (kept under GitHub's 1 MB
   social-preview limit), `x-card-1600x900`, `square-1080`, `title-slide-1920x1080`.
 - **Montages** — many short beats (each recorded in a different app theme) + tagline cards +

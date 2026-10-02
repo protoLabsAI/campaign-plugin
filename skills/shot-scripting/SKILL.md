@@ -319,3 +319,6 @@ with `campaign_render`: `end` must be seconds or a mark the take **reached** (a 
 failed step doesn't exist and is refused, naming the marks there are); leave `end` off to run
 to the end of the recording, which includes the failing step — trim that off. Otherwise
 supersede it (`campaign_asset_update(…, status='superseded')`) once the re-take lands.
+A failed take itself is refused for `ready_for_review` — offer the render cut from it. A run
+whose steps all passed but whose video couldn't be finalized (the browser died while closing)
+or that ffprobe can't read is a failed take too: re-shoot it.

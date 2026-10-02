@@ -140,6 +140,9 @@ def _keep_failed_take(
     It never fills or supersedes ``asset_id``: a planned slot is for a clean take."""
     facts = _file_facts(r["video"])
     note = _failure_note(r, error)
+    unreadable = _video_problem(r["video"])
+    if unreadable and "can't be read" not in note:
+        note += f" [recording unreadable: {unreadable}]"
     marks = r.get("marks") or {}
     meta = {
         "timing": r.get("timing", ""),
@@ -454,6 +457,7 @@ def build_tools(registry):
         path: str | None = None,
         notes: str | None = None,
         superseded_by: list[int] | None = None,
+        allow_failed_take: bool = False,
     ) -> str:
         """Move an asset through production or edit it: status planned → scripted → captured →
         rendered → ready_for_review. Mark ready_for_review only after the asset-review skill's
@@ -463,7 +467,9 @@ def build_tools(registry):
         status='superseded' retires a take a retake REPLACED: it leaves the operator's review
         queue and the counts without being approved or rejected, and montages/storyboards refuse
         it. Pass superseded_by=[new asset ids] and notes saying why. Allowed from any status
-        except approved — an APPROVED asset can only be superseded by the operator."""
+        except approved — an APPROVED asset can only be superseded by the operator. A take kept
+        from a FAILED shoot is refused for ready_for_review (render the good part instead)
+        unless allow_failed_take=true says the raw take itself is the deliverable."""
         try:
             row = store.get_asset(asset_id)
             if row is None:
@@ -488,7 +494,7 @@ def build_tools(registry):
                 fields["path"] = str(Path(path).expanduser().resolve()) if path else ""
                 if path:
                     fields.update(_file_facts(fields["path"]))
-            a = store.update_asset(asset_id, **fields)
+            a = store.update_asset(asset_id, allow_failed_take=bool(allow_failed_take), **fields)
         except ValueError as e:
             return f"Not updated — {e}"
         _emit("asset_registered", {"campaign_id": a["campaign_id"], "asset_id": a["id"], "status": a["status"]})
@@ -756,6 +762,15 @@ def build_tools(registry):
             log.exception("[campaign] shoot failed")
             return f"The browser couldn't run: {e}\n\n{deps.brief()}"
 
+        problem = _video_problem(res.get("video", ""))
+        if problem:
+            # A take that "passed" but whose recording ffprobe can't read is not a good take —
+            # never let it fill a planned slot or pass for one.
+            r = {**res, "failed_step": res.get("failed_step") or 0}
+            err = f"the recording can't be read ({problem}) — it may be truncated"
+            kept, take_id, still_ids = _keep_failed_take(campaign_id, norm, r, err, script_id, lane_id, title, asset_id)
+            _emit("shoot_finished", {"campaign_id": campaign_id, "asset_id": take_id, "stills": still_ids})
+            return f"Take failed — {err}\n\n{kept}\n\nRe-shoot it."
         facts = _file_facts(res["video"]) if res.get("video") else {}
         meta = {
             "timing": res["timing"],
@@ -1236,6 +1251,22 @@ def _multimodal_fn():
         return None
     fn = getattr(sdk, "multimodal_tool_result", None)
     return fn if callable(fn) else None
+
+
+def _video_problem(path: str) -> str | None:
+    """Why a recorded video isn't usable — missing, or unreadable by ffprobe — or None.
+    Without ffprobe there's no way to tell, so it isn't flagged here (render will be)."""
+    if not path or not Path(path).is_file():
+        return "no video file was written"
+    if not deps.ffprobe():
+        return None
+    try:
+        info = render.probe(path)
+    except Exception as e:  # noqa: BLE001
+        return f"ffprobe: {e}"
+    if not info.get("width") or not info.get("duration_s"):
+        return "ffprobe finds no video frames in it"
+    return None
 
 
 def _file_facts(path: str) -> dict[str, Any]:

@@ -820,8 +820,16 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
             finally:
                 try:
                     context.close()  # finalizes the video file
-                except Exception:  # noqa: BLE001 — keep whatever was flushed; the browser still closes
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    # A take that already failed keeps whatever was flushed. A CLEAN run whose
+                    # video couldn't be finalized is NOT a good take: the file may be truncated.
+                    if not error:
+                        last = log[-1]["index"] if log else 0
+                        error = (
+                            f"the recording couldn't be finalized after step {last} — closing the "
+                            f"browser context failed: {first_line(e)}; the video may be truncated"
+                        )
+                        failed_step = last
         finally:
             browser.close()
 
