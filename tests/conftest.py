@@ -64,10 +64,24 @@ class FakeLocator:
         )
         if self.page.fail_on and self.page.fail_on(action, self.how, self.args):
             raise RuntimeError(f"Timeout 15000ms exceeded.\nwaiting for {self.how}{self.args}")
+        n = self.count()
+        if n > 1 and self.idx is None and action != "wait_for":
+            raise RuntimeError(f"Error: strict mode violation: {self.how}{self.args} resolved to {n} elements:")
 
     def nth(self, i):
         self.idx = i
         return self
+
+    def locator(self, sel):  # a chained filter (`visible=true`) — recorded on the call's kw
+        self.kw = dict(self.kw, filter=sel)
+        return self
+
+    def count(self):
+        return len(self.page.matches.get(self.args[0], ["x"]))
+
+    def evaluate(self, js, arg=None, **kw):
+        texts = self.page.matches.get(self.args[0], ["x"])
+        return {"tag": "span", "role": "", "text": texts[self.idx or 0], "visible": True}
 
     def click(self, **kw):
         self._log("click", **kw)
@@ -198,6 +212,7 @@ class FakePage:
         self.ctx = ctx
         self.calls = ctx.calls
         self.fail_on = ctx.fail_on
+        self.matches = ctx.browser.pw.matches
         self.keyboard = _Keyboard(self)
         self.mouse = _Mouse(self)
         vdir = Path(ctx.kw["record_video_dir"]) if ctx.kw.get("record_video_dir") else None
@@ -351,8 +366,11 @@ class _Chromium:
 class FakePlaywright:
     """Call it to get a context manager, exactly like ``sync_playwright()``."""
 
-    def __init__(self, fail_on=None, png_size=2_000, jpeg_sizes=None, frames=None):
+    def __init__(self, fail_on=None, png_size=2_000, jpeg_sizes=None, frames=None, matches=None):
         self.calls = []
+        # What a target arg matches on the page: {"3 passed": ["3 passed", "pytest: 3 passed"]}.
+        # Unlisted targets match one element. An action on >1 without nth = strict violation.
+        self.matches = dict(matches or {})
         # Child frames the page grows: (after N polls/gotos, url, iframe selector, parent url|None)
         self.frames = [list(f) for f in (frames or [])]
         self.fail_on = fail_on

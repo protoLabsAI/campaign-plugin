@@ -30,9 +30,16 @@ Example::
 
 Targets (click/hover/fill/type/press/wait_for/scroll/screenshot) are either a string
 (a Playwright selector: CSS, ``text=…``, ``role=button[name="Save"]``) or a mapping with
-ONE of ``selector`` / ``role`` (+ ``name``, ``exact``) / ``text`` / ``label`` /
-``placeholder`` / ``test_id``, plus an optional ``nth``. Prefer role/text/label — they
+ONE of ``selector`` / ``role`` (+ ``name``) / ``text`` / ``label`` / ``placeholder`` /
+``test_id``, plus optional ``exact`` (whole-string, case-sensitive text/name match instead of
+substring) and ``nth`` (0-based index, or ``first`` / ``last``). Prefer role/text/label — they
 survive restyles; CSS classes don't.
+
+Several matches: a WAIT (``wait_for`` on a target) is satisfied when ANY match reaches the
+state — "3 passed" in a bold summary AND a code span is fine to wait on. An ACTION (click,
+hover, fill, type, press, scroll, screenshot of a target) needs exactly ONE element: an
+ambiguous target fails the step with the first few matches listed — pick one with ``nth``,
+tighten it with ``exact: true``, or use a narrower role/selector.
 
 Frames: a target inside an ``<iframe>`` (a protoAgent console plugin view is one — e.g. the
 Terminal rail view at ``/plugins/terminal/view``) adds ``frame:`` — the step's mapping or the
@@ -210,15 +217,27 @@ def _target(raw: Any, where: str, problems: list[str], *, required: bool = True)
     if "exact" in raw:
         out["exact"] = bool(raw["exact"])
     if "nth" in raw:
-        try:
-            out["nth"] = int(raw["nth"])
-        except (TypeError, ValueError):
-            problems.append(f"{where}: nth must be an integer")
+        nth = _nth(raw["nth"])
+        if nth is None:
+            problems.append(f"{where}: nth must be a 0-based index (0, 1, …) or `first` / `last`, got {raw['nth']!r}")
+        else:
+            out["nth"] = nth
     if raw.get("frame") is not None:
         f = _frame(raw["frame"], f"{where} frame", problems)
         if f is not None:
             out["frame"] = f
     return out
+
+
+def _nth(raw: Any) -> int | str | None:
+    """``nth`` — a 0-based index, or ``first`` / ``last``. ``None`` when it's neither."""
+    if isinstance(raw, str) and raw.strip().lower() in ("first", "last"):
+        return raw.strip().lower()
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw if raw >= 0 else None
+    if isinstance(raw, str) and raw.strip().isdigit():
+        return int(raw.strip())
+    return None
 
 
 def _frame(raw: Any, where: str, problems: list[str], depth: int = 1) -> dict[str, Any] | None:
@@ -686,6 +705,8 @@ def describe_target(t: dict[str, Any] | None) -> str:
             s = f"{k}={t[k]!r}"
             if k == "role" and t.get("name"):
                 s += f" name={t['name']!r}"
+            if t.get("exact"):
+                s += " exact"
             if "nth" in t:
                 s += f" nth={t['nth']}"
             if t.get("frame"):
