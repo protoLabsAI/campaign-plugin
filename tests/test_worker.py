@@ -472,3 +472,68 @@ def test_real_chromium_cannot_reach_the_fenced_api_by_any_url_trick(tmp_path):
             srv.shutdown()
     leaked = [(m, p) for m, p in handler.hits if p not in _CONTROLS]
     assert leaked == [], f"the fence let these navigations through: {leaked}"
+
+
+# ── the fence holds inside iframes too ────────────────────────────────────────
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_real_chromium_fences_iframe_navigations_and_requests_from_inside_a_frame(tmp_path):
+    """A plugin view is an iframe: a fenced URL loaded AS a frame, a frame navigated to one
+    later, and a request made from INSIDE an allowed frame must all be aborted."""
+    hits: list[str] = []
+    fenced = "/api/plugins/campaign/assets/1/review"
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            hits.append(self.path)
+            if self.path == "/landing":
+                body = (
+                    f'<iframe id="a" src="{fenced}"></iframe>'
+                    '<iframe id="b" src="/frame-ok"></iframe>'
+                    "<script>setTimeout(() => { document.getElementById('b').src = "
+                    f"'/api/plugins/%2563ampaign/assets/2/review'; }}, 1500);</script>"
+                )
+            elif self.path == "/frame-ok":
+                body = (
+                    "<p>inner</p><script>"
+                    f"fetch('{fenced}?from=frame', {{method: 'POST'}}).catch(() => null);"
+                    f"const i = new Image(); i.src = '/agents/x{fenced}?img=1';"
+                    "const f = document.createElement('iframe'); "
+                    f"f.src = '{fenced}?nested=1'; document.body.appendChild(f);"
+                    "fetch('/frame-probe-done');</script>"
+                )
+            else:
+                body = "ok"
+            data = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        do_POST = do_GET
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        s = validate(
+            {
+                "base_url": url,
+                "steps": [
+                    {"goto": "/landing"},
+                    {"wait_for": {"text": "inner", "frame": "/frame-ok"}},
+                    {"hold": 2500},  # past the re-navigation of frame b
+                ],
+            }
+        )
+        report = shoot.run_worker(shoot.build_job(s, tmp_path / "t", bearer="app-tok"), 120)
+    finally:
+        srv.shutdown()
+    assert report["ok"], report
+    assert "/frame-ok" in hits and "/frame-probe-done" in hits, f"the frame never ran: {hits}"
+    leaked = [p for p in hits if "plugins" in p.lower() or "ampaign" in p]
+    assert leaked == [], f"the fence let these frame loads/requests through: {leaked}"

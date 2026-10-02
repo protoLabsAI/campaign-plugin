@@ -33,6 +33,41 @@ In a `type` step, `text:` is what gets typed — to target an element by its tex
 
 A target matching several elements fails loudly (strict mode). Narrow it, or add `nth`.
 
+## Inside an iframe — protoAgent plugin views
+
+A protoAgent console **plugin view** (the Terminal rail view, Notes, any `/plugins/<id>/view`)
+is an `<iframe>`. A target inside one says which frame with `frame:` — on the step or on the
+target — or the step searches only the top page and never finds it:
+
+```yaml
+- click: {role: button, name: Terminal}                       # opens the rail view
+- wait_for: {text: "connected", frame: {url: /plugins/terminal/view}, timeout_ms: 30000}
+- click: {selector: ".xterm", frame: {url: /plugins/terminal/view}}
+- type: {target: {selector: textarea, frame: /plugins/terminal/view}, text: "ls", delay_ms: 45}
+- press: {key: Enter, selector: textarea, frame: /plugins/terminal/view}
+- screenshot: {name: terminal, frame: /plugins/terminal/view}  # just the iframe
+```
+
+- `frame: {url: …}` — a **substring** of the frame's URL; with `*`/`?`/`[` it's a **glob on
+  the whole URL** (`"*/plugins/*/view*"`). A bare string is a `url`.
+- `frame: {selector: "iframe[title='Terminal']"}` — the `<iframe>` element in its parent.
+  Give both to be exact; two frames matching is an error, never a guess.
+- `frame: {url: …, frame: {url: …}}` — one level deeper (max 2).
+- The frame is **waited for** within the step's `timeout_ms` (a view's iframe attaches after
+  the console renders). `wait_for: {frame: …}` with no target waits for the frame alone;
+  `screenshot` with only a `frame` shoots the iframe element; `scroll` with only a `frame`
+  scrolls inside it. A frame that never shows up fails the step and lists the frames the page
+  does have — use one of those URLs.
+- Use `agent_browser` on the view's own URL (`/plugins/<id>/view`) to snapshot its roles/names.
+
+**Masks and redaction reach into every frame** — current ones and ones that load later — so a
+top-level `mask`/`redact` covers plugin views too. **But CSS can't touch text drawn on a
+`<canvas>`**: the terminal (xterm.js) paints its text, so neither `mask` selectors nor
+`redact` patterns can change what it shows. Keep secrets off a canvas terminal *in the shot
+itself*: `cd /tmp` (not your home dir) before you start, set a neutral prompt
+(`export PS1='$ '`), never `cat` an env file or print a token, and `clear` before the beat that
+matters. Or `mask` the whole terminal element (`.xterm`) for a beat you can't keep clean.
+
 ## Timing — a viewer has to read it
 
 - `wait_for` before every click on something that loads (`{text: …}`, `{role: …}`). Never a
@@ -81,7 +116,7 @@ mask: {selectors: [".account-menu", "[data-private]"], mode: blur}
 banners and toasts that aren't part of the story). Top-level `redact`/`mask` apply from the first frame; a `- mask:` step applies from that point.
 If the app shows tokens, paths, emails, internal hostnames or customer data anywhere in frame,
 mask it — then LOOK at the stills with `campaign_view`; redaction is a safety net, not proof
-(it can't reach text drawn on a canvas, e.g. a terminal).
+(it can't reach text drawn on a canvas, e.g. a terminal — see *Inside an iframe* above).
 
 ## Auth
 
@@ -96,6 +131,7 @@ token and none is set up, ask the operator to create one; never reach for anothe
 The error names the step, the cause, and a `failure.png`. Look at the screenshot first:
 - element not found → the page wasn't ready (add `wait_for`) or the name differs (re-snapshot);
 - several matches → narrow the target or add `nth`;
+- element not found but you can SEE it → it's inside an iframe (a plugin view): add `frame:`;
 - timeout on `network_idle` → the app polls or streams (SSE); wait for a visible element instead;
 - `Timeout 15000ms exceeded` on something that is just slow → give that step `timeout_ms`.
 Fix that ONE step and re-shoot. Same step failing three times → report to the operator with

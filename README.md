@@ -58,8 +58,8 @@ loads nothing from the network at all.
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.2.3`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.2.3`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.2.4`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.2.4`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —
@@ -135,6 +135,20 @@ Targets prefer accessible roles and text over CSS. Every waiting step gives up a
 `network_idle` never settles on an app that holds SSE/websockets open — wait for an element. Tokens never go in a script: use
 `auth: {bearer_env: CAMPAIGN_APP_TOKEN}` (a `CAMPAIGN_*` env var, or one named in the
 `bearer_envs` setting; sent to the `base_url` origin only) or `auth: {storage_state: path}`.
+**Plugin views are iframes.** A target inside one adds `frame:` — `{url: /plugins/terminal/view}`
+(substring; a glob on the whole URL with `*`), `{selector: "iframe[title='Terminal']"}`, or both,
+nesting one level (`frame: {…, frame: {…}}`). The frame is waited for within the step's timeout:
+
+```yaml
+  - wait_for: {text: connected, frame: {url: /plugins/terminal/view}, timeout_ms: 30000}
+  - type: {target: {selector: textarea, frame: /plugins/terminal/view}, text: "ls", delay_ms: 45}
+  - screenshot: {name: terminal, frame: /plugins/terminal/view}   # frame only = the iframe element
+```
+
+Masks and redaction reach into every frame, including ones that load later — but not into text
+drawn on a `<canvas>` (xterm.js): keep secrets out of a canvas terminal in the shot itself
+(`cd /tmp`, a neutral `PS1`). The request fence applies to frame loads and to requests made
+from inside frames too.
 Re-recording into an existing asset (`asset_id`) replaces that asset's previous take: its
 stills are removed (any the operator approved are kept).
 

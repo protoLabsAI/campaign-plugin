@@ -210,3 +210,73 @@ def test_unknown_step_options_are_errors_not_dropped():
     assert "did you mean `timeout_ms`" in _problems(_with({"click": {"text": "Go", "timeout": 30}}))
     assert "unknown option `timeout_ms`" in _problems(_with({"hold": {"ms": 100, "timeout_ms": 5000}}))
     assert "a fixed `ms` wait doesn't take one" in _problems(_with({"wait_for": {"ms": 500, "timeout_ms": 5000}}))
+
+
+# ── frames ────────────────────────────────────────────────────────────────────
+TERM = "/plugins/terminal/view"
+
+
+def test_frame_on_the_step_or_the_target_normalizes_into_the_target():
+    s = validate(
+        _with(
+            {"wait_for": {"text": "connected", "frame": {"url": TERM}, "timeout_ms": 30_000}},
+            {"type": {"target": {"selector": "textarea", "frame": TERM}, "text": "ls"}},
+            {"click": {"target": "#go", "frame": {"selector": "iframe[title='Terminal']"}}},
+            {"press": {"role": "textbox", "key": "Enter", "frame": {"url": "*/plugins/*/view*"}}},
+            {"hover": {"text": "x", "frame": {"selector": "iframe.outer", "frame": {"url": "inner.html"}}}},
+        )
+    )
+    t = [st["target"] for st in s["steps"][1:]]
+    assert t[0] == {"text": "connected", "frame": {"url": TERM}}
+    assert t[1] == {"selector": "textarea", "frame": {"url": TERM}}, "a bare string is a url"
+    assert t[2]["frame"] == {"selector": "iframe[title='Terminal']"}
+    assert t[3]["frame"] == {"url": "*/plugins/*/view*"}
+    assert t[4]["frame"] == {"selector": "iframe.outer", "frame": {"url": "inner.html"}}
+    assert "in frame(url='/plugins/terminal/view')" in shotscript.describe_step(s["steps"][1])
+
+
+def test_a_frame_alone_is_a_wait_a_screenshot_or_a_scroll_of_that_frame():
+    s = validate(
+        _with(
+            {"wait_for": {"frame": TERM}},
+            {"screenshot": {"name": "term", "frame": {"url": TERM}}},
+            {"scroll": {"y": 300, "frame": TERM}},
+        )
+    )
+    w, shot, sc = s["steps"][1:]
+    assert w["frame"] == {"url": TERM} and not w.get("target")
+    assert shot["frame"] == {"url": TERM} and not shot["target"]
+    assert sc["frame"] == {"url": TERM} and sc["y"] == 300
+    assert shotscript.describe_step(w) == "wait for frame(url='/plugins/terminal/view')"
+
+
+def test_unknown_frame_keys_and_bad_frames_error_loudly():
+    msg = _problems(
+        _with(
+            {"click": {"text": "x", "frame": {"src": TERM}}},
+            {"click": {"text": "x", "frame": {"url": TERM, "name": "t"}}},
+            {"click": {"text": "x", "frame": {}}},
+            {"click": {"text": "x", "frame": 3}},
+            {"click": {"text": "x", "frame": {"url": "a", "frame": {"url": "b", "frame": {"url": "c"}}}}},
+            {"click": {"target": {"text": "x", "frame": TERM}, "frame": TERM}},
+            {"type": {"text": "ls", "frame": TERM}},
+            {"press": {"key": "Enter", "frame": TERM}},
+            {"mask": {"selectors": [".x"], "frame": TERM}},
+            {"click": {"target": {"text": "x", "frmae": TERM}}},
+        )
+    )
+    assert "step 2 (click) frame: unknown frame key `src`" in msg
+    assert "step 3 (click) frame: unknown frame key `name`" in msg
+    assert "step 4 (click) frame: needs a `url`" in msg
+    assert "step 5 (click) frame: must be a URL string" in msg
+    assert "nest at most 2 deep" in msg
+    assert "step 7 (click): `frame` is given twice" in msg
+    assert "step 8 (type): `frame` needs a target" in msg
+    assert "step 9 (press): `frame` needs a target" in msg
+    assert "step 10 (mask): unknown option `frame`" in msg and "reaches into every frame" in msg
+    assert "step 11 (click): unknown target key `frmae`" in msg and "did you mean `frame`" in msg
+
+
+def test_top_level_mask_and_redact_reject_unknown_options():
+    msg = _problems(_with(mask={"selectors": [".x"], "frame": TERM}, redact={"presets": ["emails"], "mode": "x"}))
+    assert "mask: unknown option `frame`" in msg and "redact: unknown option `mode`" in msg
