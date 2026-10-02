@@ -65,8 +65,8 @@ loads nothing from the network at all.
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.3.1`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.3.1`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.3.2`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.3.2`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —
@@ -136,7 +136,8 @@ steps:
 ```
 
 Steps: `goto`, `click`, `fill`, `type` (per-char delay), `press`, `hover`, `wait_for`
-(selector/text/role/network idle/ms), `hold`, `scroll`, `mark`, `screenshot`, `mask`, `redact`.
+(selector/text/role/network idle/ms), `hold`, `scroll`, `mark`, `screenshot`, `mask`, `redact`,
+`upload`.
 Targets prefer accessible roles and text over CSS. Every waiting step gives up after
 `step_timeout_ms` (default 15000); a step that waits on slow real work sets its own
 `timeout_ms` (max 180000 — more is a validation error, never a silent clamp), all bounded by
@@ -164,6 +165,38 @@ drawn on a `<canvas>` (xterm.js): keep secrets out of a canvas terminal in the s
 from inside frames too. The shoot browser launches with `--force-device-scale-factor` matching
 `device_scale_factor`: under DPR emulation alone, xterm.js's WebGL renderer (the Terminal view)
 sized its canvas at 1x and drew a blank terminal at dsf 2.
+**Seed browser storage before the app boots.** An app that restores UI state from
+`localStorage` (the protoAgent console keeps panel widths in `protoagent.ui`, a zustand
+`persist` blob) boots at its defaults in a fresh recording browser. Seed it:
+
+```yaml
+storage:
+  origin: http://localhost:7871      # optional — default: base_url's origin
+  local: {protoagent.ui: {state: {panelWidths: {right: 860}}, version: 0}}   # objects → JSON
+  session: {lastTab: plugins}        # strings stored as-is
+init_script: "window.__demo = true;" # optional escape hatch (≤ 64 KB)
+```
+
+`storage` is written by a context init script before any page script runs, only in top-level
+documents whose `location.origin` is the storage origin (≤ 200 entries, 256 KB). `init_script`
+runs before page scripts in every document on the `base_url` origin only, inside a function.
+Security posture: both are operator/agent-authored and trusted like the rest of the script
+(which can already navigate and type anywhere); they run only inside the recording browser,
+which stays fenced off this plugin's own API, and the origin check keeps them off third-party
+pages and frames. Neither is a place for a credential — the script is stored in the plan.
+
+**File uploads.** `- upload: {target, files: [/abs/path, …], frame?}` — an
+`<input type=file>` target (hidden is fine) gets the files via `set_input_files`; any other
+target (a button, a drop zone) is clicked and the file chooser it opens gets them
+(`expect_file_chooser`). The host checks every path at shoot time, symlinks resolved, before
+the browser starts: it must be a regular file under the **`upload_dirs`** setting (empty — the
+default — refuses every upload; the filesystem root or the whole home dir is ignored as too
+broad), ≤ 50 MB (100 MB per step), and never a key/credential file (`.env*`, `secrets.yaml`,
+`id_rsa`, `*.pem`, `.netrc`, …), inside a credential dir (`.ssh`, `.aws`, `.gnupg`,
+`.config/gh`, …), or inside the agent's home (`~/.protoagent`, `$PROTOAGENT_HOME`) other than
+this plugin's own media. `upload_dirs` is marked `spawns: true`, so the agent's `set_config`
+can't widen it.
+
 Re-recording into an existing asset (`asset_id`) replaces that asset's previous take: its
 stills are removed (any the operator approved are kept).
 
@@ -278,7 +311,8 @@ Python with playwright for the browser worker; blank = managed runtime, else the
 named so core's agent self-config fence refuses agent writes to it), `brand_kit_path`
 (a Social Studio kit to read; blank auto-detects), `brand_name` / `brand_colors` /
 `brand_fonts` / `brand_logo` (fallbacks), `limit_overrides`, `bearer_envs` (extra env-var
-names a shot script may use as its bearer), `producer_model`.
+names a shot script may use as its bearer), `upload_dirs` (folders an `upload` step may read
+files from; blank refuses uploads; operator-only), `producer_model`.
 
 ## Development
 

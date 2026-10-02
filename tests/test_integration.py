@@ -563,3 +563,138 @@ def test_real_wait_for_hidden_on_a_twice_matched_text_waits_for_the_last_one(sit
     )
     res = shoot.run(script, tmp_path / "hide")
     assert res["marks"]["gone"] - res["marks"]["loaded"] > 1.2, res["marks"]
+
+
+# ── pre-seeded storage + init_script, for real: the app reads localStorage while it boots ──
+STORAGE_PAGE = """<!doctype html><html><head><meta charset="utf-8"><script>
+  // Runs while the page PARSES — before any shot-script step could touch it. The init scripts
+  // must already have run for the first render to see the seed.
+  let w = 'none';
+  try { w = JSON.parse(localStorage.getItem('protoagent.ui')).state.panelWidths.right; } catch (e) {}
+  window.__first = 'width ' + w + ' / tab ' + (sessionStorage.getItem('tab') || 'none')
+    + ' / init ' + (window.__campaignInit || 'no');
+</script></head><body><p id="out"></p>
+<script>document.getElementById('out').textContent = window.__first;</script></body></html>"""
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_real_storage_is_seeded_before_the_app_boots_and_only_on_its_origin(site, tmp_path):
+    (Path(tmp_path) / "site" / "storage.html").write_text(STORAGE_PAGE, encoding="utf-8")
+    port = site.rsplit(":", 1)[1]
+    other = f"http://localhost:{port}"  # same server, a DIFFERENT origin from 127.0.0.1
+    script = validate(
+        {
+            "name": "seeded",
+            "base_url": site,
+            "viewport": {"width": 480, "height": 320},
+            "device_scale_factor": 1,
+            "step_timeout_ms": 5000,
+            "storage": {
+                "local": {"protoagent.ui": {"state": {"panelWidths": {"right": 860}}, "version": 0}},
+                "session": {"tab": "plugins"},
+            },
+            "init_script": "window.__campaignInit = 'yes';",
+            "steps": [
+                {"goto": "/storage.html"},
+                {"wait_for": {"text": "width 860 / tab plugins / init yes", "exact": True}},
+                {"goto": f"{other}/storage.html"},
+                {"wait_for": {"text": "width none / tab none / init no", "exact": True}},
+            ],
+        }
+    )
+    res = shoot.run(script, tmp_path / "take")
+    assert res["error"] == ""
+
+    # Not vacuous: without the seed the same page boots with nothing.
+    bare = validate({k: script[k] for k in ("base_url", "viewport", "step_timeout_ms")}
+                    | {"steps": [{"goto": "/storage.html"},
+                                 {"wait_for": {"text": "width none / tab none / init no", "exact": True}}]})  # fmt: skip
+    assert shoot.run(bare, tmp_path / "bare")["error"] == ""
+
+
+# ── the upload step, for real: a hidden file input behind a button + a drop zone ──
+UPLOAD_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>
+  body{font:16px system-ui} #drop{width:300px;height:80px;border:2px dashed #888;display:grid;place-items:center}
+</style></head><body>
+<input type="file" id="f" multiple hidden>
+<button id="choose">Choose files</button>
+<div id="drop" role="button" aria-label="Drop zone">Drop files here</div>
+<button id="nothing">Does nothing</button>
+<p id="out">no files</p>
+<script>
+  const f = document.getElementById('f');
+  document.getElementById('choose').onclick = () => f.click();
+  const drop = document.getElementById('drop');
+  drop.onclick = () => f.click();  // a react-dropzone-style zone: click opens the chooser
+  drop.ondragover = e => e.preventDefault();
+  drop.ondrop = e => { e.preventDefault(); show(e.dataTransfer.files); };
+  f.onchange = () => show(f.files);
+  async function show(files) {
+    const parts = [];
+    for (const file of files) parts.push(file.name + ':' + (await file.text()).trim());
+    document.getElementById('out').textContent = 'got ' + parts.join(', ');
+  }
+</script></body></html>"""
+
+
+@pytest.fixture
+def upload_site(site, tmp_path):
+    (Path(tmp_path) / "site" / "upload.html").write_text(UPLOAD_PAGE, encoding="utf-8")
+    assets = tmp_path / "demo-assets"
+    assets.mkdir()
+    for name, body in (("a.txt", "alpha"), ("b.txt", "bravo"), ("c.txt", "charlie"), ("d.txt", "delta")):
+        (assets / name).write_text(body, encoding="utf-8")
+    shoot.configure("", str(assets))
+    return site, assets
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_real_upload_through_a_button_a_drop_zone_and_the_hidden_input(upload_site, tmp_path):
+    site, assets = upload_site
+    base = {"base_url": site, "viewport": {"width": 480, "height": 320}, "device_scale_factor": 1}
+    script = validate(
+        {
+            **base,
+            "name": "upload",
+            "steps": [
+                {"goto": "/upload.html"},
+                # A button that opens a native chooser (it clicks the hidden input).
+                {
+                    "upload": {
+                        "role": "button",
+                        "name": "Choose files",
+                        "files": [str(assets / "a.txt"), str(assets / "b.txt")],
+                    }
+                },  # fmt: skip
+                {"wait_for": {"text": "got a.txt:alpha, b.txt:bravo"}},
+                # A drop zone whose click opens the same chooser.
+                {"upload": {"target": {"role": "button", "name": "Drop zone"}, "files": str(assets / "c.txt")}},
+                {"wait_for": {"text": "got c.txt:charlie"}},
+                # The hidden <input type=file> itself — files set directly, no chooser.
+                {"upload": {"selector": "#f", "files": [str(assets / "d.txt")]}},
+                {"wait_for": {"text": "got d.txt:delta"}},
+            ],
+        }
+    )
+    res = shoot.run(script, tmp_path / "take")
+    assert res["error"] == "" and len(res["steps"]) == 7
+
+    # A target that opens no chooser fails the step and says what to target instead.
+    bad = validate({**base, "step_timeout_ms": 1500, "steps": [
+        {"goto": "/upload.html"},
+        {"upload": {"role": "button", "name": "Does nothing", "files": [str(assets / "a.txt")]}}]})  # fmt: skip
+    with pytest.raises(shoot.ShootError) as e:
+        shoot.run(bad, tmp_path / "bad")
+    assert "is not an <input type=file> and clicking it opened no file chooser" in str(e.value)
+
+    # A file outside upload_dirs never reaches the browser.
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    leak = validate(
+        {**base, "steps": [{"goto": "/upload.html"}, {"upload": {"selector": "#f", "files": [str(outside)]}}]}
+    )
+    with pytest.raises(shoot.ShootError) as e:
+        shoot.run(leak, tmp_path / "leak")
+    assert "outside the plugin's upload_dirs" in str(e.value)

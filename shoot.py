@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import interpreter
-from .shotscript import describe_step, resolve_url
+from .shotscript import browser_origin, describe_step, resolve_url
 from .worker import pw_worker
 from .worker.pw_worker import (  # noqa: F401 — re-exported: one definition, host and worker
     CURSOR_JS,
@@ -64,15 +64,167 @@ _ALLOWED_BEARER_ENVS: frozenset[str] = frozenset()
 # pw_worker.fence_views), and FAIL CLOSED on a URL it cannot read. The approve/reject route lives there.
 FENCE_PATTERNS = [r"/api/plugins/campaign(?:/|$)"]
 
+# ── what an `upload` step may hand to a file input ─────────────────────────────
+# A shot script is agent-written, and a file it uploads lands in whatever app the browser has
+# open — so an upload is an EXFILTRATION path unless it's fenced. The fence (checked here, on
+# the host, at shoot time — against the disk as it is THEN, symlinks resolved):
+#
+# * the operator's ``upload_dirs`` allowlist; EMPTY (the default) refuses every upload;
+# * each path must exist and be a regular file (no dirs, devices, FIFOs), ≤ MAX_UPLOAD_BYTES
+#   each and MAX_UPLOAD_TOTAL_BYTES per step;
+# * never the agent's secrets, even inside an allowlisted dir: credential dirs (.ssh, .aws,
+#   .gnupg, …), key/credential file names (secrets.yaml, .env, id_rsa, *.pem, …), and anything
+#   under the protoAgent home (~/.protoagent, $PROTOAGENT_HOME) except this plugin's own media;
+# * an allowlist entry that is the filesystem root or the home dir itself is ignored — too broad.
+MAX_UPLOAD_BYTES = 50 * 1000 * 1000
+MAX_UPLOAD_TOTAL_BYTES = 100 * 1000 * 1000
+_UPLOAD_DIRS: tuple[str, ...] = ()
+SECRET_DIR_NAMES = frozenset(
+    {".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".password-store", ".gcloud", "gcloud", "keychains"}
+)
+SECRET_FILE_RE = re.compile(
+    r"^(?:secrets?\.(?:ya?ml|json|toml)|\.env(?:\..*)?|\.netrc|_netrc|\.git-credentials|\.pgpass|\.npmrc|\.pypirc"
+    r"|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?|credentials(?:\..*)?|auth\.json|.*\.(?:pem|key|p12|pfx|kdbx|keychain-db))$",
+    re.IGNORECASE,
+)
 
-def configure(bearer_envs: Any = "") -> None:
-    """Extra env-var NAMES (besides ``CAMPAIGN_*``) a shot script may use as its bearer."""
-    global _ALLOWED_BEARER_ENVS
+
+def configure(bearer_envs: Any = "", upload_dirs: Any = "") -> None:
+    """Extra env-var NAMES (besides ``CAMPAIGN_*``) a shot script may use as its bearer, and
+    the directories an ``upload`` step may read files from (empty = uploads refused)."""
+    global _ALLOWED_BEARER_ENVS, _UPLOAD_DIRS
     if isinstance(bearer_envs, (list, tuple, set)):
         names = [str(n) for n in bearer_envs]
     else:
         names = re.split(r"[,\s]+", str(bearer_envs or ""))
     _ALLOWED_BEARER_ENVS = frozenset(n.strip() for n in names if n.strip())
+    if isinstance(upload_dirs, (list, tuple, set)):
+        dirs = [str(d) for d in upload_dirs]
+    else:
+        dirs = re.split(r"[,\n]+", str(upload_dirs or ""))
+    _UPLOAD_DIRS = tuple(d.strip() for d in dirs if d.strip())
+
+
+def _protoagent_homes() -> list[Path]:
+    import os
+
+    homes = [Path.home() / ".protoagent"]
+    env = os.environ.get("PROTOAGENT_HOME", "").strip()
+    if env:
+        homes.append(Path(env).expanduser())
+    out = []
+    for h in homes:
+        try:
+            out.append(h.resolve())
+        except (OSError, RuntimeError):
+            pass
+    return out
+
+
+def _within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def upload_roots() -> tuple[list[Path], list[str]]:
+    """(the usable allowlisted dirs, resolved; a note for each configured entry that isn't)."""
+    roots: list[Path] = []
+    notes: list[str] = []
+    home = Path.home().resolve()
+    for d in _UPLOAD_DIRS:
+        p = Path(d).expanduser()
+        if not p.is_absolute():
+            notes.append(f"upload_dirs entry {d!r} is not an absolute path — ignored")
+            continue
+        try:
+            r = p.resolve(strict=True)
+        except (OSError, RuntimeError):
+            notes.append(f"upload_dirs entry {d!r} doesn't exist — ignored")
+            continue
+        if not r.is_dir():
+            notes.append(f"upload_dirs entry {d!r} is not a directory — ignored")
+        elif r == Path(r.anchor) or r == home:
+            notes.append(f"upload_dirs entry {d!r} is the filesystem root or your home dir — too broad, ignored")
+        else:
+            roots.append(r)
+    return roots, notes
+
+
+def upload_problem(raw: str, roots: list[Path]) -> tuple[str | None, str, int]:
+    """(why ``raw`` may not be uploaded or None, its resolved path, its size)."""
+    import stat
+
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        return f"{raw!r} is not an absolute path", "", 0
+    try:
+        real = p.resolve(strict=True)
+        st = real.stat()
+    except (OSError, RuntimeError):
+        return f"{raw!r} doesn't exist", "", 0
+    if not stat.S_ISREG(st.st_mode):
+        return f"{raw!r} is not a regular file", "", 0
+    # Symlinks are resolved FIRST, so a link inside an allowlisted dir can't point out of it.
+    if not any(_within(real, r) for r in roots):
+        return (
+            f"{raw!r} is outside the plugin's upload_dirs ({', '.join(str(r) for r in roots)}) — "
+            "copy it into one of them, or ask the operator to allowlist its directory",
+            "",
+            0,
+        )
+    parts = [x.lower() for x in real.parts]
+    gh_config = any(a == ".config" and b == "gh" for a, b in zip(parts, parts[1:]))
+    if gh_config or any(x in SECRET_DIR_NAMES for x in parts):
+        return f"{raw!r} is inside a credentials directory — never uploaded", "", 0
+    if SECRET_FILE_RE.match(real.name) or SECRET_FILE_RE.match(p.name):
+        return f"{raw!r} looks like a key or credentials file — never uploaded", "", 0
+    try:
+        from . import paths
+
+        own_media = paths.media_root().resolve()
+    except Exception:  # noqa: BLE001 — no media root → nothing under the agent home is exempt
+        own_media = None
+    for h in _protoagent_homes():
+        if _within(real, h) and not (own_media and _within(real, own_media)):
+            return f"{raw!r} is inside the agent's home ({h}) — never uploaded (only this plugin's own media is)", "", 0
+    if st.st_size > MAX_UPLOAD_BYTES:
+        return f"{raw!r} is {st.st_size} bytes, over the {MAX_UPLOAD_BYTES // 1_000_000} MB per-file max", "", 0
+    return None, str(real), st.st_size
+
+
+def check_uploads(script: dict[str, Any]) -> dict[int, list[str]]:
+    """Every ``upload`` step's files, checked against the fence above → ``{step index: [resolved
+    paths]}``. Raises :class:`ShootError` naming the step and the file on the first refusal —
+    before any browser starts."""
+    steps = [s for s in script.get("steps", []) if s.get("op") == "upload"]
+    if not steps:
+        return {}
+    roots, notes = upload_roots()
+
+    def refuse(step: dict[str, Any], why: str) -> ShootError:
+        return ShootError(
+            f"step {step['index']} ({describe_step(step)}) refused: {why}", {"steps": [], "error": "upload refused"}
+        )
+
+    if not roots:
+        why = (
+            "file uploads are off — the plugin's upload_dirs setting allowlists no directory. Ask the "
+            "operator to set upload_dirs (Settings ▸ Campaign Studio) to the folder(s) holding the files "
+            "to upload, e.g. a demo-assets folder."
+        )
+        raise refuse(steps[0], why + (f" ({'; '.join(notes)})" if notes else ""))
+    out: dict[int, list[str]] = {}
+    for step in steps:
+        resolved, total = [], 0
+        for f in step["files"]:
+            problem, real, size = upload_problem(f, roots)
+            if problem:
+                raise refuse(step, problem)
+            total += size
+            resolved.append(real)
+        if total > MAX_UPLOAD_TOTAL_BYTES:
+            raise refuse(step, f"{total} bytes in one step is over the {MAX_UPLOAD_TOTAL_BYTES // 1_000_000} MB max")
+        out[step["index"]] = resolved
+    return out
 
 
 def bearer_env_problem(name: str) -> str | None:
@@ -174,10 +326,19 @@ def build_job(script: dict[str, Any], out_dir: str | Path, bearer: str = "") -> 
     """The worker job for a VALIDATED script. Goto URLs are resolved and step descriptions
     precomputed here, so the worker needs nothing from the plugin."""
     script = dict(script)
+    uploads = check_uploads(script)
     script["steps"] = [
-        {**s, "_desc": describe_step(s), **({"_url": resolve_url(script, s["url"])} if s["op"] == "goto" else {})}
+        {
+            **s,
+            "_desc": describe_step(s),
+            **({"_url": resolve_url(script, s["url"])} if s["op"] == "goto" else {}),
+            **({"_files": uploads[s["index"]]} if s["op"] == "upload" else {}),
+        }
         for s in script["steps"]
     ]
+    # Browser-side, both run inside a `location.origin` check: storage on its origin, the
+    # init_script on the base_url's.
+    script["_base_origin"] = browser_origin(script.get("base_url") or "")
     return {
         "v": pw_worker.JOB_VERSION,
         "kind": "shoot",

@@ -37,6 +37,12 @@ Security properties enforced HERE (the host can't reach into this process to enf
 * **Bearer scoping.** The bearer is attached per request, only to the script's ``base_url``
   origin and never to a fenced path — no context-wide header, so a CDN or analytics pixel
   never sees it. Service workers are blocked (they'd answer outside the route guards).
+* **Storage + init_script stay on their origin.** ``storage`` is written only in top-level
+  documents whose ``location.origin`` is the storage origin; ``init_script`` runs only in
+  documents on the ``base_url`` origin. Both are installed before any page script runs.
+* **Uploads are pre-checked.** An ``upload`` step carries ``_files`` the host already resolved
+  and checked against the operator's ``upload_dirs`` allowlist (``shoot.check_uploads``); a step
+  without them is refused here.
 * **Cards load nothing.** A card page is self-contained (images are data: URIs), so every
   network request from it is aborted.
 """
@@ -287,6 +293,34 @@ def redact_init_js(rules: list[list[str]]) -> str:
     return f"({REDACT_JS})({json.dumps({'rules': rules})});"
 
 
+# Browser storage seeded BEFORE the app boots (a context init script runs before any page
+# script): written only when the document's origin is the storage origin, and only in the
+# top-level document — so a same-origin iframe loading later never clobbers what the app has
+# changed since. Every top-level load on that origin (a goto, a reload) starts from the seed.
+STORAGE_JS = r"""
+(cfg) => {
+  if (location.origin !== cfg.origin || window.top !== window) return;
+  const put = (area, kv) => { try { const s = window[area]; for (const k of Object.keys(kv)) s.setItem(k, kv[k]); }
+    catch (e) { console.warn('[campaign] storage seed failed', area, e); } };
+  put('localStorage', cfg.local || {}); put('sessionStorage', cfg.session || {});
+}
+"""
+
+
+def storage_init_js(storage: dict[str, Any]) -> str:
+    cfg = {"origin": storage["origin"], "local": storage.get("local") or {}, "session": storage.get("session") or {}}
+    return f"({STORAGE_JS})({json.dumps(cfg)});"
+
+
+def guarded_init_js(source: str, origin_: str) -> str:
+    """The script's ``init_script``, run only in documents on ``origin_`` (every frame on it,
+    like any init script). It runs inside a function: declare globals as ``window.x = …``."""
+    return (
+        f"(() => {{ if (location.origin !== {json.dumps(origin_)}) return;\n"
+        f"try {{\n{source}\n}} catch (e) {{ console.error('[campaign] init_script failed', e); }}\n}})();"
+    )
+
+
 def video_size(script: dict[str, Any]) -> dict[str, int]:
     """The recording size: the viewport in CSS pixels.
 
@@ -482,7 +516,7 @@ def locate(page, target: dict[str, Any], *, pick: bool = True):
 
 
 # An ACTION needs exactly one element; these ops act on their target (a wait_for doesn't).
-ACTION_OPS = ("click", "hover", "fill", "type", "press", "scroll", "screenshot")
+ACTION_OPS = ("click", "hover", "fill", "type", "press", "scroll", "screenshot", "upload")
 MAX_LISTED_MATCHES = 3
 _MATCH_JS = """e => {
   const t = (e.innerText || e.textContent || '').replace(/\\s+/g, ' ').trim();
@@ -617,6 +651,45 @@ def _park_below(page, loc, timeout: float) -> None:
         page.mouse.move(box["x"] + box["width"] * 0.85, box["y"] + box["height"] + 16, steps=8)
 
 
+_IS_FILE_INPUT_JS = "e => e.tagName === 'INPUT' && (e.type || '').toLowerCase() === 'file'"
+
+
+def upload(page, root, target: dict[str, Any], files: list[str], timeout: float) -> None:
+    """Hand ``files`` to a file input. An ``<input type=file>`` target (hidden ones included) gets
+    them directly; any other target (a button, a drop zone) is CLICKED and must open a file
+    chooser, which gets them instead. The host checked every path against its upload fence and
+    resolved symlinks; this re-checks only that each is still a regular file."""
+    if not files:
+        raise ValueError("upload step carries no checked files (the host's upload fence didn't run)")
+    for f in files:
+        if not Path(f).is_file():
+            raise FileNotFoundError(f"{f} is no longer a regular file")
+    started = time.monotonic()
+    loc = locate(root, target)
+    loc.wait_for(state="attached", timeout=timeout)
+    if loc.evaluate(_IS_FILE_INPUT_JS, timeout=timeout):
+        loc.set_input_files(files, timeout=timeout)
+        return
+    left = max(1.0, timeout - (time.monotonic() - started) * 1000)
+    clicked = False
+    try:
+        with page.expect_file_chooser(timeout=left) as chooser:
+            _move_to(page, loc, left)
+            loc.click(timeout=left)
+            clicked = True
+    except Exception as e:
+        if clicked:  # the click landed; the wait for a chooser is what failed
+            raise RuntimeError(
+                f"{target_label(target)} is not an <input type=file> and clicking it opened no file chooser — "
+                "target the file input itself (hidden is fine) or the control that opens the chooser"
+            ) from e
+        raise
+    fc = chooser.value
+    if len(files) > 1 and not fc.is_multiple():
+        raise ValueError(f"the file chooser takes ONE file, the step gives {len(files)}")
+    fc.set_files(files, timeout=left)
+
+
 def _default_factory():
     from playwright.sync_api import sync_playwright  # the ONLY playwright import in the plugin
 
@@ -673,6 +746,14 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
             try:
                 guard_context(context, base_url=script.get("base_url") or "", bearer=bearer, fence=fence)
                 context.set_default_timeout(step_timeout)
+                # Storage first, then the script's own init_script: both before any page script.
+                if script.get("storage"):
+                    context.add_init_script(storage_init_js(script["storage"]))
+                if script.get("init_script"):
+                    home = script.get("_base_origin") or ""
+                    if not home:  # validate() requires a base_url; never run it unscoped
+                        raise ValueError("init_script has no base_url origin to run on — refusing")
+                    context.add_init_script(guarded_init_js(script["init_script"], home))
                 if script.get("cursor", True):
                     context.add_init_script(CURSOR_JS)
                 if script.get("mask"):
@@ -852,6 +933,8 @@ def _act(page, root, context, step, timeout, out_dir: Path, marks, stills, t0) -
         # from the init script, which Playwright runs in EVERY frame.
         _each_child_frame(page, lambda f: f.add_style_tag(content=css))
         context.add_init_script(mask_init_js(css))
+    elif op == "upload":
+        upload(page, root, target, step.get("_files") or [], timeout)
     elif op == "redact":
         rules = redact_rules(step)
         page.evaluate(f"({REDACT_JS})", {"rules": rules})

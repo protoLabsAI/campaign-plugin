@@ -63,6 +63,27 @@ that waits on something slow — an agent run, a build — sets its own ``timeou
 bounded by what is left of ``total_timeout_s`` (default 300, max 900). Don't use
 ``wait_for: {network_idle: true}`` on an app that holds a stream open (SSE / websockets — the
 protoAgent console does): it never settles. Wait for the element you need instead.
+
+Storage seeded before the app boots — for an app that reads persisted UI state (panel widths,
+a selected tab, a dismissed tour) from ``localStorage``/``sessionStorage`` while it starts::
+
+    storage:
+      origin: http://localhost:7871          # optional — default: base_url's origin
+      local: {protoagent.ui: {state: {panelWidths: {right: 860}}, version: 0}}
+      session: {tab: plugins}
+
+A string value is stored as-is; anything else is JSON-serialized. Written by a context init
+script — before ANY page script — in top-level documents on that origin only (every load
+there starts from the seed). ``init_script: "<js>"`` is the escape hatch for other set-up: run
+before page scripts in every document on the base_url's origin only, inside a function (assign
+``window.x`` for a global), ≤ 64 KB. It is operator/agent-authored code, trusted like the rest
+of the script, and runs only in the recording browser (which is fenced off this plugin's API).
+
+Uploads — ``upload: {target, files: [/abs/path, …]}``: an ``<input type=file>`` target (hidden
+is fine) gets the files directly; any other target (a button, a drop zone) is clicked and the
+file chooser it opens gets them. Files must sit under the operator's ``upload_dirs`` setting
+(empty = uploads refused), be regular files ≤ 50 MB, and never be keys/credentials or anything
+in the agent's home — checked by the host at shoot time (``shoot.check_uploads``).
 """
 
 from __future__ import annotations
@@ -87,6 +108,8 @@ TOP_KEYS = {
     "total_timeout_s",
     "mask",
     "redact",
+    "storage",
+    "init_script",
     "steps",
 }
 STEP_OPS = (
@@ -103,6 +126,7 @@ STEP_OPS = (
     "screenshot",
     "mask",
     "redact",
+    "upload",
 )
 TARGET_KEYS = ("selector", "role", "text", "label", "placeholder", "test_id")
 TARGET_OPTS = ("name", "exact", "nth")
@@ -120,6 +144,16 @@ MAX_HOLD_MS = 60_000
 MAX_STEP_TIMEOUT_MS = 180_000
 MIN_STEP_TIMEOUT_MS = 100
 MAX_TOTAL_S = 900
+# Browser storage seeded before the app boots, and the init_script escape hatch. Both are
+# bounded so a script can't smuggle megabytes into every page load.
+STORAGE_KEYS = ("origin", "local", "session")
+MAX_STORAGE_ENTRIES = 200
+MAX_STORAGE_BYTES = 256 * 1024
+MAX_STORAGE_KEY_LEN = 512
+MAX_INIT_SCRIPT_BYTES = 64 * 1024
+# The upload step: how many files one step may hand to a file input (paths are checked against
+# the operator's upload_dirs allowlist by the host at shoot time — see shoot.check_uploads).
+MAX_UPLOAD_FILES = 20
 DEFAULTS = {
     "viewport": {"width": 1280, "height": 800},
     "device_scale_factor": 2,
@@ -147,6 +181,7 @@ STEP_KEYS: dict[str, tuple[str, ...]] = {
     "screenshot": (*_TGT, "full_page", "timeout_ms"),
     "mask": ("selectors", "mode"),
     "redact": ("presets", "patterns", "replacement"),
+    "upload": (*_TGT, "files", "timeout_ms"),
 }
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
@@ -396,6 +431,132 @@ def _redact(raw: Any, where: str, problems: list[str]) -> dict[str, Any] | None:
     }
 
 
+def _upload_files(raw: Any, where: str, problems: list[str]) -> list[str] | None:
+    """``files:`` — one absolute path or a list of them. Shape only: whether each file exists,
+    is a regular file, sits under the operator's ``upload_dirs`` and fits the size cap is
+    checked by the host at shoot time (``shoot.check_uploads``), against the disk as it is then."""
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list) or not raw:
+        problems.append(f"{where}: `files` must be an absolute path or a non-empty list of them")
+        return None
+    if len(raw) > MAX_UPLOAD_FILES:
+        problems.append(f"{where}: {len(raw)} files is over the {MAX_UPLOAD_FILES}-file max for one upload step")
+        return None
+    out: list[str] = []
+    for f in raw:
+        if not isinstance(f, str) or not f.strip():
+            problems.append(f"{where}: every entry in `files` must be a non-empty path string, got {f!r}")
+            return None
+        f = f.strip()
+        if not (f.startswith("/") or f.startswith("~") or re.match(r"^[A-Za-z]:[\\/]", f)):
+            problems.append(f"{where}: {f!r} must be an absolute path (a relative path depends on the worker's cwd)")
+            return None
+        out.append(f)
+    return out
+
+
+def browser_origin(url: str) -> str:
+    """``url``'s origin exactly as a page's ``location.origin`` spells it — lowercase scheme and
+    host, the port only when it isn't the scheme's default — or '' for a non-http(s) URL."""
+    from urllib.parse import urlsplit
+
+    try:
+        u = urlsplit(url.strip())
+        port = u.port
+    except ValueError:
+        return ""
+    scheme = u.scheme.lower()
+    if scheme not in ("http", "https") or not u.hostname:
+        return ""
+    host = u.hostname.lower()
+    if ":" in host:  # IPv6 literal
+        host = f"[{host}]"
+    if port is not None and port != {"http": 80, "https": 443}[scheme]:
+        return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{host}"
+
+
+def _storage_area(raw: Any, where: str, problems: list[str]) -> dict[str, str]:
+    """``{key: value}`` → ``{key: str}``. A string value is stored as-is; anything else
+    (a mapping, list, number, bool, null) is JSON-serialized — what ``JSON.parse`` reads back."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        problems.append(f"{where}: must be a mapping of key → value")
+        return {}
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not k or len(k) > MAX_STORAGE_KEY_LEN:
+            problems.append(f"{where}: key {k!r} must be a non-empty string of at most {MAX_STORAGE_KEY_LEN} chars")
+            continue
+        if isinstance(v, str):
+            out[k] = v
+            continue
+        try:
+            out[k] = json.dumps(v, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as e:
+            problems.append(f"{where}.{k}: can't be JSON-serialized ({e})")
+    return out
+
+
+def _storage(raw: Any, base: str, problems: list[str]) -> dict[str, Any] | None:
+    """``storage: {origin?, local: {…}, session?: {…}}`` — browser storage written on ONE origin
+    before any page script runs (default origin: the base_url's)."""
+    if raw is None or raw == {}:
+        return None
+    if not isinstance(raw, dict):
+        problems.append("storage must be a mapping: {origin?: URL, local: {key: value}, session?: {key: value}}")
+        return None
+    for k in raw:
+        if k not in STORAGE_KEYS:
+            problems.append(
+                f"storage: unknown key `{k}`{_suggest(k, STORAGE_KEYS)} — storage takes {', '.join(STORAGE_KEYS)}"
+            )
+    if raw.get("origin") not in (None, ""):
+        o = raw["origin"]
+        org = browser_origin(o) if isinstance(o, str) else ""
+        if not org:
+            problems.append(f"storage.origin {o!r} must be an http(s) origin like http://localhost:7871")
+            return None
+        rest = o.strip()[len(org) :] if o.strip().lower().startswith(org) else ""
+        if rest not in ("", "/"):
+            problems.append(f"storage.origin {o!r} must be an origin only — no path, query or fragment")
+            return None
+    else:
+        org = browser_origin(base) if base else ""
+        if not org:
+            problems.append("storage needs an origin — set base_url, or give storage.origin")
+            return None
+    local = _storage_area(raw.get("local"), "storage.local", problems)
+    session = _storage_area(raw.get("session"), "storage.session", problems)
+    if not local and not session:
+        problems.append("storage needs `local` and/or `session` entries")
+        return None
+    n = len(local) + len(session)
+    size = sum(len(k.encode()) + len(v.encode()) for area in (local, session) for k, v in area.items())
+    if n > MAX_STORAGE_ENTRIES:
+        problems.append(f"storage: {n} entries is over the {MAX_STORAGE_ENTRIES}-entry max")
+    if size > MAX_STORAGE_BYTES:
+        problems.append(f"storage: {size} bytes is over the {MAX_STORAGE_BYTES}-byte max")
+    return {"origin": org, "local": local, "session": session}
+
+
+def _init_script(raw: Any, base: str, problems: list[str]) -> str:
+    if raw is None or raw == "":
+        return ""
+    if not isinstance(raw, str):
+        problems.append(f"init_script must be a string of JavaScript source, got {type(raw).__name__}")
+        return ""
+    if len(raw.encode("utf-8")) > MAX_INIT_SCRIPT_BYTES:
+        problems.append(f"init_script is over the {MAX_INIT_SCRIPT_BYTES // 1024} KB max")
+        return ""
+    if not (browser_origin(base) if base else ""):
+        problems.append("init_script needs a base_url — it runs only on that origin")
+        return ""
+    return raw
+
+
 def _step(i: int, raw: Any, problems: list[str], has_base: bool) -> dict[str, Any] | None:
     if not isinstance(raw, dict) or len(raw) != 1:
         problems.append(f"step {i}: each step is a one-key mapping like `- click: ...`, got {raw!r}")
@@ -541,6 +702,18 @@ def _step(i: int, raw: Any, problems: list[str], has_base: bool) -> dict[str, An
         if r is None:
             return None
         step.update(r)
+    elif op == "upload":
+        if not isinstance(body, dict) or "files" not in body:
+            problems.append(
+                f"{where}: needs a target (the <input type=file>, or the button/drop zone that opens a "
+                "file chooser) and `files: [/absolute/path, …]`"
+            )
+            return None
+        t = _target_from_mapping(body, where, problems, required=True)
+        files = _upload_files(body["files"], where, problems)
+        if t is None or files is None:
+            return None
+        step.update(target=t, files=files)
     _step_frame(body, step, where, problems)
     return step
 
@@ -632,6 +805,8 @@ def validate(text_or_obj: Any) -> dict[str, Any]:
                         f"{key}: unknown option `{k}`{_suggest(k, STEP_KEYS[key])} — {key} takes "
                         f"{', '.join(STEP_KEYS[key])} (it already reaches into every frame)"
                     )
+    out["storage"] = _storage(data.get("storage"), base, problems)
+    out["init_script"] = _init_script(data.get("init_script"), base, problems)
     out["mask"] = _mask(data["mask"], "mask", problems) if data.get("mask") else None
     out["redact"] = _redact(data["redact"], "redact", problems) if data.get("redact") else None
 
@@ -750,6 +925,9 @@ def _describe_step(step: dict[str, Any]) -> str:
         return f"screenshot {step['name']} of {describe_frame(step['frame'])}"
     if op in ("mark", "screenshot"):
         return f"{op} {step['name']}"
+    if op == "upload":
+        names = ", ".join(f.replace("\\", "/").rsplit("/", 1)[-1] for f in step["files"])
+        return f"upload {names} via {describe_target(step['target'])}"
     return op
 
 
