@@ -82,8 +82,6 @@ STEP_OPS = (
     "mask",
     "redact",
 )
-# Steps that wait on the page and so accept a per-step ``timeout_ms`` override.
-TIMEOUT_OPS = ("goto", "click", "hover", "fill", "type", "press", "wait_for", "scroll", "screenshot")
 TARGET_KEYS = ("selector", "role", "text", "label", "placeholder", "test_id")
 TARGET_OPTS = ("name", "exact", "nth")
 COLOR_SCHEMES = ("light", "dark", "no-preference")

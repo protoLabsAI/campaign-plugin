@@ -239,3 +239,20 @@ def test_real_still_is_downscaled_to_a_bounded_jpeg(tools, core, camp, tmp_path)
     assert _dims(data, tmp_path) == (1280, 800) and len(data) < look.MAX_IMAGE_BYTES
     view(tools, campaign_id=c["id"], path="shots/retina.png", max_side=640)
     assert _dims(base64.b64decode(core.calls[-1][1][0]["b64"]), tmp_path) == (640, 400)
+
+
+def test_an_ffmpeg_failure_reads_as_a_clear_tool_reply(tools, core, camp, monkeypatch):
+    c, root = camp
+    (root / "s.png").write_bytes(_png(8, 8))
+    monkeypatch.setattr(deps, "ffmpeg", lambda: "/usr/bin/ffmpeg")
+
+    def broken(cmd):
+        return subprocess.CompletedProcess(cmd, 1, "", "Invalid data found when processing input")
+
+    with pytest.raises(look.LookError, match="couldn't extract still.jpg: ffmpeg failed"):
+        look.view(c["id"], path="s.png", runner=broken)
+    from campaign import render
+
+    monkeypatch.setattr(render, "_default_runner", broken)
+    assert view(tools, campaign_id=c["id"], path="s.png").startswith("Can't show it — couldn't extract")
+    assert core.calls == []

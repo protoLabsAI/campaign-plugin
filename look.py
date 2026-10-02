@@ -80,7 +80,12 @@ def _scale(max_w: int, max_h: int) -> str:
 def _encode(runner, ff: str, src_args: list[str], vf: str, out: Path) -> bytes:
     """Run ffmpeg to one JPEG, stepping quality down until it fits core's per-image cap."""
     for q in JPEG_QUALITIES:
-        render._ff(runner, [ff, "-v", "error", "-y", *src_args, "-frames:v", "1", "-vf", vf, "-q:v", str(q), str(out)])
+        try:
+            render._ff(
+                runner, [ff, "-v", "error", "-y", *src_args, "-frames:v", "1", "-vf", vf, "-q:v", str(q), str(out)]
+            )
+        except render.RenderError as e:
+            raise LookError(f"couldn't extract {out.name}: {e}") from None
         if not out.is_file() or out.stat().st_size == 0:
             raise LookError(f"ffmpeg produced no image for {out.name}")
         data = out.read_bytes()
