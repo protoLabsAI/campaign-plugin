@@ -4,7 +4,7 @@ Each output spec says what to cut and how to ship it::
 
     {"name": "hero", "format": "mp4",           # mp4 | gif | poster
      "start": "start", "end": "end",            # seconds, or a mark name from the take
-     "speed": [{"from": "typed", "to": "dialog", "factor": 4}],   # ramp dead time
+     "speed": [{"from": "typed", "to": "dialog", "factor": 4, "ease": 0.4}],   # ramp dead time
      "continuous": True,                        # default: warn on ramps that read as jump cuts
      "crop": {"x": 0, "y": 0, "width": 2560, "height": 1440},     # source pixels
      "width": 1280, "fps": 30,
@@ -24,6 +24,17 @@ missing frames. The one way left to skip action is a steep speed ramp, so with `
 with a ``warnings`` entry saying it will read as a jump cut — compress time with a uniform
 1.5–2× over the run and ≤4× over pure dead time instead. ``"continuous": false`` marks an
 output as a deliberate time-lapse and silences the warning. Any factor in 0.25..32 stays valid.
+
+**Eased ramps.** A ramp switches speed on one frame, and a 1×→4× step reads as a jump even
+when no frame is skipped. ``ease`` (seconds of SOURCE time, or ``true`` for
+``DEFAULT_EASE_S``) makes the ramp accelerate smoothly from 1× over its first ``ease`` seconds
+and decelerate back to 1× over its last ``ease`` seconds; it's clamped to half the ramp. It's
+a time remap on the ramp's own trimmed piece — ``setpts`` with a closed-form curve whose
+slope (source→output rate) moves along a smoothstep from 1 to 1/factor — so the cut points,
+the frames kept and the continuity guarantees are exactly those of an un-eased ramp; only the
+timestamps in between change, monotonically. An eased ramp of length L and factor f lasts
+``L/f + ease·(1 − 1/f)`` in the output (a little longer than the un-eased L/f). With
+``continuous`` on, a ramp of ``EASE_SUGGEST_FACTOR``× or more with no ease is flagged.
 
 An output that still doesn't fit after its ladder is kept (so the operator can look) but is
 reported with its violations, and the review gate refuses to offer it as ready.
@@ -174,6 +185,30 @@ def _bounded_int(spec: dict[str, Any], key: str, lo: int, hi: int, name: str) ->
 
 
 MAX_CONTINUOUS_FACTOR = 4.0
+# ``ease: true`` → this many seconds of acceleration/deceleration at each edge of a ramp.
+DEFAULT_EASE_S = 0.4
+MAX_EASE_S = 10.0
+# A continuous clip's un-eased ramp this steep (or the inverse, for slow motion) gets a warning.
+EASE_SUGGEST_FACTOR = 2.0
+
+
+def _ease_seconds(value: Any, name: str) -> float:
+    """``ease`` → seconds: absent/false/0 → 0, true → DEFAULT_EASE_S, else a number in 0..MAX_EASE_S."""
+    if value is None or value is False or value == "":
+        return 0.0
+    if value is True:
+        return DEFAULT_EASE_S
+    if isinstance(value, str) and value.strip().lower() in ("true", "yes", "on"):
+        return DEFAULT_EASE_S
+    if isinstance(value, str) and value.strip().lower() in ("false", "no", "off"):
+        return 0.0
+    try:
+        e = float(value)
+    except (TypeError, ValueError):
+        raise RenderError(f"output {name}: speed ease must be seconds (e.g. 0.4) or true") from None
+    if not 0 <= e <= MAX_EASE_S:  # also rejects NaN
+        raise RenderError(f"output {name}: speed ease {value} is outside 0..{MAX_EASE_S:g}s")
+    return e
 
 
 def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: float) -> dict[str, Any]:
@@ -196,7 +231,10 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
     if not isinstance(continuous, bool):
         raise RenderError(f"output {name}: continuous must be true or false")
     ramps, warnings = [], []
+    eased: list[tuple[tuple[float, float, float], float]] = []
     for r in spec.get("speed") or []:
+        if not isinstance(r, dict):
+            raise RenderError(f"output {name}: each speed ramp must be a mapping {{from, to, factor, ease}}")
         a = resolve_time(r.get("from"), marks, f"{name}.speed.from")
         b = resolve_time(r.get("to"), marks, f"{name}.speed.to")
         try:
@@ -207,15 +245,27 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
             raise RenderError(f"output {name}: each speed ramp needs from < to")
         if not 0.25 <= f <= 32:  # also rejects NaN
             raise RenderError(f"output {name}: speed factor {f} is outside 0.25..32")
+        ease = _ease_seconds(r.get("ease"), name)
         if continuous and f > MAX_CONTINUOUS_FACTOR:
             warnings.append(
                 f"speed factor {f:g} ({a:.2f}–{b:.2f}s) will read as a jump cut — a continuous clip "
                 f"ramps at most {MAX_CONTINUOUS_FACTOR:g}× and only over pure dead time (typing, a "
                 "spinner); use a uniform 1.5–2× over the run and a longer clip instead, or set "
                 "continuous: false if this is a deliberate time-lapse"
+                + (" (ease smooths the edges; it doesn't bring back the frames a steep ramp skips)" if ease else "")
             )
-        ramps.append((max(a, start), min(b, end) if end is not None else b, f))
-    ramps.sort()
+        if continuous and not ease and (f >= EASE_SUGGEST_FACTOR or f <= 1 / EASE_SUGGEST_FACTOR):
+            warnings.append(
+                f"speed factor {f:g} ({a:.2f}–{b:.2f}s) starts and stops abruptly — the speed change on "
+                f"one frame reads as a jump; add ease: true (or ease: seconds, e.g. {DEFAULT_EASE_S:g}) to "
+                "accelerate into and out of it"
+            )
+        ramp = (max(a, start), min(b, end) if end is not None else b, f)
+        ramps.append(ramp)
+        eased.append((ramp, ease))
+    order = sorted(range(len(ramps)), key=lambda i: ramps[i])
+    eases = [min(eased[i][1], max(0.0, (ramps[i][1] - ramps[i][0]) / 2)) for i in order]
+    ramps = [ramps[i] for i in order]
     for (a1, b1, _), (a2, _b2, _) in zip(ramps, ramps[1:]):
         if a2 < b1:
             raise RenderError(f"output {name}: speed ramps overlap ({a1:.2f}–{b1:.2f} and {a2:.2f}…)")
@@ -253,6 +303,7 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
         "start": start,
         "end": end,
         "ramps": ramps,
+        "eases": eases,
         "continuous": continuous,
         "warnings": warnings,
         "crop": crop,
@@ -266,18 +317,29 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
     }
 
 
+Segment = tuple  # (a, b, speed) or, for an eased ramp, (a, b, speed, ease)
+
+
 def segments(
-    start: float, end: float | None, ramps: list[tuple[float, float, float]]
-) -> list[tuple[float, float | None, float]]:
-    """Split [start, end] into (a, b, speed) pieces around the ramps."""
-    out: list[tuple[float, float | None, float]] = []
+    start: float,
+    end: float | None,
+    ramps: list[tuple[float, float, float]],
+    eases: list[float] | None = None,
+) -> list[Segment]:
+    """Split [start, end] into (a, b, speed) pieces around the ramps. An eased ramp
+    (``eases[i] > 0``) comes back as (a, b, speed, ease), its ease clamped to half its length."""
+    out: list[Segment] = []
+    eases = list(eases or [])
     cur = start
-    for a, b, f in ramps:
+    for i, (a, b, f) in enumerate(ramps):
         if end is not None and a >= end:
             break
         if a > cur:
             out.append((cur, a, 1.0))
-        out.append((max(a, cur), b, f))
+        lo = max(a, cur)
+        e = eases[i] if i < len(eases) else 0.0
+        e = min(e, max(0.0, (b - lo) / 2)) if e and f != 1.0 else 0.0
+        out.append((lo, b, f, e) if e > 0 else (lo, b, f))
         cur = b
     if end is None or cur < end:
         out.append((cur, end, 1.0))
@@ -288,7 +350,76 @@ def _fmt(t: float) -> str:
     return f"{t:.3f}".rstrip("0").rstrip(".") or "0"
 
 
-def timeline_filter(segs: list[tuple[float, float | None, float]], crop: dict | None, width: int | None) -> str:
+def _x(v: float) -> str:
+    """A full-precision number for an ffmpeg expression (the curve must join up exactly)."""
+    return f"({float(v):.9f})"
+
+
+def eased_time(t: float, length: float, factor: float, ease: float) -> float:
+    """Output seconds at source offset ``t`` into an eased ramp of ``length`` source seconds.
+
+    The source→output rate r(t) = dτ/dt moves from 1 to k = 1/factor along a smoothstep over
+    the first ``ease`` seconds, holds at k, and returns to 1 over the last ``ease`` seconds.
+    r is continuous, never below min(1, k) > 0 — so τ is strictly increasing — and the
+    integral is closed-form: ∫₀ᵘ smoothstep = u³ − u⁴/2. Past ``length`` it runs at 1×.
+    """
+    k, e, L = 1.0 / factor, ease, length
+    d, m = k - 1.0, L - e
+
+    def big_s(u: float) -> float:
+        return u**3 - u**4 / 2
+
+    if t <= 0:
+        return t
+    if t < e:
+        return t + d * e * big_s(t / e)
+    head = e * (1 + k) / 2
+    if t < m:
+        return head + k * (t - e)
+    mid = head + k * (m - e)
+    if t < L:
+        return mid + k * (t - m) - d * e * big_s((t - m) / e)
+    return k * L + e * (1 - k) + (t - L)
+
+
+def ease_expr(length: float, factor: float, ease: float) -> str:
+    """:func:`eased_time` as an ffmpeg ``setpts`` expression of ``T`` (seconds from the
+    piece's start), in timebase units. Same formula, branch for branch."""
+    k, e, L = 1.0 / factor, ease, length
+    d, m = k - 1.0, L - e
+    head = e * (1 + k) / 2
+    mid = head + k * (m - e)
+    total = k * L + e * (1 - k)
+
+    def big_s(u: str) -> str:
+        return f"(pow({u},3)-pow({u},4)/2)"
+
+    u1 = f"(T/{_x(e)})"
+    u3 = f"((T-{_x(m)})/{_x(e)})"
+    first = f"T+{_x(d * e)}*{big_s(u1)}"
+    middle = f"{_x(head)}+{_x(k)}*(T-{_x(e)})"
+    last = f"{_x(mid)}+{_x(k)}*(T-{_x(m)})-{_x(d * e)}*{big_s(u3)}"
+    after = f"{_x(total)}+(T-{_x(L)})"
+    return f"(if(lt(T,{_x(e)}),{first},if(lt(T,{_x(m)}),{middle},if(lt(T,{_x(L)}),{last},{after}))))/TB"
+
+
+def segment_duration(seg: Segment) -> float | None:
+    """Output seconds of one piece (None for an open-ended one)."""
+    a, b, f = seg[0], seg[1], seg[2]
+    if b is None:
+        return None
+    if len(seg) > 3 and seg[3]:
+        return eased_time(b - a, b - a, f, seg[3])
+    return (b - a) / f
+
+
+def timeline_duration(segs: list[Segment]) -> float | None:
+    """Expected output seconds of a timeline (None if it runs to the end of the take)."""
+    parts = [segment_duration(s) for s in segs]
+    return None if any(p is None for p in parts) else sum(parts)  # type: ignore[arg-type]
+
+
+def timeline_filter(segs: list[Segment], crop: dict | None, width: int | None) -> str:
     """The filter_complex up to ``[base]`` — cut, speed, concat, crop, scale."""
     parts: list[str] = []
     n = len(segs)
@@ -296,10 +427,16 @@ def timeline_filter(segs: list[tuple[float, float | None, float]], crop: dict | 
     src = "[0:v]"
     if n > 1:
         parts.append(f"[0:v]split={n}" + "".join(f"[{lab}]" for lab in labels))
-    for i, (a, b, f) in enumerate(segs):
+    for i, seg in enumerate(segs):
+        a, b, f = seg[0], seg[1], seg[2]
+        ease = seg[3] if len(seg) > 3 else 0.0
         inp = f"[{labels[i]}]" if n > 1 else src
         trim = f"trim=start={_fmt(a)}" + (f":end={_fmt(b)}" if b is not None else "")
-        pts = "setpts=PTS-STARTPTS" + (f",setpts=PTS/{_fmt(f)}" if f != 1.0 else "")
+        if ease and b is not None and f != 1.0:
+            # Quoted: the expression's commas must not split the filter chain.
+            pts = f"setpts=PTS-STARTPTS,setpts='{ease_expr(b - a, f, ease)}'"
+        else:
+            pts = "setpts=PTS-STARTPTS" + (f",setpts=PTS/{_fmt(f)}" if f != 1.0 else "")
         parts.append(f"{inp}{trim},{pts}[v{i}]")
     if n > 1:
         parts.append("".join(f"[v{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0[cat]")
@@ -427,7 +564,7 @@ def render_output(
         _ff(runner, poster_cmd(ff, src, str(dst), at, spec["crop"], spec["width"]))
         attempts.append({"at": at})
     else:
-        segs = segments(spec["start"], spec["end"], spec["ramps"])
+        segs = segments(spec["start"], spec["end"], spec["ramps"], spec.get("eases"))
         if spec["format"] == "mp4":
             ladder = (
                 mp4_ladder(spec["crf"], spec["width"], src_w) if spec["max_bytes"] else [(spec["crf"], spec["width"])]

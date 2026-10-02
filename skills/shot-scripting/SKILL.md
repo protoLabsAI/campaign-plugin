@@ -46,7 +46,8 @@ Results often show up twice — "3 passed" in a bold summary AND in an inline co
   Prefer `exact` or a role over `nth` — an index breaks when the page adds a match.
 
 A failed take may already have done things (sent a prompt to an agent, started a job) — the
-app keeps going after the shoot dies. So get targets right BEFORE the take: re-snapshot the
+app keeps going after the shoot dies. (Its recording up to the failure is kept as a `captured`
+clip — see *When a take fails* — but a clean re-take still means a clean app state.) So get targets right BEFORE the take: re-snapshot the
 page in the state the step will see it and check every action target names one element.
 
 ## Inside an iframe — protoAgent plugin views
@@ -177,9 +178,17 @@ or as faked. So:
   through; never stitch beats from different points of a take.
 - **Compress time with speed only.** A uniform ~1.5–2× over the whole run keeps it brisk and
   still readable. Ramp harder (eased, **≤4×**) only over *pure dead time* — typing, a spinner,
-  a progress bar with nothing new on screen. `campaign_render` flags a ramp above 4× as a jump cut
+  a progress bar with nothing new on screen.
+- **Ease every ramp of 2× or more.** A speed change on one frame reads as a jump even when no
+  frame is skipped. `ease: true` (0.4 s) or `ease: <seconds>` accelerates smoothly from 1× over
+  the ramp's first seconds and back to 1× over its last (seconds of the TAKE, clamped to half
+  the ramp); nothing is cut, only re-timed — an eased ramp of length L at factor f lasts
+  `L/f + ease·(1 − 1/f)`. The render report flags an un-eased ramp of ≥2× (or ≤0.5×) as
+  starting and stopping abruptly. Ease eases to and from 1×, so between two adjacent ramps
+  ease only the outer edges (or not at all). `campaign_render` flags a ramp above 4× as a jump cut
   (a `continuity` warning in its report) unless the output says `continuous: false` — reserve
-  that for a deliberate time-lapse; a flagged ramp is a re-render, not something to ship. A uniform
+  that for a deliberate time-lapse; a flagged ramp is a re-render, not something to ship
+  (ease doesn't excuse a steep ramp — it smooths the edges, it doesn't restore skipped frames). A uniform
   speed-up is one ramp over the whole run (`{from: start, to: end, factor: 1.5}`); ramps can't
   overlap, so to combine it with a faster dead-time ramp split the run into adjacent ramps
   (`start→typed` at 3, `typed→end` at 1.5).
@@ -248,7 +257,7 @@ Render it continuous — no interior cuts, ramp only the typing, crop to the two
 ```yaml
 outputs:
   - {name: hero, format: mp4, start: start, end: end,
-     speed: [{from: start, to: typed, factor: 3}],   # typing only; nothing new appears
+     speed: [{from: start, to: typed, factor: 3, ease: true}],   # typing only; eased in and out
      crop: {x: 0, y: 56, width: 1440, height: 844}, limit: github_attachment_video_free}
 ```
 
@@ -300,3 +309,13 @@ The error names the step, the cause, and a `failure.png`. Look at the screenshot
   file into the allowed folder, or ask the operator; never work around it.
 Fix that ONE step and re-shoot. Same step failing three times → report to the operator with
 the screenshot rather than flailing.
+
+**The recording is never thrown away.** A take that fails after it started recording keeps its
+`.webm`, `timing.json` and `failure.png`, and is registered as a NEW `captured` clip whose note
+reads `FAILED at step N: <error>`, carrying the marks it reached (its stills too). It never
+fills the planned `asset_id` you passed. If the footage before the failure already shows the
+beat — the wait that timed out was on the very last step, say — `campaign_view` it and cut it
+with `campaign_render`: `end` must be seconds or a mark the take **reached** (a mark after the
+failed step doesn't exist and is refused, naming the marks there are); leave `end` off to run
+to the end of the recording, which includes the failing step — trim that off. Otherwise
+supersede it (`campaign_asset_update(…, status='superseded')`) once the re-take lands.

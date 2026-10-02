@@ -117,6 +117,81 @@ def _supersede_take(old: dict[str, Any], new_take_dir: str) -> list[str]:
     return notes
 
 
+def _failure_note(result: dict[str, Any], error: str) -> str:
+    """``FAILED at step N: <error>`` — what a kept failed take says about itself."""
+    n = result.get("failed_step") or 0
+    step = next((s for s in result.get("steps", []) if s.get("index") == n and s.get("error")), None)
+    why = f"{step['desc']} — {step['error']}" if step else error
+    return f"FAILED at step {n}: {why}" if n else f"FAILED: {why}"
+
+
+def _keep_failed_take(
+    campaign_id: int,
+    norm: dict[str, Any],
+    r: dict[str, Any],
+    error: str,
+    script_id: int,
+    lane_id: int,
+    title: str,
+    asset_id: int,
+) -> tuple[str, int, list[int]]:
+    """Register a failed take's recording — usable footage up to the failure — as a NEW
+    ``captured`` clip carrying a FAILED note, its marks reached so far and its failure still.
+    It never fills or supersedes ``asset_id``: a planned slot is for a clean take."""
+    facts = _file_facts(r["video"])
+    note = _failure_note(r, error)
+    marks = r.get("marks") or {}
+    meta = {
+        "timing": r.get("timing", ""),
+        "marks": marks,
+        "screenshots": r.get("screenshots") or {},
+        "take_dir": r.get("dir", ""),
+        "failed": {
+            "step": r.get("failed_step") or 0,
+            "error": error,
+            "failure_png": r.get("failure_png", ""),
+        },
+    }
+    take = store.add_asset(
+        campaign_id,
+        "clip",
+        title or f"take: {norm['name']} (failed)",
+        lane_id=lane_id,
+        status="captured",
+        path=r["video"],
+        script_id=script_id,
+        meta=meta,
+        notes=note,
+        **{k: v for k, v in facts.items() if k != "duration_s"},
+        duration_s=facts.get("duration_s") or r.get("duration_s") or 0,
+    )
+    still_ids = []
+    for name, p in (r.get("screenshots") or {}).items():
+        st = store.add_asset(
+            campaign_id,
+            "still",
+            f"{norm['name']}: {name}",
+            lane_id=take["lane_id"],
+            status="captured",
+            path=p,
+            parent_id=take["id"],
+            script_id=script_id,
+            **_file_facts(p),
+        )
+        still_ids.append(st["id"])
+    reached = ", ".join(f"{k}={v:.2f}s" for k, v in marks.items()) or "none"
+    text = (
+        f"The recording was KEPT → asset #{take['id']} [captured] — {note}\n"
+        f"- video: {r['video']} ({take['duration_s']:.1f}s, usable up to the failure)\n"
+        f"- timing log: {r.get('timing', '')}\n- marks reached: {reached}\n"
+        + (f"- stills: {', '.join(f'#{i}' for i in still_ids)}\n" if still_ids else "")
+        + (f"- not attached to asset #{asset_id}: a failed take never fills a planned slot\n" if asset_id else "")
+        + f"campaign_view it, and if the footage before the failure is enough, cut it with "
+        f"campaign_render(asset_id={take['id']}, …) — end at a time or a mark it reached."
+    )
+    return text, take["id"], still_ids
+
+
 def _asset_line(a: dict[str, Any]) -> str:
     dims = f" {a['width']}×{a['height']}" if a.get("width") else ""
     dur = f" {a['duration_s']:.1f}s" if a.get("duration_s") else ""
@@ -626,7 +701,9 @@ def build_tools(registry):
         assets (status 'captured'). Pass script_id for a saved script, or script (YAML/JSON) to
         validate, save and run in one go. Pass asset_id to fill a planned asset with this take.
         On a failed step you get the step number, the error, and a screenshot of the page at
-        that moment. Deterministic: same script, same take."""
+        that moment — and the recording up to the failure is KEPT as a new 'captured' clip noted
+        'FAILED at step N: …' with the marks it reached, so campaign_render can still cut a beat
+        from it. Deterministic: same script, same take."""
         if (reason := deps.need_browser()) is not None:
             return reason
         try:
@@ -667,6 +744,12 @@ def build_tools(registry):
                 msg += f"\n\nScreenshot at failure: {r['failure_png']}" + _embed(
                     r["failure_png"], "image/png", "failure"
                 )
+            if r.get("video") and Path(r["video"]).is_file():
+                kept, take_id, still_ids = _keep_failed_take(
+                    campaign_id, norm, r, str(e), script_id, lane_id, title, asset_id
+                )
+                _emit("shoot_finished", {"campaign_id": campaign_id, "asset_id": take_id, "stills": still_ids})
+                msg += "\n\n" + kept
             msg += "\n\nFix the step (a role/text target is sturdier than CSS; add a wait_for before it) and re-shoot."
             return msg
         except Exception as e:  # noqa: BLE001 — a browser launch failure etc. should read clearly
@@ -735,9 +818,12 @@ def build_tools(registry):
     def campaign_render(asset_id: int, outputs: list[dict] | str) -> str:
         """Cut a recorded take into shareable files with ffmpeg and register each as an asset
         (status 'rendered'). outputs is a list; each item has name, format (mp4 | gif | poster),
-        start/end (seconds or a mark name from the take), optional speed ramps
-        [{from, to, factor}] to fast-forward dead time (the clip is continuous — no interior
-        cuts — and a ramp above 4x is flagged as a jump cut unless continuous: false), optional crop {x,y,width,height} (source
+        start/end (seconds or a mark name from the take — for a failed take, only a mark it
+        reached), optional speed ramps [{from, to, factor, ease}] to fast-forward dead time
+        (ease: true or seconds accelerates into and out of the ramp smoothly instead of
+        switching speed on one frame; the clip is continuous — no interior cuts — and a ramp
+        above 4x is flagged as a jump cut unless continuous: false, an un-eased one of 2x+ as
+        abrupt), optional crop {x,y,width,height} (source
         px), width, fps, and limit (a hard-limit id such as github_attachment_video_free) and/or
         max_bytes. mp4 is H.264/yuv420p/faststart; when a size ceiling is set, mp4 steps CRF then
         width and gif steps fps then width until it fits. Reports final size, dimensions and
@@ -760,6 +846,7 @@ def build_tools(registry):
         if len(specs) > render.MAX_OUTPUTS:
             return f"{len(specs)} outputs in one call is too many — at most {render.MAX_OUTPUTS}; split the job."
         marks = (take.get("meta") or {}).get("marks") or {}
+        failed = (take.get("meta") or {}).get("failed") or None
         try:
             source = render.probe(take["path"])
         except render.RenderError as e:
@@ -775,7 +862,13 @@ def build_tools(registry):
                 spec = render.normalize_output(raw, marks, source["duration_s"])
                 r = render.render_output(take["path"], out_dir, spec, marks=marks, source=source)
             except render.RenderError as e:
-                lines.append(f"- {raw.get('name', '?') if isinstance(raw, dict) else raw}: FAILED — {e}")
+                hint = ""
+                if failed and "neither seconds nor a mark" in str(e):
+                    hint = (
+                        f" — this take {take.get('notes') or 'failed'}, so marks after that step were never "
+                        "reached: end at a time (seconds) or a mark it did reach"
+                    )
+                lines.append(f"- {raw.get('name', '?') if isinstance(raw, dict) else raw}: FAILED — {e}{hint}")
                 continue
             kind = {"mp4": "clip", "gif": "gif", "poster": "still"}[spec["format"]]
             notes = ("VIOLATES: " + "; ".join(r["violations"])) if r["violations"] else ""
@@ -808,7 +901,13 @@ def build_tools(registry):
             store.update_asset(take["id"], status="rendered")
         _emit("render_finished", {"campaign_id": c["id"], "source_asset_id": take["id"], "assets": made})
         return (
-            "Rendered:\n"
+            (
+                f"Rendering from a FAILED take ({take.get('notes') or 'failed'}) — only footage up to the "
+                "failure exists.\n"
+                if failed
+                else ""
+            )
+            + "Rendered:\n"
             + "\n".join(lines)
             + (
                 "\n\nRun the asset-review self-check — campaign_view each file and its cut points — then "

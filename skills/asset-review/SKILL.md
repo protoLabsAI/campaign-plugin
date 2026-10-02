@@ -61,15 +61,19 @@ the operator to look in the gallery.
 6. **Loops cleanly (GIFs).** The last frame should lead back into the first: end on a held
    result frame that's close to the opening, or cut so the loop point is a natural pause.
 7. **Starts on the action.** No blank page / loading spinner at the head — trim to the first
-   mark. No dead air in the middle — speed-ramp it (≤4×, only where nothing new appears) —
-   never cut it out. Ends on a ~2.5 s hold on the result.
+   mark. No dead air in the middle — speed-ramp it (≤4×, eased, only where nothing new
+   appears) — never cut it out. Ends on a ~2.5 s hold on the result.
 8. **Continuous — no missing action.** Operator feedback on real clips: *"too many cut frames,
    missing chunks of action."* Walking the ~1 s frames, the action must play through from its
    start to its result with no jump: nothing appears "already done" between two frames. Every
    new UI element (a panel opening, a row landing, a status change, streamed text) is visible
    for **≥ 0.5 s** — if it flashes past inside a speed ramp, end the ramp before it and
    re-render. Fix by re-rendering with a gentler/narrower ramp (≤4× over dead time only) or a
-   longer clip, never by accepting the gap.
+   longer clip, never by accepting the gap. A ramp that lurches in or out (the report's
+   "starts and stops abruptly" warning) → re-render it with `ease: true`.
+   Cut from a FAILED take (its source asset's note says `FAILED at step N`)? Check the last
+   seconds before its `end`: nothing of the failing step — a hung spinner, an error toast —
+   may be in frame.
    For a montage, run this per beat on its source take; the `montage-editing` skill covers
    the cut itself (pacing, transitions, cards).
 9. **The result, in its own view.** Operator feedback: *"we can't see the note view, only the
