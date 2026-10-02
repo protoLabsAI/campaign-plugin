@@ -60,7 +60,8 @@ BEARER_ENV_PREFIX = "CAMPAIGN_"
 FORBIDDEN_BEARER_ENVS = frozenset({"A2A_AUTH_TOKEN", "PROTOAGENT_FLEET_TOKEN", "FEDERATION_TOKEN"})
 _ALLOWED_BEARER_ENVS: frozenset[str] = frozenset()
 # The fence the worker enforces: this plugin's own data API, on any host or fleet-proxy
-# prefix (matched against the DECODED path). The approve/reject route lives there.
+# prefix — matched case-insensitively against every decoded/normalized form of the path (see
+# pw_worker.fence_views), and FAIL CLOSED on a URL it cannot read. The approve/reject route lives there.
 FENCE_PATTERNS = [r"/api/plugins/campaign(?:/|$)"]
 
 

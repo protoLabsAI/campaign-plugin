@@ -19,7 +19,7 @@ Usage (by the host, never by hand)::
 Job (``v: 1``) — secrets travel ONLY in this stdin payload, never argv or a file::
 
     {"v": 1, "kind": "shoot" | "card", "report_path": "...",
-     "fence": {"block_paths": ["<regex on the decoded URL path>", ...]},   # REQUIRED
+     "fence": {"block_paths": ["<regex, case-insensitive, on every normalized form of the path>", ...]},   # REQUIRED
      # shoot: "script": {validated script, goto steps carry "_url"}, "out_dir": "...",
      #        "bearer": "<token or ''>"
      # card:  "html": "...", "out_path": "...png", "width": W, "height": H, "max_bytes": N|null}
@@ -29,8 +29,9 @@ from every string in it.
 
 Security properties enforced HERE (the host can't reach into this process to enforce them):
 
-* **The fence.** Every request whose decoded path matches a ``fence.block_paths`` pattern is
-  aborted — the plugin's own data API, so a recording browser can never open the gallery and
+* **The fence.** Every request whose path — in any decoded/normalized form (see
+  ``fence_views``) — matches a ``fence.block_paths`` pattern is aborted, and so is every
+  request whose URL can't be parsed or decoded (fail closed) — the plugin's own data API, so a recording browser can never open the gallery and
   approve its own work. A job with no fence is refused (fail closed).
 * **Bearer scoping.** The bearer is attached per request, only to the script's ``base_url``
   origin and never to a fenced path — no context-wide header, so a CDN or analytics pixel
@@ -70,17 +71,65 @@ def origin(url: str) -> str:
     return f"{u.scheme.lower()}://{u.hostname.lower()}:{port}"
 
 
-def path_blocked(url: str, patterns: list[str]) -> bool:
-    """True when the URL's DECODED path (``//`` runs collapsed) matches any fence pattern.
+_MAX_DECODE_ROUNDS = 8
+_CONTROL = re.compile(r"[\x00-\x20\x7f]")
 
-    Starlette routes on the decoded path, so that is what is matched — ``%63ampaign`` and
-    ``//api//plugins`` must not slip past a pattern written for ``/api/plugins/campaign``."""
+
+def _resolve_dots(path: str) -> str:
+    """RFC 3986 dot-segment removal — ``/a/x/../b`` → ``/a/b`` (``.`` dropped)."""
+    out: list[str] = []
+    for seg in path.split("/"):
+        if seg == "..":
+            if len(out) > 1:
+                out.pop()
+        elif seg != ".":
+            out.append(seg)
+    return "/".join(out)
+
+
+def fence_views(url: str) -> list[str]:
+    """Every form of ``url``'s path a server (or a hop in front of one) could end up routing.
+
+    Raises ``ValueError`` when the URL can't be parsed or decoded — the caller BLOCKS then.
+
+    * **Percent-decoding to a fixpoint.** Starlette routes on the decoded path, and the
+      fleet proxy (``/agents/<slug>/<path>``) forwards the DECODED path verbatim to the member,
+      which decodes it again — so ``%2563ampaign`` reaches ``campaign`` two hops later. Each
+      round is a strict UTF-8 decode; a path still changing after the cap is refused.
+    * per decoded form: as-is, ``\\``→``/`` with ``//`` runs collapsed, dot segments resolved
+      (``x%2F..%2Fcampaign``), and with control/space characters stripped.
+
+    Matching is case-insensitive at the caller (a case-folding hop is defence in depth)."""
+    path = urlsplit(url).path  # ValueError on a malformed URL (bad IPv6 brackets, port, …)
+    decoded = [path]
+    for _ in range(_MAX_DECODE_ROUNDS):
+        nxt = unquote(decoded[-1], errors="strict")  # UnicodeDecodeError ⊂ ValueError
+        if nxt == decoded[-1]:
+            break
+        decoded.append(nxt)
+    else:
+        raise ValueError("URL path is still percent-encoded after the decode cap")
+    views: list[str] = []
+    for d in decoded:
+        for base in (d, _CONTROL.sub("", d)):
+            slashed = re.sub(r"/{2,}", "/", base.replace("\\", "/"))
+            views.extend((base, slashed, _resolve_dots(slashed)))
+    return list(dict.fromkeys(views))
+
+
+def path_blocked(url: str, patterns: list[str]) -> bool:
+    """True when any normalized form of the URL's path matches a fence pattern — FAIL CLOSED.
+
+    The fence keeps a recording browser off the plugin's own data API (so a shot script can't
+    approve its own assets). Anything that can't be parsed, decoded, or matched is BLOCKED:
+    a request the fence can't reason about is never let through."""
+    if not isinstance(url, str):
+        return True
     try:
-        path = urlsplit(url).path
-    except ValueError:
-        return False
-    clean = re.sub(r"/{2,}", "/", unquote(path))
-    return any(re.search(p, clean) for p in patterns)
+        views = fence_views(url)
+        return any(re.search(p, v, re.IGNORECASE) for p in patterns for v in views)
+    except Exception:  # noqa: BLE001 — fail closed on ANY parse/decode/match error
+        return True
 
 
 def _fence_patterns(job: dict[str, Any]) -> list[str]:

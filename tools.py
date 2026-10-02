@@ -40,11 +40,24 @@ def _parse_obj(value: Any, what: str) -> Any:
 
 
 def _lane_id(campaign_id: int, lane: str) -> int:
+    """The id of lane ``lane`` (a name, or a numeric id) in ``campaign_id`` — 0 for no lane.
+
+    A numeric id must name a lane OF THIS CAMPAIGN: an unchecked id would file an asset under
+    a lane that doesn't exist, or under another campaign's lane. A lane whose NAME is all
+    digits still resolves (an id match wins)."""
     if not lane:
         return 0
-    if str(lane).isdigit():
-        return int(lane)
-    row = store.lane_by_name(campaign_id, lane)
+    text = str(lane).strip()
+    if text.isdigit() and int(text) == 0:
+        return 0
+    if text.isdigit():
+        row = store.lane_by_id(campaign_id, int(text)) or store.lane_by_name(campaign_id, text)
+        if row is None:
+            raise ValueError(
+                f"no lane {text} in campaign {campaign_id} — campaign_get lists its lanes; add one with campaign_lane"
+            )
+        return row["id"]
+    row = store.lane_by_name(campaign_id, text)
     if row is None:
         raise ValueError(f"no lane named {lane!r} in campaign {campaign_id} — add it with campaign_lane first")
     return row["id"]

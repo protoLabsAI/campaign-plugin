@@ -162,6 +162,73 @@ def test_the_shoot_browser_can_never_reach_this_plugins_own_api(tmp_path):
     assert r.done[0] == "abort"
 
 
+# Every way a URL can say "/api/plugins/campaign" to some hop between the browser and the
+# route: case, single/double/triple percent-encoding, encoded slashes, `..` (plain, encoded,
+# split around the target), backslashes, `//` runs, control characters, host forms (trailing
+# dot, IPv6, userinfo) and the fleet proxy's `/agents/<slug>/` prefix (which DECODES once and
+# forwards — so a double-encoded path is decoded twice before the member routes it).
+FENCE_TRICKS = (
+    "http://h/API/Plugins/CAMPAIGN/assets/1/review",
+    "http://h/api/plugins/%2563ampaign/assets/1/review",
+    "http://h/api/plugins/%252563ampaign/x",
+    "http://h/api%2Fplugins%2Fcampaign/x",
+    "http://h/api%252Fplugins%252Fcampaign",
+    "http://h/api/plugins/x%2F..%2Fcampaign/assets/1/review",
+    "http://h/api/plugins/x/%2e%2e/campaign/x",
+    "http://h/api/plugins/x/./../campaign",
+    "http://h/api/x/../plugins/campaign",
+    "http://h/api\\plugins\\campaign/x",
+    "http://h/api%5Cplugins%5Ccampaign/x",
+    "http://h/api/plugins///campaign/x",
+    "http://h/api/plugins/camp%09aign/x",
+    "http://h/api/plugins/campaign%00/x",
+    "http://h./api/plugins/campaign/x",
+    "http://[::1]:7870/api/plugins/campaign/x",
+    "http://user:pw@h:7870/api/plugins/campaign/x",
+    "http://h:7870@evil.test/api/plugins/campaign/x",
+    "https://hub/agents/foo/api/plugins/campaign/assets/1/review",
+    "https://hub/agents/foo/api/plugins/%2563ampaign/assets/1/review",
+    "https://hub/agents/foo/%2Fapi%2Fplugins%2Fcampaign",
+    "https://hub/agents/foo/x%2F..%2F..%2Fapi/plugins/campaign",
+)
+
+
+@pytest.mark.parametrize("url", FENCE_TRICKS)
+def test_the_fence_sees_through_every_encoding_trick(url):
+    assert shoot.is_own_api(url), url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://[::1/api/plugins/campaign",  # unparseable (bad IPv6 bracket)
+        "http://h/x/%ff%fe",  # not UTF-8 once decoded
+        "http://h/%" + "25" * 12 + "41",  # still encoded after the decode cap
+        None,
+        b"http://h/",
+    ],
+)
+def test_the_fence_fails_closed_on_anything_it_cant_read(url):
+    assert pw_worker.path_blocked(url, shoot.FENCE_PATTERNS)
+
+
+def test_a_broken_fence_pattern_blocks_rather_than_letting_through():
+    assert pw_worker.path_blocked("http://h/anything", ["("])
+
+
+def test_the_fence_still_lets_ordinary_app_paths_through():
+    for url in (
+        "http://127.0.0.1:7870/plugins/campaign/view",
+        "http://x/api/plugins/campaigner/x",
+        "http://x/",
+        "http://x/docs/caf%C3%A9",
+        "http://x/a/../b?next=/api/plugins/campaign",  # the QUERY isn't routed
+        "http://x/search#/api/plugins/campaign",
+        "data:text/html,hi",
+    ):
+        assert not shoot.is_own_api(url), url
+
+
 def test_the_guard_is_installed_even_without_a_bearer(tmp_path):
     pw = FakePlaywright()
     shoot.run(_script(), tmp_path, playwright_factory=pw)
