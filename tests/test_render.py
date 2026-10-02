@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
-from campaign import deps, render
+import yaml
+from campaign import deps, render, shotscript
 from conftest import have_ffmpeg
 
 MARKS = {"start": 1.0, "typed": 3.0, "dialog": 7.0, "end": 9.0}
@@ -78,6 +80,30 @@ def test_spec_validation():
     )
     assert s["max_bytes"] == 8_000_000, "the tighter of max_bytes and the limit wins"
     assert s["crop"]["width"] == 1000 and s["crop"]["height"] == 600, "crop dims forced even"
+
+
+def test_clips_are_continuous_by_default_so_steep_ramps_are_flagged_as_jump_cuts():
+    # Operator feedback on real launch clips: "too many cut frames, missing chunks of action".
+    # The timeline has no interior cuts; a steep ramp is the one way left to skip action. It is
+    # flagged, not refused, so every factor in 0.25..32 that was valid before still renders.
+    s = _spec(speed=[{"from": "typed", "to": "dialog", "factor": 4}])
+    assert s["continuous"] is True and s["ramps"] == [(3.0, 7.0, 4.0)] and s["warnings"] == []
+    steep = _spec(speed=[{"from": "typed", "to": "dialog", "factor": 8}])
+    assert steep["ramps"] == [(3.0, 7.0, 8.0)], "still valid, still rendered"
+    assert len(steep["warnings"]) == 1 and "jump cut" in steep["warnings"][0] and "3.00–7.00s" in steep["warnings"][0]
+    lapse = _spec(continuous=False, speed=[{"from": "typed", "to": "dialog", "factor": 32}])
+    assert lapse["ramps"] == [(3.0, 7.0, 32.0)] and lapse["warnings"] == [], "an explicit time-lapse is silent"
+    with pytest.raises(render.RenderError, match="continuous must be true or false"):
+        _spec(continuous="no")
+    segs = render.segments(s["start"], s["end"], s["ramps"])
+    assert all(b1 == a2 for (_, b1, _), (a2, _, _) in zip(segs, segs[1:])), "no gap between pieces"
+
+
+def test_a_jump_cut_warning_reaches_the_render_report_without_blocking(tmp_path):
+    ff = FakeFF()
+    s = _spec(speed=[{"from": "typed", "to": "dialog", "factor": 8}])
+    r = render.render_output("in.webm", tmp_path, s, marks=MARKS, source={"width": 1280}, runner=ff)
+    assert r["violations"] == [] and r["warnings"] and "jump cut" in r["warnings"][0]
 
 
 def test_filter_graph_trims_ramps_concats_crops_and_scales():
@@ -259,3 +285,17 @@ def test_the_size_ladder_stops_at_its_time_budget(tmp_path, monkeypatch):
         "/x.webm", tmp_path, _spec(max_bytes=1_000_000), marks=MARKS, source={"width": 1280}, runner=ff
     )
     assert len(r["attempts"]) == 1 and "render budget" in r["violations"][0]
+
+
+def test_the_shot_scripting_worked_example_is_a_valid_script_and_a_continuous_render():
+    """The skill's example is copied by agents — it must validate as written."""
+    skill = (Path(render.__file__).parent / "skills" / "shot-scripting" / "SKILL.md").read_text()
+    blocks = re.findall(r"```yaml\n(.*?)```", skill, re.S)
+    script = shotscript.validate(next(b for b in blocks if "base_url:" in b))
+    ops = [st["op"] for st in script["steps"]]
+    marks = [st["name"] for st in script["steps"] if st["op"] == "mark"]
+    assert ops.index("click") < ops.index("type"), "the result's view is opened BEFORE the action"
+    assert script["steps"][-1]["op"] == "mark" and ops[-3] == "hold", "ends held on the result"
+    out = yaml.safe_load(next(b for b in blocks if "outputs:" in b))["outputs"][0]
+    spec = render.normalize_output(out, {m: float(i) for i, m in enumerate(marks)}, 99.0)
+    assert spec["continuous"] and all(f <= render.MAX_CONTINUOUS_FACTOR for _, _, f in spec["ramps"])

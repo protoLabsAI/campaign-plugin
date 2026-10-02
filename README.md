@@ -10,9 +10,11 @@ product: the planning + production half of a "Brand & Launch" agent.
 - **Shot scripts → takes** — a declarative YAML script (viewport, colour scheme, timezone,
   locale, auth, steps) recorded by headless Chromium through Playwright: `.webm` + named
   stills + a timing log of every `mark`. Same script, same take. Redaction built in.
-- **Renders** — ffmpeg cuts by mark, speed-ramps dead time, crops, and encodes H.264 mp4
-  (yuv420p, faststart) and palette-optimised GIFs, stepping quality down until the file fits
-  its **hard** limit — and refusing to call it ready if it still doesn't.
+- **Renders** — ffmpeg trims the head/tail by mark, speed-ramps dead time, crops, and encodes
+  H.264 mp4 (yuv420p, faststart) and palette-optimised GIFs, stepping quality down until the
+  file fits its **hard** limit — and refusing to call it ready if it still doesn't. Clips are
+  **continuous**: there are no interior cuts, and a ramp above 4× is flagged in the render
+  report as a jump cut unless the output says `continuous: false` (a deliberate time-lapse).
 - **Cards** — branded HTML templates rendered to PNG: `og-1280x640` (kept under GitHub's 1 MB
   social-preview limit), `x-card-1600x900`, `square-1080`, `title-slide-1920x1080`.
 - **Montages** — many short beats (each recorded in a different app theme) + tagline cards +
@@ -63,8 +65,8 @@ loads nothing from the network at all.
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.3.0`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.3.0`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.3.1`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.3.1`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —
@@ -167,6 +169,29 @@ stills are removed (any the operator approved are kept).
 
 Then: `campaign_render(asset_id, outputs=[{name: hero, format: mp4, start: start, end: end,
 speed: [{from: start, to: plugins, factor: 2}], limit: github_attachment_video_free}, …])`.
+
+## Directing a clip — two rules from operator review
+
+Both come from an operator reviewing real launch clips; the skills state them for any app.
+
+1. **Continuous action, no jump cuts** (*"too many cut frames, missing chunks of action"*).
+   No cuts between the action's start and its result; compress time with speed only — a
+   uniform ~1.5–2× over the run, ≤4× eased ramps only over pure dead time (typing, a spinner),
+   never ramping past a moment where something new appears. A 25–35 s hero that shows
+   everything beats a shorter one with gaps; hold ~2.5 s on the result. `campaign_render`
+   flags a ramp above 4× by default; the asset-review self-check walks the clip ~1 frame/s and
+   wants every new UI element on screen ≥ 0.5 s.
+2. **Showcase the app's own views, not just its chat/command surface** (*"can't see the note
+   view, only the chat screen"*). Open the view where the result lands (side panel, rail view,
+   board, document, terminal) docked beside the input *before* the action, so the result
+   appears live; end on that view showing the result, not on a "Done" message; crop to input +
+   view. Embedded views are usually iframes — target them with `frame:`. The self-check wants
+   the final ~2 s to show the result in its own view. The `shot-scripting` skill has a worked
+   example (chat left, notes panel right, the agent writes a note, hold on the note).
+
+These are for standalone clips (a lane's hero, a GIF). A **montage** beat follows the same
+continuity rule — one uniform speed, ≤4×, ends trimmed only — but its own length and geometry
+(4–8 s on screen, 1920×1080 full frame); see the `montage-editing` skill.
 
 ## Montages
 

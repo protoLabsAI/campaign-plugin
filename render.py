@@ -5,6 +5,7 @@ Each output spec says what to cut and how to ship it::
     {"name": "hero", "format": "mp4",           # mp4 | gif | poster
      "start": "start", "end": "end",            # seconds, or a mark name from the take
      "speed": [{"from": "typed", "to": "dialog", "factor": 4}],   # ramp dead time
+     "continuous": True,                        # default: warn on ramps that read as jump cuts
      "crop": {"x": 0, "y": 0, "width": 2560, "height": 1440},     # source pixels
      "width": 1280, "fps": 30,
      "limit": "github_attachment_video_free",   # a hard-limit id (limits.py) …
@@ -15,6 +16,14 @@ Each output spec says what to cut and how to ship it::
 * **gif** — palettegen/paletteuse (``stats_mode=diff``, bayer dither, rectangle diffs);
   steps fps and width down until the file fits.
 * **poster** — one PNG frame at ``at`` (default: the start).
+
+**Continuous by default.** The timeline is one unbroken run from ``start`` to ``end`` — there is
+no way to drop a chunk from inside it, on purpose: viewers read a hard cut inside the action as
+missing frames. The one way left to skip action is a steep speed ramp, so with ``continuous``
+(the default) a ramp faster than ``MAX_CONTINUOUS_FACTOR`` (4×) still renders but comes back
+with a ``warnings`` entry saying it will read as a jump cut — compress time with a uniform
+1.5–2× over the run and ≤4× over pure dead time instead. ``"continuous": false`` marks an
+output as a deliberate time-lapse and silences the warning. Any factor in 0.25..32 stays valid.
 
 An output that still doesn't fit after its ladder is kept (so the operator can look) but is
 reported with its violations, and the review gate refuses to offer it as ready.
@@ -164,6 +173,9 @@ def _bounded_int(spec: dict[str, Any], key: str, lo: int, hi: int, name: str) ->
     return v
 
 
+MAX_CONTINUOUS_FACTOR = 4.0
+
+
 def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: float) -> dict[str, Any]:
     if not isinstance(spec, dict):
         raise RenderError(f"each output must be a mapping, got {spec!r}")
@@ -180,7 +192,10 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
         raise RenderError(f"output {name}: start {start:.2f}s is past the end of the take ({duration:.2f}s)")
     if end is not None and end <= start:
         raise RenderError(f"output {name}: end ({end:.2f}s) must be after start ({start:.2f}s)")
-    ramps = []
+    continuous = spec.get("continuous", True)
+    if not isinstance(continuous, bool):
+        raise RenderError(f"output {name}: continuous must be true or false")
+    ramps, warnings = [], []
     for r in spec.get("speed") or []:
         a = resolve_time(r.get("from"), marks, f"{name}.speed.from")
         b = resolve_time(r.get("to"), marks, f"{name}.speed.to")
@@ -192,6 +207,13 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
             raise RenderError(f"output {name}: each speed ramp needs from < to")
         if not 0.25 <= f <= 32:  # also rejects NaN
             raise RenderError(f"output {name}: speed factor {f} is outside 0.25..32")
+        if continuous and f > MAX_CONTINUOUS_FACTOR:
+            warnings.append(
+                f"speed factor {f:g} ({a:.2f}–{b:.2f}s) will read as a jump cut — a continuous clip "
+                f"ramps at most {MAX_CONTINUOUS_FACTOR:g}× and only over pure dead time (typing, a "
+                "spinner); use a uniform 1.5–2× over the run and a longer clip instead, or set "
+                "continuous: false if this is a deliberate time-lapse"
+            )
         ramps.append((max(a, start), min(b, end) if end is not None else b, f))
     ramps.sort()
     for (a1, b1, _), (a2, _b2, _) in zip(ramps, ramps[1:]):
@@ -231,6 +253,8 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
         "start": start,
         "end": end,
         "ramps": ramps,
+        "continuous": continuous,
+        "warnings": warnings,
         "crop": crop,
         "width": width,
         "fps": fps,
@@ -450,4 +474,11 @@ def render_output(
         ):
             if v not in violations and "over the" not in v:
                 violations.append(v)
-    return {"path": str(dst), **info, "attempts": attempts, "violations": violations, "format": spec["format"]}
+    return {
+        "path": str(dst),
+        **info,
+        "attempts": attempts,
+        "violations": violations,
+        "warnings": list(spec.get("warnings") or []),
+        "format": spec["format"],
+    }

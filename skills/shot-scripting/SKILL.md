@@ -3,8 +3,9 @@ name: shot-scripting
 description: >-
   Use to write a robust Campaign Studio shot script — the declarative YAML that records a
   deterministic browser take of any web app — and to fix one that failed. Covers targets that
-  survive restyles, readable holds, marks for trimming, redaction of secrets, and fixed
-  timezone/locale. Triggers: "record a demo of", "capture a clip of", "shoot the flow",
+  survive restyles, readable holds, continuous action with no jump cuts, staging the result in
+  the app's own view (not just its chat/command surface), marks, redaction of secrets, and
+  fixed timezone/locale. Triggers: "record a demo of", "capture a clip of", "shoot the flow",
   "the take failed", "re-record", "make a GIF of the app doing X".
 tools: [campaign_script_save, campaign_shoot, campaign_view, campaign_get, browser_open, browser_snapshot, browser_screenshot]
 ---
@@ -101,15 +102,105 @@ matters. Or `mask` the whole terminal element (`.xterm`) for a beat you can't ke
 - `hold: 1200`–`2000` on every frame a viewer must read (a dialog, a result). Too short is the
   most common reason a clip is useless.
 - `type` with `delay_ms: 35–60` for realism; `fill` when the typing isn't the point.
-- `mark` before and after each beat. Marks are how `campaign_render` trims and speed-ramps
-  (e.g. 4× between `typed` and `result`) without guessing seconds.
+- `mark` before and after each beat. Marks are how `campaign_render` sets the clip's start/end
+  and speed-ramps dead time (e.g. ≤4× between `typed` and `sent`) without guessing seconds.
 - `screenshot` the frames you'll want as stills or card images.
 
 ## One idea per clip
 
 A hero clip shows ONE thing working end to end. If the script has two "and then"s, split it.
-Length targets (e.g. "15–30s hero") are intent, not a rule — whatever the plan's sourced
-assumptions say.
+Length targets are intent, not a rule — whatever the plan's sourced assumptions say — but see
+the next section before you cut for length.
+
+## Continuous action — no jump cuts
+
+Operator feedback on real launch clips: *"too many cut frames, missing chunks of action."* A
+viewer can't follow what they didn't see happen, and a cut inside the action reads as a glitch
+or as faked. So:
+
+- **No hard cuts between the action's start and its result.** Trim only the head (before the
+  action starts) and the tail (after the held result). Script one take that runs straight
+  through; never stitch beats from different points of a take.
+- **Compress time with speed only.** A uniform ~1.5–2× over the whole run keeps it brisk and
+  still readable. Ramp harder (eased, **≤4×**) only over *pure dead time* — typing, a spinner,
+  a progress bar with nothing new on screen. `campaign_render` flags a ramp above 4× as a jump cut
+  (a `continuity` warning in its report) unless the output says `continuous: false` — reserve
+  that for a deliberate time-lapse; a flagged ramp is a re-render, not something to ship. A uniform
+  speed-up is one ramp over the whole run (`{from: start, to: end, factor: 1.5}`); ramps can't
+  overlap, so to combine it with a faster dead-time ramp split the run into adjacent ramps
+  (`start→typed` at 3, `typed→end` at 1.5).
+- **Never ramp past a moment where something new appears.** A panel opening, a row landing, a
+  status changing, text streaming in — those play at the run speed. Put a `mark` right before
+  each so the ramp ends there.
+- **Longer beats gappy.** A 25–35 s hero that shows everything beats a 15 s one with holes. If
+  it's over a size limit, crop or drop width/fps — don't cut the action.
+- **Hold ~2.5 s on the result** (`hold: 2500` after it lands) so it can be read before the
+  clip ends or loops.
+
+These lengths are for a standalone clip (a lane's hero, a GIF). Recording a **beat for a
+montage**? The same continuity rule holds, but the `montage-editing` skill owns its length
+(4–8 s on screen), geometry (1920×1080, full frame) and theme-per-beat — follow it there.
+
+## Showcase the app's own views, not just the input
+
+Operator feedback: *"can't see the note view, only the chat screen, so we don't see the note
+being added."* Most apps have a surface where you ask (a chat, a command bar, a form) and a
+surface where the result lives (a side panel, a rail view, a board, a document, a terminal, a
+list). A clip of only the input surface ending on "Done" proves nothing. So:
+
+- **Before triggering the action, open the view where the result lands**, docked beside the
+  input (split view, side panel), so the result appears live on camera as it happens. `wait_for`
+  the view to be ready *before* the action step.
+- **End on that view showing the result**, not on a "Done"/"Saved" message in the input.
+- **Crop to input + view** in the render — the two panes, not the whole window's chrome.
+- **Embedded views are often iframes** (in protoAgent, every plugin view is) — target inside
+  them with `frame:` (see below). `wait_for` the new item inside the frame so the take fails
+  loudly if the result never shows up there.
+
+### Worked example — chat on the left, notes panel on the right
+
+```yaml
+base_url: http://localhost:7870
+viewport: {width: 1440, height: 900}
+color_scheme: dark
+timezone_id: UTC
+locale: en-US
+redact: {presets: [home_paths, emails, secrets]}
+steps:
+  - goto: /
+  - wait_for: {role: textbox, name: Message}
+  # 1. Stage the result's view FIRST, docked beside the chat.
+  - click: {role: button, name: Notes}
+  - wait_for: {frame: {url: /plugins/notes/view}, timeout_ms: 20000}
+  - wait_for: {text: Notes, frame: /plugins/notes/view}
+  - hold: 800
+  - mark: start
+  # 2. The action — typing is dead time, so it may be ramped (≤4×) in the render.
+  - type: {target: {role: textbox, name: Message}, text: "Save a note: ship the beta on Friday", delay_ms: 40}
+  - mark: typed
+  - press: {key: Enter, target: {role: textbox, name: Message}}
+  - mark: sent
+  # 3. The result lands IN THE VIEW — wait for it there, not for "Done" in the chat.
+  - wait_for: {text: "ship the beta on Friday", frame: /plugins/notes/view, timeout_ms: 90000}
+  - mark: result
+  # 4. Hold on the note so it can be read.
+  - hold: 2500
+  - screenshot: {name: note-landed}
+  - mark: end
+```
+
+Render it continuous — no interior cuts, ramp only the typing, crop to the two panes:
+
+```yaml
+outputs:
+  - {name: hero, format: mp4, start: start, end: end,
+     speed: [{from: start, to: typed, factor: 3}],   # typing only; nothing new appears
+     crop: {x: 0, y: 56, width: 1440, height: 844}, limit: github_attachment_video_free}
+```
+
+The agent's reply streaming in and the note appearing (`sent` → `result`) play at 1×: that's
+the moment the clip exists to show. (As a montage beat the same script works — record it at
+1920×1080 per `montage-editing` and give the beat a `focus` on the notes panel for vertical cuts.)
 
 ## Determinism
 
