@@ -54,6 +54,8 @@ WORKFLOW for each asset you're given (by id, or 'everything planned and owned by
    around every beat you'll trim or speed-ramp; redact {presets: [home_paths, emails, secrets]};
    fixed timezone_id + locale. campaign_script_save validates it — fix every problem it lists.
 4. campaign_shoot. On failure, read the error + failure screenshot, fix THAT step, re-shoot.
+   The failed take's footage is kept (a 'captured' clip noted FAILED at step N) — if it
+   already holds the beat, render from it (end at a time or a mark it reached) instead.
    Three failures on the same step → stop and report what you saw.
 5. LOOK at the take with campaign_view: every still (asset_id of each), the clip's frames, and
    around= every mark you'll cut or ramp at. Illegible, cropped, or anything private on screen →

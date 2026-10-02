@@ -71,6 +71,67 @@ def test_a_failing_step_reports_which_step_and_screenshots_the_page(tmp_path):
     assert [st["index"] for st in r["steps"]] == [1, 2, 3], "nothing runs after the failure"
     assert json.loads(Path(r["timing"]).read_text())["error"] == msg
     assert r["video"], "the partial take is kept for diagnosis"
+    assert r["failed_step"] == 3 and json.loads(Path(r["timing"]).read_text())["failed_step"] == 3
+
+
+def test_a_failed_take_closes_the_page_then_the_context_so_the_video_is_flushed(tmp_path):
+    pw = FakePlaywright(fail_on=lambda action, how, args: action == "click")
+    with pytest.raises(shoot.ShootError) as e:
+        shoot.run(_script({"mark": "go"}, {"click": {"text": "Install"}}), tmp_path / "t", playwright_factory=pw)
+    r = e.value.result
+    ctx = pw.browser.contexts[0]
+    assert getattr(ctx.page, "closed", False), "the page is closed in a finally"
+    assert ("context.close",) in pw.calls and pw.calls[-1] == ("browser.close",)
+    assert Path(r["video"]).is_file() and Path(r["video"]).name == "take.webm"
+    assert r["marks"] == {"go": r["marks"]["go"]}, "the marks reached before the failure are reported"
+
+
+def _crash_on_close(self):
+    # The browser crashed while finalizing: a truncated webm is on disk and close() raises.
+    p = Path(self.page.video.path())
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"\x1a\x45\xdf\xa3trunc")
+    raise RuntimeError("Target page, context or browser has been closed")
+
+
+def test_a_clean_run_whose_video_cannot_be_finalized_fails_the_take(tmp_path, monkeypatch):
+    import conftest
+
+    monkeypatch.setattr(conftest.FakeContext, "close", _crash_on_close)
+    pw = FakePlaywright()
+    with pytest.raises(shoot.ShootError) as e:  # every step passed; only finalizing failed
+        shoot.run(_script({"mark": "go"}), tmp_path / "t", playwright_factory=pw)
+    msg = str(e.value)
+    assert (
+        "couldn't be finalized after step 2" in msg and "may be truncated" in msg and "browser has been closed" in msg
+    )
+    r = e.value.result
+    assert r["failed_step"] == 2 and Path(r["video"]).is_file(), "kept — but as a failed take"
+    assert json.loads(Path(r["timing"]).read_text())["error"] == msg
+    assert pw.calls[-1] == ("browser.close",)
+
+
+def test_a_failed_run_whose_close_also_raises_keeps_the_step_error(tmp_path, monkeypatch):
+    import conftest
+
+    monkeypatch.setattr(conftest.FakeContext, "close", _crash_on_close)
+    pw = FakePlaywright(fail_on=lambda action, how, args: action == "click")
+    with pytest.raises(shoot.ShootError) as e:
+        shoot.run(_script({"click": {"text": "Install"}}), tmp_path / "t", playwright_factory=pw)
+    assert str(e.value).startswith("step 2 (click text='Install') failed") and e.value.result["failed_step"] == 2
+
+
+def test_a_page_close_that_raises_still_finalizes_and_keeps_the_video(tmp_path, monkeypatch):
+    import conftest
+
+    def boom(self):
+        raise RuntimeError("target closed")
+
+    monkeypatch.setattr(conftest.FakePage, "close", boom)
+    pw = FakePlaywright(fail_on=lambda action, how, args: action == "click")
+    with pytest.raises(shoot.ShootError) as e:
+        shoot.run(_script({"click": {"text": "Install"}}), tmp_path / "t", playwright_factory=pw)
+    assert Path(e.value.result["video"]).is_file()
 
 
 def test_masks_and_redaction_are_installed_before_the_first_frame(tmp_path):

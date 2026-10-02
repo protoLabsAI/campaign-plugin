@@ -15,6 +15,14 @@ product: the planning + production half of a "Brand & Launch" agent.
   file fits its **hard** limit — and refusing to call it ready if it still doesn't. Clips are
   **continuous**: there are no interior cuts, and a ramp above 4× is flagged in the render
   report as a jump cut unless the output says `continuous: false` (a deliberate time-lapse).
+  A ramp can **ease** in and out (`ease: true` or seconds) — a smooth time-remap instead of a
+  speed change on one frame; an un-eased ramp of ≥2× is flagged as abrupt.
+- **Failed takes keep their footage** — a take whose step fails mid-run still finalizes its
+  video, `timing.json` and `failure.png`, and registers as a `captured` clip noted
+  `FAILED at step N: <error>` with the marks it reached, so `campaign_render` can cut a beat
+  from the footage before the failure. A failed take can't go to review itself (render the
+  good part, or `allow_failed_take=true`); a run whose video couldn't be finalized or that
+  ffprobe can't read counts as failed and never fills a planned asset.
 - **Cards** — branded HTML templates rendered to PNG: `og-1280x640` (kept under GitHub's 1 MB
   social-preview limit), `x-card-1600x900`, `square-1080`, `title-slide-1920x1080`.
 - **Montages** — many short beats (each recorded in a different app theme) + tagline cards +
@@ -67,8 +75,8 @@ loads nothing from the network at all.
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.3.3`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.3.3`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.3.4`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.3.4`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —
@@ -224,7 +232,7 @@ Asset statuses: `planned`, `scripted`, `captured`, `rendered`, `ready_for_review
 older databases need no migration; the `superseded_by` column is added on first connect.
 
 Then: `campaign_render(asset_id, outputs=[{name: hero, format: mp4, start: start, end: end,
-speed: [{from: start, to: plugins, factor: 2}], limit: github_attachment_video_free}, …])`.
+speed: [{from: start, to: plugins, factor: 2, ease: true}], limit: github_attachment_video_free}, …])`.
 
 ## Directing a clip — two rules from operator review
 
@@ -232,7 +240,7 @@ Both come from an operator reviewing real launch clips; the skills state them fo
 
 1. **Continuous action, no jump cuts** (*"too many cut frames, missing chunks of action"*).
    No cuts between the action's start and its result; compress time with speed only — a
-   uniform ~1.5–2× over the run, ≤4× eased ramps only over pure dead time (typing, a spinner),
+   uniform ~1.5–2× over the run, ≤4× eased ramps (`ease: true`) only over pure dead time (typing, a spinner),
    never ramping past a moment where something new appears. A 25–35 s hero that shows
    everything beats a shorter one with gaps; hold ~2.5 s on the result. `campaign_render`
    flags a ramp above 4× by default; the asset-review self-check walks the clip ~1 frame/s and

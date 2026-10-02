@@ -256,6 +256,9 @@ class FakePage:
                 parent = next((f for f in self.frames if f is not self and f.url == parent_url), self)
                 parent.child_frames.append(FakeFrame(self, url, selector, None if parent is self else parent))
 
+    def close(self):
+        self.closed = True
+
     def set_default_timeout(self, ms):
         self.default_timeouts.append(ms)
 

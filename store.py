@@ -477,7 +477,19 @@ def _check_replacements(conn: sqlite3.Connection, row: dict[str, Any], ids: list
 APPROVED_MUTABLE = ("notes",)
 
 
-def update_asset(asset_id: int, **fields: Any) -> dict[str, Any]:
+def failed_take(asset: dict[str, Any]) -> dict[str, Any] | None:
+    """The ``meta.failed`` record of a take kept from a failed shoot (None for a clean one)."""
+    meta = asset.get("meta") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta or "{}")
+        except json.JSONDecodeError:
+            return None
+    failed = meta.get("failed") if isinstance(meta, dict) else None
+    return failed or None
+
+
+def update_asset(asset_id: int, *, allow_failed_take: bool = False, **fields: Any) -> dict[str, Any]:
     """Agent-side update. Refuses approve/reject and enforces the ready-for-review gate.
 
     An APPROVED asset is frozen for the agent (only ``notes`` may change): it can't be moved
@@ -527,6 +539,13 @@ def update_asset(asset_id: int, **fields: Any) -> dict[str, Any]:
         merged = {**row, **changes}
         if changes.get("status") == "ready_for_review":
             problems = review_gate(merged)
+            if failed_take(merged) and not allow_failed_take:
+                problems.append(
+                    f"it is a FAILED take ({row.get('notes') or 'failed mid-shoot'}) — the footage stops at "
+                    "the failure, usually with the failing step in frame. Render the good part "
+                    "(campaign_render) and offer that, or pass allow_failed_take=true if the take "
+                    "itself really is the deliverable"
+                )
             if problems:
                 raise ValueError("not ready for review: " + "; ".join(problems))
         if changes:

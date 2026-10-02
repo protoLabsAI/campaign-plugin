@@ -726,6 +726,7 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
     marks: dict[str, float] = {}
     stills: dict[str, str] = {}
     error = ""
+    failed_step = 0
     failure_png = ""
     video_path = ""
     t0 = time.monotonic()
@@ -777,6 +778,7 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
                                 f"step {step['index']} ({describe(step)}) not started: "
                                 f"total_timeout_s={script['total_timeout_s']} spent"
                             )
+                            failed_step = step["index"]
                             break
                         timeout = step_timeout_for(step, step_timeout, remaining_ms())
                         # Any Playwright call in the step that takes no explicit timeout (an
@@ -793,6 +795,7 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
                             entry["error"] = first_line(e)
                             log.append(entry)
                             error = f"step {step['index']} ({entry['desc']}) failed: {entry['error']}"
+                            failed_step = step["index"]
                             try:
                                 fp = out_dir / "failure.png"
                                 page.screenshot(path=str(fp), timeout=5000)
@@ -803,13 +806,30 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
                         entry["t_end"] = round(time.monotonic() - t0, 3)
                         log.append(entry)
                 finally:
+                    # A failed take keeps its recording: read the video's path, then close the
+                    # page so Playwright flushes the file — whatever the step loop did.
                     try:
                         if page.video:
                             video_path = str(page.video.path())
                     except Exception:  # noqa: BLE001
                         video_path = ""
+                    try:
+                        page.close()
+                    except Exception:  # noqa: BLE001 — context.close() below still finalizes
+                        pass
             finally:
-                context.close()  # finalizes the video file
+                try:
+                    context.close()  # finalizes the video file
+                except Exception as e:  # noqa: BLE001
+                    # A take that already failed keeps whatever was flushed. A CLEAN run whose
+                    # video couldn't be finalized is NOT a good take: the file may be truncated.
+                    if not error:
+                        last = log[-1]["index"] if log else 0
+                        error = (
+                            f"the recording couldn't be finalized after step {last} — closing the "
+                            f"browser context failed: {first_line(e)}; the video may be truncated"
+                        )
+                        failed_step = last
         finally:
             browser.close()
 
@@ -832,6 +852,7 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
         "screenshots": stills,
         "steps": log,
         "error": error,
+        "failed_step": failed_step,
     }
     (out_dir / "timing.json").write_text(json.dumps(timing, indent=2), encoding="utf-8")
     result = {
@@ -843,6 +864,7 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
         "duration_s": duration,
         "steps": log,
         "error": error,
+        "failed_step": failed_step,
         "failure_png": failure_png,
     }
     return result, error

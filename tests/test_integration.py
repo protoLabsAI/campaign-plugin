@@ -83,6 +83,9 @@ def test_real_take_of_a_tiny_local_page(site, tmp_path):
         shoot.run(bad, tmp_path / "bad")
     assert str(e.value).startswith("step 2 (click role='button' name='Nope') failed")
     assert Path(e.value.result["failure_png"]).is_file()
+    failed = e.value.result
+    assert Path(failed["video"]).stat().st_size > 1000, "a failed take keeps its finalized recording"
+    assert json.loads(Path(failed["timing"]).read_text())["failed_step"] == 2
 
     if not have_ffmpeg():
         pytest.skip("ffmpeg not installed — take verified, render half skipped")
@@ -96,6 +99,15 @@ def test_real_take_of_a_tiny_local_page(site, tmp_path):
     )
     out = render.render_output(res["video"], tmp_path / "r", spec, marks=res["marks"], source=source)
     assert out["violations"] == [] and out["size_bytes"] > 0 and out["width"] == 640
+
+    # The failed take plays, and a beat renders from it (to a time — it reached no marks).
+    fsrc = render.probe(failed["video"])
+    assert fsrc["width"] == bad["viewport"]["width"] and fsrc["duration_s"] > 0.5, (
+        "flushed: ffprobe reads the whole failed take"
+    )
+    fspec = render.normalize_output({"name": "beat", "format": "mp4", "end": 0.5}, failed["marks"], fsrc["duration_s"])
+    beat = render.render_output(failed["video"], tmp_path / "rf", fspec, marks=failed["marks"], source=fsrc)
+    assert beat["size_bytes"] > 0 and 0.3 <= beat["duration_s"] <= 0.7
 
 
 @pytest.mark.integration
