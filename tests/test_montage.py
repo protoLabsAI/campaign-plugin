@@ -657,3 +657,17 @@ def test_real_transparent_label_overlay_keeps_its_alpha(tmp_path):
         capture_output=True, check=True,
     ).stdout  # fmt: skip
     assert _near(tuple(bar[:3]), "#22c55e")[0] and bar[3] == 255, "the accent bar is opaque, in the theme colour"
+
+
+def test_the_review_gate_enforces_a_limits_duration(camp):
+    c, _ = camp
+    d = paths.campaign_dir(c["id"], "Launch")
+    f = d / "long.mp4"
+    f.write_bytes(b"0" * 1000)
+    long = store.add_asset(
+        c["id"], "montage", "long", path=str(f), status="rendered", duration_s=150.0, limit_id="x_video"
+    )
+    with pytest.raises(ValueError, match="150.0s is over the 140s maximum"):
+        store.update_asset(long["id"], status="ready_for_review")
+    ok = store.add_asset(c["id"], "montage", "ok", path=str(f), status="rendered", duration_s=60.0, limit_id="x_video")
+    assert store.update_asset(ok["id"], status="ready_for_review")["status"] == "ready_for_review"
