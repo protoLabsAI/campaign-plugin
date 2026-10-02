@@ -8,7 +8,9 @@
 The file route serves an asset only when its resolved path (symlinks followed) sits inside
 the plugin's media root — a row pointing anywhere else is refused, whatever wrote it.
 
-Approve/reject lives ONLY here: there is no agent tool for it. It's the operator's call.
+Approve/reject lives ONLY here: there is no agent tool for it. It's the operator's call. So
+does superseding an APPROVED asset (decision ``supersede``) — the agent may supersede only
+what isn't approved.
 """
 
 # NOTE: no `from __future__ import annotations` here — the route signatures annotate with
@@ -59,8 +61,9 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
     router = APIRouter()
 
     class Review(BaseModel):
-        decision: str
+        decision: str  # approve | reject | supersede
         note: str = ""
+        superseded_by: list[int] = []
 
     def _public_asset(a: dict[str, Any]) -> dict[str, Any]:
         keys = (
@@ -68,6 +71,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
             "height", "duration_s", "limit_id", "parent_id", "notes", "review_note", "reviewed_at", "updated",
         )  # fmt: skip
         out = {k: a.get(k) for k in keys}
+        out["superseded_by"] = list(a.get("superseded_by") or [])
         out["has_file"] = bool(a.get("path")) and paths.is_contained(a["path"])
         out["can_review"] = a.get("status") in ("ready_for_review", "approved", "rejected")
         return out
@@ -76,7 +80,8 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
     async def _campaigns() -> JSONResponse:
         rows = []
         for c in store.list_campaigns(include_archived=True):
-            assets = store.list_assets(c["id"])
+            every = store.list_assets(c["id"])
+            assets = [a for a in every if not store.is_retired(a)]  # superseded takes don't count
             rows.append(
                 {
                     "id": c["id"],
@@ -86,6 +91,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
                     "assets": len(assets),
                     "review": sum(1 for a in assets if a["status"] == "ready_for_review"),
                     "approved": sum(1 for a in assets if a["status"] == "approved"),
+                    "superseded": len(every) - len(assets),
                 }
             )
         return JSONResponse({"campaigns": rows})
@@ -130,7 +136,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
     @router.post("/assets/{asset_id}/review")
     async def _review(asset_id: int, body: Review) -> JSONResponse:
         try:
-            a = store.review(asset_id, body.decision, body.note)
+            a = store.review(asset_id, body.decision, body.note, body.superseded_by)
         except ValueError as e:
             raise HTTPException(400, str(e)) from None
         if emit:

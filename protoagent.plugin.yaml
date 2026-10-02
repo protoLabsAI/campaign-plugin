@@ -1,6 +1,6 @@
 id: campaign
 name: Campaign Studio
-version: 0.3.2
+version: 0.3.3
 description: >-
   Campaign plans and deterministic, repeatable media production for launching ANY app or
   product. Plans hold the goal and its math, lanes, a shot list of assets (who records what),
@@ -82,7 +82,7 @@ settings:
   - { key: producer_model, label: "Producer model", type: string, group: "Crew models", description: "Model override for the campaign_producer subagent. Blank rides the host's aux-model routing." }
 
 # Console rail view (ADR 0026) — browsing only: every asset of a campaign, playable, with
-# status/size/dims and the operator-only approve/reject buttons.
+# status/size/dims and the operator-only approve/reject/supersede buttons.
 views:
   - { id: gallery, label: "Campaign Studio", icon: "Clapperboard", path: /plugins/campaign/view }
 

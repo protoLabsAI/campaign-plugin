@@ -470,7 +470,7 @@ def resolve_items(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Attach each clip's file and real duration; check it belongs to THIS campaign.
 
-    Returns (items, warnings). Missing/foreign/rejected/fileless clips and in/out past the end
+    Returns (items, warnings). Missing/foreign/rejected/superseded/fileless clips and in/out past the end
     are errors (all of them, at once); an input that isn't approved yet is a WARNING, and the
     item carries ``unapproved`` so the montage can be marked as built from draft inputs."""
     probe = probe or render.probe
@@ -493,6 +493,15 @@ def resolve_items(
             continue
         if a["status"] == "rejected":
             problems.append(f"{what}: the operator REJECTED it{(': ' + a['review_note']) if a['review_note'] else ''}")
+            continue
+        if a["status"] == "superseded":
+            repl = [int(i) for i in (a.get("superseded_by") or [])]
+            by = (
+                "replaced by " + ", ".join(f"#{i}" for i in repl) + " — use that instead"
+                if repl
+                else "no replacement recorded — campaign_assets lists the current takes"
+            )
+            problems.append(f"{what}: is SUPERSEDED ({by})")
             continue
         p = Path(str(a.get("path") or ""))
         if not a.get("path") or not p.is_file():

@@ -68,7 +68,8 @@ recording — the montage only trims the ends, sets one speed, and joins beats w
    differ; cards are legible; the total length is what the plan wants.
 2. Fix and re-storyboard until it reads. It's cheap; the full render is not.
 3. `campaign_montage(campaign_id, sequence, output={name: launch, limit: x_video})`. It refuses
-   unknown keys, missing or rejected clips, and a cut that breaks the limit's length; clips not
+   unknown keys, missing, rejected or superseded clips (the error names the replacement — swap
+   it in), and a cut that breaks the limit's length; clips not
    approved yet are allowed but the montage is marked **DRAFT INPUTS** — get them approved.
 4. `campaign_view(asset_id=<montage>, frames=12)` and `around=<each transition time>` from the
    cut sheet. Then the asset-review self-check and `ready_for_review`.

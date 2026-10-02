@@ -123,7 +123,14 @@ def _asset_line(a: dict[str, Any]) -> str:
     size = f" {limits.human_bytes(a['size_bytes'])}" if a.get("size_bytes") else ""
     lim = f" limit={a['limit_id']}" if a.get("limit_id") else ""
     path = f"\n    {a['path']}" if a.get("path") else ""
-    return f"- #{a['id']} [{a['status']}] {a['kind']} — {a['title'] or '(untitled)'} (owner: {a['owner']}){dims}{dur}{size}{lim}{path}"
+    sup = ""
+    if a.get("status") == "superseded":
+        by = a.get("superseded_by") or []
+        sup = " → replaced by " + ", ".join(f"#{i}" for i in by) if by else ""
+    return (
+        f"- #{a['id']} [{a['status']}] {a['kind']} — {a['title'] or '(untitled)'} (owner: {a['owner']})"
+        f"{sup}{dims}{dur}{size}{lim}{path}"
+    )
 
 
 def campaign_brief(campaign_id: int) -> str:
@@ -291,7 +298,7 @@ def build_tools(registry):
             return "No campaigns yet. Create one with campaign_create."
         out = []
         for c in rows:
-            assets = store.list_assets(c["id"])
+            assets = [a for a in store.list_assets(c["id"]) if not store.is_retired(a)]
             approved = sum(1 for a in assets if a["status"] == "approved")
             out.append(
                 f"- #{c['id']} {c['name']} [{c['status']}] {c['launch_window'] or ''} — "
@@ -371,12 +378,17 @@ def build_tools(registry):
         limit_id: str | None = None,
         path: str | None = None,
         notes: str | None = None,
+        superseded_by: list[int] | None = None,
     ) -> str:
         """Move an asset through production or edit it: status planned → scripted → captured →
         rendered → ready_for_review. Mark ready_for_review only after the asset-review skill's
         self-check; the move is REFUSED if the file is missing or breaks its hard limit. You can
         never set approved or rejected — that is the operator's call in the gallery. Pass path
-        to attach a file the operator recorded (it must be inside the campaign's media dir)."""
+        to attach a file the operator recorded (it must be inside the campaign's media dir).
+        status='superseded' retires a take a retake REPLACED: it leaves the operator's review
+        queue and the counts without being approved or rejected, and montages/storyboards refuse
+        it. Pass superseded_by=[new asset ids] and notes saying why. Allowed from any status
+        except approved — an APPROVED asset can only be superseded by the operator."""
         try:
             row = store.get_asset(asset_id)
             if row is None:
@@ -388,6 +400,7 @@ def build_tools(registry):
                 "owner": owner,
                 "limit_id": limit_id,
                 "notes": notes,
+                "superseded_by": superseded_by,
             }
             if lane is not None:
                 fields["lane_id"] = _lane_id(row["campaign_id"], lane)
@@ -407,14 +420,24 @@ def build_tools(registry):
         return "Updated:\n" + _asset_line(a)
 
     @tool
-    def campaign_assets(campaign_id: int, status: str = "", lane: str = "", kind: str = "") -> str:
+    def campaign_assets(
+        campaign_id: int, status: str = "", lane: str = "", kind: str = "", include_superseded: bool = False
+    ) -> str:
         """List a campaign's assets with status, owner, size, dimensions, duration and file path,
-        optionally filtered by status, lane name, or kind."""
+        optionally filtered by status, lane name, or kind. Superseded takes are left out unless
+        include_superseded is true or status='superseded'."""
         try:
             rows = store.list_assets(campaign_id, status=status, lane_id=_lane_id(campaign_id, lane), kind=kind)
         except ValueError as e:
             return str(e)
-        return "\n".join(_asset_line(a) for a in rows) or "No assets match."
+        hidden = 0
+        if not include_superseded and status != "superseded":
+            hidden = sum(1 for a in rows if store.is_retired(a))
+            rows = [a for a in rows if not store.is_retired(a)]
+        out = "\n".join(_asset_line(a) for a in rows) or "No assets match."
+        if hidden:
+            out += f"\n({hidden} superseded take(s) hidden — include_superseded=true lists them)"
+        return out
 
     @tool
     def campaign_milestone(
@@ -485,7 +508,8 @@ def build_tools(registry):
             return str(e)
         c = s["campaign"]
         lines = [
-            f"**{c['name']}** [{c['status']}] — {s['progress']['approved']}/{s['progress']['total']} assets approved",
+            f"**{c['name']}** [{c['status']}] — {s['progress']['approved']}/{s['progress']['total']} assets approved"
+            + (f" ({s['superseded']} superseded, not counted)" if s.get("superseded") else ""),
             "",
             "Blocked on the operator:",
             *([f"- {i['item']} — {i['why']}" for i in s["on_operator"]] or ["- nothing"]),
@@ -901,7 +925,7 @@ def build_tools(registry):
         preset landscape 1920x1080 (canonical — 1920x1080 clips pass through untouched) |
         vertical 1080x1920 | square 1080x1080, fit auto|letterbox|crop, fps, transition,
         transition_duration (0.45), limit (a hard-limit id — duration and size are enforced),
-        max_bytes, gif, poster_at. Unknown keys and missing/foreign/rejected clips are refused;
+        max_bytes, gif, poster_at. Unknown keys and missing/foreign/rejected/superseded clips are refused;
         clips not yet approved are allowed but the montage is marked DRAFT INPUTS. Run
         campaign_storyboard first to review the cut. Follow the montage-editing skill."""
         if (reason := deps.need_ffmpeg()) is not None:
@@ -1024,7 +1048,7 @@ def build_tools(registry):
         (the colour wipe's colour, an xfade's real midpoint, a thin bar for a cut) — plus the cut
         sheet: every item's start time, length after speed, and each transition's moment.
         Same sequence and output as campaign_montage; it validates them identically (unknown
-        keys, missing clips, transitions longer than the items, a hard limit the runtime breaks).
+        keys, missing/rejected/superseded clips, transitions longer than the items, a hard limit the runtime breaks).
         Check: one idea per beat, theme colours that differ beat to beat, tagline cadence, the
         end card last, and a focus that keeps the subject in a vertical/square cut."""
         if (reason := deps.need_ffmpeg()) is not None:

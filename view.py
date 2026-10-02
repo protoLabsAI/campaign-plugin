@@ -51,12 +51,18 @@ PAGE = r"""<!doctype html>
   .st.ready_for_review{color:var(--pl-color-warning,#f5a524);border-color:var(--pl-color-warning,#f5a524)}
   .st.approved{color:var(--pl-color-success,#30a46c);border-color:var(--pl-color-success,#30a46c)}
   .st.rejected{color:var(--pl-color-danger,#e5484d);border-color:var(--pl-color-danger,#e5484d)}
+  .st.superseded{color:var(--pl-color-fg-muted,#999);border-style:dashed;text-decoration:line-through}
+  .card.superseded{opacity:.55}
+  .toggle{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--pl-color-fg-muted,#999);cursor:pointer}
+  .toggle input{margin:0}
   .st.rendered,.st.captured{color:var(--pl-color-accent,#9b87f2);border-color:var(--pl-color-accent,#9b87f2)}
   .warn{color:var(--pl-color-danger,#e5484d);font-size:11px}
   .note{color:var(--pl-color-fg-muted,#999);font-size:11px;white-space:pre-wrap}
   .actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
   .reject{display:none;flex-direction:column;gap:6px}
   .card.rejecting .reject{display:flex}
+  .supersede{display:none;flex-direction:column;gap:6px}
+  .card.superseding .supersede{display:flex}
   .reject textarea{min-height:44px;resize:vertical}
   .empty{color:var(--pl-color-fg-muted,#999);padding:16px 2px}
   #err{display:block;margin-bottom:10px}
@@ -76,6 +82,8 @@ PAGE = r"""<!doctype html>
       <option value="">All kinds</option><option>clip</option><option>gif</option>
       <option>still</option><option>card</option><option>montage</option><option>copy_ref</option>
     </select>
+    <label class="toggle" title="Takes a retake replaced — out of the review queue and the counts">
+      <input type="checkbox" id="show-superseded"> Show superseded <span id="sup-n"></span></label>
     <span class="spacer"></span>
     <button id="refresh" title="Reload">Refresh</button>
   </header>
@@ -92,7 +100,10 @@ PAGE = r"""<!doctype html>
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
     (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
   const fmtBytes = (n) => !n ? "" : n < 1e6 ? (n/1e3).toFixed(0) + " KB" : (n/1e6).toFixed(2) + " MB";
-  const state = { campaign: "", lane: "", kind: "", status: "", data: null };
+  const state = { campaign: "", lane: "", kind: "", status: "", showSuperseded: false, data: null };
+  // Superseded takes (a retake replaced them) are hidden unless the toggle is on, and never
+  // count toward the review queue or the totals.
+  const retired = (a) => a.status === "superseded";
   const blobs = new Map();   // asset id → object URL (revoked on campaign switch)
 
   async function api(path, init){
@@ -131,21 +142,27 @@ PAGE = r"""<!doctype html>
     return (state.data?.assets || []).filter(a =>
       (!state.lane || String(a.lane_id) === state.lane) &&
       (!state.kind || a.kind === state.kind) &&
-      (!state.status || a.status === state.status));
+      (!state.status || a.status === state.status) &&
+      (state.showSuperseded || state.status === "superseded" || !retired(a)));
   }
 
   function chips(){
     const all = (state.data?.assets || []).filter(a =>
       (!state.lane || String(a.lane_id) === state.lane) && (!state.kind || a.kind === state.kind));
     const counts = {}; for (const a of all) counts[a.status] = (counts[a.status] || 0) + 1;
+    const nSup = counts.superseded || 0;
+    document.getElementById("sup-n").textContent = nSup ? `(${nSup})` : "";
+    const statuses = state.data.statuses.filter(s => s !== "superseded" || state.showSuperseded);
+    if (!state.showSuperseded && state.status === "superseded") state.status = "";
     const el = document.getElementById("chips");
-    el.innerHTML = [["", "All", all.length], ...state.data.statuses.map(s => [s, s.replace(/_/g, " "), counts[s] || 0])]
+    el.innerHTML = [["", "All", state.showSuperseded ? all.length : all.length - nSup], ...statuses.map(s => [s, s.replace(/_/g, " "), counts[s] || 0])]
       .map(([v, label, n]) => `<button class="chip ${state.status === v ? "on" : ""}" data-status="${v}">${esc(label)}<b>${n}</b></button>`).join("");
   }
 
   function card(a){
     const el = document.createElement("div");
-    el.className = "card"; el.dataset.id = a.id;
+    el.className = "card" + (retired(a) ? " superseded" : ""); el.dataset.id = a.id;
+    const supBy = (a.superseded_by || []).map(i => "#" + i).join(", ");
     const dims = a.width ? `${a.width}×${a.height}` : "";
     const dur = a.duration_s ? `${a.duration_s.toFixed(1)}s` : "";
     const violated = /^(VIOLATES|DRAFT INPUTS)/.test(a.notes || "");
@@ -158,15 +175,21 @@ PAGE = r"""<!doctype html>
           `${dur ? `<span>${dur}</span>` : ""}${a.size_bytes ? `<span>${fmtBytes(a.size_bytes)}</span>` : ""}` +
           `${a.limit_id ? `<span title="hard limit">≤ ${esc(a.limit_id)}</span>` : ""}</div>` +
         (a.notes ? `<div class="${violated ? "warn" : "note"}">${esc(a.notes)}</div>` : "") +
+        (retired(a) ? `<div class="note">Superseded${supBy ? ` by ${esc(supBy)}` : ""}</div>` : "") +
         (a.review_note ? `<div class="note">Review: ${esc(a.review_note)}</div>` : "") +
         `<div class="actions">` +
           (a.can_review && a.status !== "approved" ? `<button class="ok" data-act="approve">Approve</button>` : "") +
           (a.can_review && a.status !== "rejected" ? `<button class="no" data-act="reject">Reject…</button>` : "") +
+          (a.status === "approved" ? `<button data-act="supersede">Supersede…</button>` : "") +
           (a.path ? `<button data-act="copy">Copy path</button>` : "") +
         `</div>` +
         `<div class="reject"><textarea placeholder="What should change? (the agent reads this)"></textarea>` +
           `<div class="actions"><button class="no" data-act="reject-confirm">Reject</button>` +
           `<button data-act="reject-cancel">Cancel</button></div></div>` +
+        `<div class="supersede"><input placeholder="Replaced by asset id(s), e.g. 42 43" aria-label="Replaced by">` +
+          `<textarea placeholder="Why it's retired (optional)"></textarea>` +
+          `<div class="actions"><button data-act="supersede-confirm">Supersede</button>` +
+          `<button data-act="supersede-cancel">Cancel</button></div></div>` +
       `</div>`;
     el.addEventListener("click", (ev) => onAction(ev, a, el));
     if (a.has_file) observer.observe(el);
@@ -200,11 +223,26 @@ PAGE = r"""<!doctype html>
         () => { btn.textContent = "Copy failed"; });
       return;
     }
-    if (act === "reject") { el.classList.add("rejecting"); el.querySelector("textarea").focus(); return; }
+    if (act === "reject") { el.classList.add("rejecting"); el.querySelector(".reject textarea").focus(); return; }
     if (act === "reject-cancel") { el.classList.remove("rejecting"); return; }
+    if (act === "supersede") { el.classList.add("superseding"); el.querySelector(".supersede input").focus(); return; }
+    if (act === "supersede-cancel") { el.classList.remove("superseding"); return; }
+    if (act === "supersede-confirm") {
+      const ids = el.querySelector(".supersede input").value.split(/[\s,#]+/).filter(Boolean).map(Number);
+      if (ids.some(n => !Number.isInteger(n) || n <= 0)) { showErr("Replacement ids must be asset numbers"); return; }
+      btn.disabled = true;
+      try {
+        await api(`/assets/${a.id}/review`, { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ decision: "supersede", note: el.querySelector(".supersede textarea").value,
+            superseded_by: ids }) });
+        showErr("");
+        await loadAssets();
+      } catch (e) { showErr(`Could not supersede #${a.id}: ${e.message}`); btn.disabled = false; }
+      return;
+    }
     if (act === "approve" || act === "reject-confirm") {
       const decision = act === "approve" ? "approve" : "reject";
-      const note = decision === "reject" ? el.querySelector("textarea").value : "";
+      const note = decision === "reject" ? el.querySelector(".reject textarea").value : "";
       btn.disabled = true;
       try {
         await api(`/assets/${a.id}/review`, { method: "POST", headers: { "Content-Type": "application/json" },
@@ -232,6 +270,8 @@ PAGE = r"""<!doctype html>
   document.getElementById("campaign").addEventListener("change", (ev) => {
     for (const u of blobs.values()) URL.revokeObjectURL(u); blobs.clear();
     state.campaign = ev.target.value; state.lane = ""; loadAssets().catch(e => showErr(String(e))); });
+  document.getElementById("show-superseded").addEventListener("change", (ev) => {
+    state.showSuperseded = ev.target.checked; render(); });
   document.getElementById("lane").addEventListener("change", (ev) => { state.lane = ev.target.value; render(); });
   document.getElementById("kind").addEventListener("change", (ev) => { state.kind = ev.target.value; render(); });
   document.getElementById("refresh").addEventListener("click", () => loadCampaigns().catch(e => showErr(String(e))));
