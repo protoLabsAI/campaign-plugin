@@ -94,9 +94,33 @@ def test_montage_and_storyboard_refuse_a_superseded_beat_naming_its_replacement(
     probs = "\n".join(e.value.problems)
     assert f"clip #{old['id']}): is SUPERSEDED (replaced by #{new['id']}" in probs
     assert f"clip #{new['id']}" not in probs
-    # storyboard resolves through the same gate, before any ffmpeg work.
-    with pytest.raises(montage.MontageError, match="SUPERSEDED"):
-        montage.storyboard(c["id"], [{"clip": old["id"]}], "", paths.campaign_dir(c["id"], "Launch") / "sb.png")
+
+
+def test_beats_are_validated_before_ffmpeg_is_looked_for(c, monkeypatch, registry):
+    """On a box WITHOUT ffmpeg the agent still gets the real beat error, not "install ffmpeg"."""
+    from campaign import deps
+
+    monkeypatch.setattr(deps, "ffmpeg", lambda: None)
+    monkeypatch.setattr(deps, "ffprobe", lambda: None)
+    old, new = _take(c, "old"), _take(c, "new")
+    store.update_asset(old["id"], status="superseded", superseded_by=[new["id"]])
+    seq = [{"clip": old["id"]}, {"clip": 999}]
+    sb = paths.campaign_dir(c["id"], "Launch") / "sb.png"
+    for call in (
+        lambda: montage.storyboard(c["id"], seq, "", sb),
+        lambda: montage.render_montage(c["id"], seq, "", sb.parent / "m"),
+    ):
+        with pytest.raises(montage.MontageError) as e:
+            call()
+        probs = "\n".join(e.value.problems)
+        assert f"is SUPERSEDED (replaced by #{new['id']}" in probs and "clip #999): no such asset" in probs
+    campaign.register(registry)
+    for name in ("campaign_montage", "campaign_storyboard"):
+        out = registry.tool(name).invoke({"campaign_id": c["id"], "sequence": seq})
+        assert "SUPERSEDED" in out and f"#{new['id']}" in out and "ffmpeg isn't on PATH" not in out, out
+    # A clean sequence on the same box still gets the ffmpeg hint.
+    out = registry.tool("campaign_storyboard").invoke({"campaign_id": c["id"], "sequence": [{"clip": new["id"]}]})
+    assert "ffmpeg isn't on PATH" in out
 
 
 def test_a_superseded_beat_with_no_replacement_still_says_where_to_look(c):

@@ -465,6 +465,39 @@ def parse_sequence(sequence: Any) -> list[dict[str, Any]]:
     return items
 
 
+def _clip_problem(campaign_id: int, it: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """The store-side check of one clip item — no ffmpeg needed. Returns (asset, problem)."""
+    what = f"item {it['n']} (clip #{it['asset_id']})"
+    a = store.get_asset(it["asset_id"])
+    if a is None or a["campaign_id"] != int(campaign_id):
+        return None, f"{what}: no such asset in campaign {campaign_id} — campaign_assets lists them"
+    if a["kind"] not in ("clip", "gif"):
+        return a, f"{what}: is a {a['kind']} — a montage clip must be a clip (a take or a rendered mp4)"
+    if a["status"] == "rejected":
+        return a, f"{what}: the operator REJECTED it{(': ' + a['review_note']) if a['review_note'] else ''}"
+    if a["status"] == "superseded":
+        repl = [int(i) for i in (a.get("superseded_by") or [])]
+        by = (
+            "replaced by " + ", ".join(f"#{i}" for i in repl) + " — use that instead"
+            if repl
+            else "no replacement recorded — campaign_assets lists the current takes"
+        )
+        return a, f"{what}: is SUPERSEDED ({by})"
+    p = Path(str(a.get("path") or ""))
+    if not a.get("path") or not p.is_file():
+        return a, f"{what}: has no file ({a['status']}) — shoot or render it first"
+    return a, ""
+
+
+def check_items(campaign_id: int, items: list[dict[str, Any]]) -> None:
+    """Every store-side problem with the parsed items' clips (missing, foreign, wrong kind,
+    rejected, superseded, fileless), all at once. Needs no ffmpeg, so montage and storyboard run
+    it BEFORE looking for ffmpeg — an agent gets the real error even on a box without it."""
+    problems = [p for it in items if it["kind"] != "card" for _a, p in [_clip_problem(campaign_id, it)] if p]
+    if problems:
+        raise MontageError(problems)
+
+
 def resolve_items(
     campaign_id: int, items: list[dict[str, Any]], probe: Callable[[str], dict[str, Any]] | None = None
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -484,29 +517,11 @@ def resolve_items(
             out.append(it)
             continue
         what = f"item {it['n']} (clip #{it['asset_id']})"
-        a = store.get_asset(it["asset_id"])
-        if a is None or a["campaign_id"] != int(campaign_id):
-            problems.append(f"{what}: no such asset in campaign {campaign_id} — campaign_assets lists them")
+        a, problem = _clip_problem(campaign_id, it)
+        if problem:
+            problems.append(problem)
             continue
-        if a["kind"] not in ("clip", "gif"):
-            problems.append(f"{what}: is a {a['kind']} — a montage clip must be a clip (a take or a rendered mp4)")
-            continue
-        if a["status"] == "rejected":
-            problems.append(f"{what}: the operator REJECTED it{(': ' + a['review_note']) if a['review_note'] else ''}")
-            continue
-        if a["status"] == "superseded":
-            repl = [int(i) for i in (a.get("superseded_by") or [])]
-            by = (
-                "replaced by " + ", ".join(f"#{i}" for i in repl) + " — use that instead"
-                if repl
-                else "no replacement recorded — campaign_assets lists the current takes"
-            )
-            problems.append(f"{what}: is SUPERSEDED ({by})")
-            continue
-        p = Path(str(a.get("path") or ""))
-        if not a.get("path") or not p.is_file():
-            problems.append(f"{what}: has no file ({a['status']}) — shoot or render it first")
-            continue
+        p = Path(str(a["path"]))
         try:
             info = probe(str(p))
         except render.RenderError as e:
@@ -1162,11 +1177,13 @@ def render_montage(
     """Validate, render and measure a montage into ``out_dir``. Doesn't touch the store's rows
     (the tool registers the result). Raises MontageError (validation) or RenderError (ffmpeg)."""
     runner = runner or _default_runner
+    # Validate everything that needs no ffmpeg first: the agent's real error beats "install ffmpeg".
+    opts = normalize_output(output)
+    items = parse_sequence(sequence)
+    check_items(campaign_id, items)
     ff = deps.ffmpeg()
     if not ff:
         raise render.RenderError(deps.ffmpeg_hint())
-    opts = normalize_output(output)
-    items = parse_sequence(sequence)
     items, warnings = resolve_items(campaign_id, items)
     warnings += framing(items, opts)
     look = brandmod.resolve({})
@@ -1316,11 +1333,13 @@ def storyboard(
     way the montage will fit it; the card itself), and between items a swatch of the
     transition — the wipe colour, an xfade's actual midpoint, or a thin bar for a cut."""
     runner = runner or _default_runner
+    # Validate everything that needs no ffmpeg first: the agent's real error beats "install ffmpeg".
+    opts = normalize_output(output)
+    items = parse_sequence(sequence)
+    check_items(campaign_id, items)
     ff = deps.ffmpeg()
     if not ff:
         raise render.RenderError(deps.ffmpeg_hint())
-    opts = normalize_output(output)
-    items = parse_sequence(sequence)
     items, warnings = resolve_items(campaign_id, items)
     warnings += framing(items, opts)
     look = brandmod.resolve({})

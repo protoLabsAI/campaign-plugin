@@ -928,13 +928,15 @@ def build_tools(registry):
         max_bytes, gif, poster_at. Unknown keys and missing/foreign/rejected/superseded clips are refused;
         clips not yet approved are allowed but the montage is marked DRAFT INPUTS. Run
         campaign_storyboard first to review the cut. Follow the montage-editing skill."""
-        if (reason := deps.need_ffmpeg()) is not None:
-            return reason
         try:
             c = store.require_campaign(campaign_id)
             seq = _sequence(sequence)
             raw_out = _output_arg(output)
             opts = montage.normalize_output(raw_out)
+            # Beats first (superseded, rejected, missing …) — they need no ffmpeg.
+            montage.check_items(campaign_id, montage.parse_sequence(seq))
+            if (reason := deps.need_ffmpeg()) is not None:
+                return reason
             lane_id = _lane_id(campaign_id, lane)
             if asset_id:
                 target = _own_asset(campaign_id, asset_id)
@@ -1051,13 +1053,15 @@ def build_tools(registry):
         keys, missing/rejected/superseded clips, transitions longer than the items, a hard limit the runtime breaks).
         Check: one idea per beat, theme colours that differ beat to beat, tagline cadence, the
         end card last, and a focus that keeps the subject in a vertical/square cut."""
-        if (reason := deps.need_ffmpeg()) is not None:
-            return reason
         try:
             c = store.require_campaign(campaign_id)
             seq = _sequence(sequence)
             raw_out = _output_arg(output)
             opts = montage.normalize_output(raw_out)
+            # Beats first (superseded, rejected, missing …) — they need no ffmpeg.
+            montage.check_items(campaign_id, montage.parse_sequence(seq))
+            if (reason := deps.need_ffmpeg()) is not None:
+                return reason
             dst = (
                 paths.unique_dir(
                     paths.campaign_dir(c["id"], c["name"]) / "storyboards", datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
