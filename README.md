@@ -24,6 +24,8 @@ product: the planning + production half of a "Brand & Launch" agent.
   and an optional GIF. `campaign_storyboard` reviews the cut as a contact sheet first.
 - **Gallery** — one console view, for browsing: every clip/GIF/still/card of a campaign,
   playable, with status, size, dimensions, and the operator-only **Approve / Reject** buttons.
+  Superseded takes are hidden (a **Show superseded** toggle brings them back, dimmed); an
+  approved asset has a **Supersede…** button, the only way it can be retired.
 
 **Draft-only.** It never posts anywhere and holds no platform credentials. Every asset has an
 approval state and only the operator approves (in the gallery — there is no agent tool for it).
@@ -65,8 +67,8 @@ loads nothing from the network at all.
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.3.2`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.3.2`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.3.3`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.3.3`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —
@@ -89,7 +91,7 @@ loads nothing from the network at all.
 |---|---|
 | `campaign_create` / `campaign_update` / `campaign_list` / `campaign_get` | The plan: goal, target metric, launch window, target URL, goal math, sourced assumptions, channel plan, do-not list |
 | `campaign_lane` | A lane: name, pitch, audience, hero asset |
-| `campaign_asset_add` / `campaign_asset_update` / `campaign_assets` | The shot list. Status `planned → scripted → captured → rendered → ready_for_review`; `ready_for_review` is refused if the file is missing or breaks its hard limit; `approved`/`rejected` are refused outright |
+| `campaign_asset_add` / `campaign_asset_update` / `campaign_assets` | The shot list. Status `planned → scripted → captured → rendered → ready_for_review`, or `superseded` (with `superseded_by`) to retire a replaced take; `ready_for_review` is refused if the file is missing or breaks its hard limit; `approved`/`rejected` are refused outright, and so is superseding an approved asset. `campaign_assets` hides superseded takes unless `include_superseded=true` |
 | `campaign_milestone` / `campaign_decision` | Dated milestones (owner agent/operator); operator decisions with options + a recommendation |
 | `campaign_status` | Progress + who each open item is waiting on; includes `show_component` payloads |
 | `campaign_script_save` | Validate + save a shot script (`script="template"` returns an annotated example) |
@@ -204,6 +206,23 @@ upload. The name lists are a backstop, not the fence: the fence is the allowlist
 Re-recording into an existing asset (`asset_id`) replaces that asset's previous take: its
 stills are removed (any the operator approved are kept).
 
+### Retiring a retake
+
+When a retake is registered as a NEW asset, take the old one out of the operator's queue
+without approving or rejecting it:
+`campaign_asset_update(old_id, status="superseded", superseded_by=[new_id], notes="why")`.
+A superseded asset leaves the review queue and every count (`campaign_status`,
+`campaign_list`, the gallery's campaign picker), is hidden in the gallery unless **Show
+superseded** is on, and is refused as a montage/storyboard beat with an error naming its
+replacement. The agent can supersede any asset that isn't approved; an APPROVED one is
+refused — the operator retires it with the gallery's **Supersede…** button (the review route,
+`decision: "supersede"`). Moving a superseded asset to any other status brings it back into
+play and clears `superseded_by`.
+
+Asset statuses: `planned`, `scripted`, `captured`, `rendered`, `ready_for_review`,
+`approved`, `rejected` (operator only), `superseded`. `status` is plain TEXT in SQLite, so
+older databases need no migration; the `superseded_by` column is added on first connect.
+
 Then: `campaign_render(asset_id, outputs=[{name: hero, format: mp4, start: start, end: end,
 speed: [{from: start, to: plugins, factor: 2}], limit: github_attachment_video_free}, …])`.
 
@@ -288,7 +307,8 @@ every problem listed at once.
   (`gif: true`) is kept only if it fits `gif_limit` (GitHub's 10 MB by default).
 - **Approval**: a montage may use clips that are only `ready_for_review` (or earlier) — the
   reply warns, the asset's notes start `DRAFT INPUTS: …` and its `meta.unapproved_inputs`
-  lists them. Rejected clips are refused.
+  lists them. Rejected clips are refused, and so are superseded ones (the error names the
+  replacement take to use instead).
 
 The montage registers as a `montage` asset (the gallery plays it and filters by it) with
 `meta.sequence`, the cut sheet (`meta.timeline`), the encode attempts and the engines used;

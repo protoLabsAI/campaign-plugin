@@ -5,10 +5,16 @@ One SQLite file under the plugin data dir (per instance). Host-free: stdlib + ``
 Asset statuses move forward through production::
 
     planned → scripted → captured → rendered → ready_for_review → approved | rejected
+                                                                     (any of them) → superseded
 
 The agent may move an asset anywhere up to ``ready_for_review`` (and back, to rework a
 rejected one). ``approved`` / ``rejected`` are set ONLY through :func:`review`, which only
 the operator-gated gallery route calls — there is no agent tool that approves.
+
+``superseded`` retires a take a retake replaced: it leaves the review queue and the counts
+without being approved or rejected, and records ``superseded_by`` (the replacement asset
+ids). The agent may supersede any asset that isn't APPROVED; only the operator (the gallery
+review route, decision ``supersede``) can retire an approved one.
 
 SQLite discipline (the shop's plugin-storage rules): a connection per call, never shared
 across threads; ``busy_timeout`` BEFORE ``journal_mode=WAL``; a process lock around
@@ -32,8 +38,20 @@ DB_NAME = "campaign.db"
 
 CAMPAIGN_STATUSES = ("draft", "active", "launched", "done", "paused", "archived")
 ASSET_KINDS = ("clip", "gif", "still", "card", "copy_ref", "montage")
-ASSET_STATUSES = ("planned", "scripted", "captured", "rendered", "ready_for_review", "approved", "rejected")
-AGENT_ASSET_STATUSES = ASSET_STATUSES[:5]
+ASSET_STATUSES = (
+    "planned",
+    "scripted",
+    "captured",
+    "rendered",
+    "ready_for_review",
+    "approved",
+    "rejected",
+    "superseded",
+)
+# What the agent may set: production statuses + superseded. Never approved / rejected.
+AGENT_ASSET_STATUSES = (*ASSET_STATUSES[:5], "superseded")
+# Statuses that are out of play: not in the review queue, not in progress counts.
+RETIRED_STATUSES = ("superseded",)
 OWNERS = ("agent", "operator")
 MILESTONE_STATUSES = ("todo", "doing", "done", "dropped")
 
@@ -125,9 +143,12 @@ CREATE TABLE IF NOT EXISTS scripts (
 );
 """
 
-# table → {column: decl} for columns added after v0.1.0 (none yet). Applied on connect so an
-# upgrade never strands an operator's existing plan.
-_ADDED_COLUMNS: dict[str, dict[str, str]] = {}
+# table → {column: decl} for columns added after v0.1.0. Applied on connect so an upgrade
+# never strands an operator's existing plan. ``status`` is plain TEXT (no CHECK constraint),
+# so a new status value needs no migration — old rows keep theirs.
+_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "assets": {"superseded_by": "TEXT NOT NULL DEFAULT '[]'"},  # v0.3.3
+}
 
 _WRITE_LOCK = threading.Lock()
 
@@ -175,7 +196,7 @@ def _read(sql: str, args: tuple = ()) -> list[dict[str, Any]]:
 
 def _row(r: sqlite3.Row) -> dict[str, Any]:
     d = dict(r)
-    for key, default in (("options", []), ("meta", {})):
+    for key, default in (("options", []), ("meta", {}), ("superseded_by", [])):
         if key in d:
             try:
                 d[key] = json.loads(d[key] or json.dumps(default))
@@ -368,7 +389,7 @@ def add_asset(
     require_campaign(campaign_id)
     kind = _choice(kind, ASSET_KINDS, "kind")
     owner = _choice(owner or "agent", OWNERS, "owner")
-    status = _choice(status or "planned", AGENT_ASSET_STATUSES, "status")
+    status = _choice(status or "planned", ASSET_STATUSES[:5], "status")
     if limit_id and limits.get(limit_id) is None:
         raise ValueError(f"unknown limit {limit_id!r} — campaign_limits lists them")
     now = _now()
@@ -418,7 +439,37 @@ ASSET_UPDATABLE = (
     "script_id",
     "meta",
     "notes",
+    "superseded_by",
 )
+
+
+def is_retired(asset: dict[str, Any]) -> bool:
+    """Out of play (superseded): hidden from the review queue and progress counts."""
+    return asset.get("status") in RETIRED_STATUSES
+
+
+def _superseded_by_ids(value: Any) -> list[int]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        value = [v for v in value.replace(",", " ").split() if v]
+    if isinstance(value, (int, float)):
+        value = [value]
+    try:
+        return sorted({int(str(v).lstrip("#")) for v in value})
+    except (TypeError, ValueError):
+        raise ValueError(f"superseded_by must be a list of asset ids — got {value!r}") from None
+
+
+def _check_replacements(conn: sqlite3.Connection, row: dict[str, Any], ids: list[int]) -> None:
+    for rid in ids:
+        if rid == row["id"]:
+            raise ValueError(f"asset #{rid} can't supersede itself")
+        r = conn.execute("SELECT campaign_id, status FROM assets WHERE id = ?", (rid,)).fetchone()
+        if r is None or r["campaign_id"] != row["campaign_id"]:
+            raise ValueError(f"superseded_by: no asset #{rid} in campaign {row['campaign_id']}")
+        if r["status"] in RETIRED_STATUSES:
+            raise ValueError(f"superseded_by: asset #{rid} is itself superseded — name the take that replaces it")
 
 
 # What the agent may still touch on an asset the operator APPROVED: its notes. Everything
@@ -448,18 +499,31 @@ def update_asset(asset_id: int, **fields: Any) -> dict[str, Any]:
         changes["spec"] = _spec_text(changes["spec"])
     if "meta" in changes:
         changes["meta"] = json.dumps(changes["meta"] or {})
+    replacements = _superseded_by_ids(changes.pop("superseded_by", None))
+    if replacements and changes.get("status") != "superseded":
+        raise ValueError("superseded_by only goes with status='superseded'")
     with _write() as conn:
         cur = conn.execute("SELECT * FROM assets WHERE id = ?", (int(asset_id),)).fetchone()
         if cur is None:
             raise ValueError(f"no asset with id {asset_id}")
         row = _row(cur)
         if row["status"] == "approved":
+            if changes.get("status") == "superseded":
+                raise ValueError(
+                    f"asset #{asset_id} is approved — only the operator can supersede an approved asset "
+                    "(the gallery's Supersede button). Ask them; the replacement can go to review meanwhile"
+                )
             frozen = sorted(k for k in changes if k not in APPROVED_MUTABLE)
             if frozen:
                 raise ValueError(
                     f"asset #{asset_id} is approved — the agent can't change its {', '.join(frozen)}. "
                     "Register the new take as a new asset instead of changing what was approved"
                 )
+        if changes.get("status") == "superseded":
+            _check_replacements(conn, row, replacements)
+            changes["superseded_by"] = json.dumps(replacements)
+        elif "status" in changes and row["status"] == "superseded":
+            changes["superseded_by"] = "[]"  # brought back into play
         merged = {**row, **changes}
         if changes.get("status") == "ready_for_review":
             problems = review_gate(merged)
@@ -508,25 +572,44 @@ def review_gate(asset: dict[str, Any]) -> list[str]:
     return problems
 
 
-def review(asset_id: int, decision: str, note: str = "") -> dict[str, Any]:
-    """OPERATOR-only: approve or reject. Called from the gated gallery route, never a tool."""
+def review(asset_id: int, decision: str, note: str = "", superseded_by: Any = None) -> dict[str, Any]:
+    """OPERATOR-only: approve, reject or supersede. Called from the gated gallery route, never a tool.
+
+    ``supersede`` is the only way an APPROVED asset leaves play (the agent is refused)."""
     decision = (decision or "").strip().lower()
-    status = {"approve": "approved", "approved": "approved", "reject": "rejected", "rejected": "rejected"}.get(decision)
+    status = {
+        "approve": "approved",
+        "approved": "approved",
+        "reject": "rejected",
+        "rejected": "rejected",
+        "supersede": "superseded",
+        "superseded": "superseded",
+    }.get(decision)
     if status is None:
-        raise ValueError("decision must be approve or reject")
+        raise ValueError("decision must be approve, reject or supersede")
+    replacements = _superseded_by_ids(superseded_by)
+    if replacements and status != "superseded":
+        raise ValueError("superseded_by only goes with decision 'supersede'")
     with _write() as conn:
         # Gate the row as it is under the lock — not a copy read before an agent write landed.
         cur = conn.execute("SELECT * FROM assets WHERE id = ?", (int(asset_id),)).fetchone()
         if cur is None:
             raise ValueError(f"no asset with id {asset_id}")
+        row = _row(cur)
         if status == "approved":
-            problems = review_gate(_row(cur))
+            problems = review_gate(row)
             if problems:
                 raise ValueError("can't approve: " + "; ".join(problems))
+        if status == "superseded":
+            _check_replacements(conn, row, replacements)
+            sup = json.dumps(replacements)
+        else:
+            sup = "[]"
         now = _now()
         conn.execute(
-            "UPDATE assets SET status = ?, review_note = ?, reviewed_at = ?, updated = ? WHERE id = ?",
-            (status, note or "", now, now, int(asset_id)),
+            "UPDATE assets SET status = ?, review_note = ?, reviewed_at = ?, superseded_by = ?, updated = ?"
+            " WHERE id = ?",
+            (status, note or "", now, sup, now, int(asset_id)),
         )
     return get_asset(asset_id)  # type: ignore[return-value]
 
@@ -707,9 +790,13 @@ def status_summary(campaign_id: int, today: str = "") -> dict[str, Any]:
     today = today or datetime.now(UTC).date().isoformat()
     assets = list_assets(campaign_id)
     lane_names = {ln["id"]: ln["name"] for ln in lanes(campaign_id)}
-    counts = {s: 0 for s in ASSET_STATUSES}
+    counts = {s: 0 for s in ASSET_STATUSES if s not in RETIRED_STATUSES}
+    superseded = 0
     for a in assets:
-        counts[a["status"]] = counts.get(a["status"], 0) + 1
+        if is_retired(a):
+            superseded += 1
+        else:
+            counts[a["status"]] = counts.get(a["status"], 0) + 1
 
     on_operator: list[dict[str, str]] = []
     on_agent: list[dict[str, str]] = []
@@ -723,6 +810,8 @@ def status_summary(campaign_id: int, today: str = "") -> dict[str, Any]:
             rec = f" (recommend: {d['recommendation']})" if d["recommendation"] else ""
             on_operator.append({"item": f"decision #{d['id']}: {d['question']}{rec}", "why": "needs an answer"})
     for a in assets:
+        if is_retired(a):
+            continue
         if a["status"] == "ready_for_review":
             on_operator.append({"item": _label(a), "why": "awaiting approval in the gallery"})
         elif a["status"] == "rejected":
@@ -740,12 +829,13 @@ def status_summary(campaign_id: int, today: str = "") -> dict[str, Any]:
             {"item": f"milestone: {m['title']}" + (f" ({m['workstream']})" if m["workstream"] else ""), "why": why}
         )
 
-    total = len(assets)
+    total = sum(1 for a in assets if not is_retired(a))  # superseded takes don't count
     done = counts.get("approved", 0)
     return {
         "campaign": {k: camp[k] for k in ("id", "name", "status", "goal", "target_metric", "launch_window")},
         "counts": counts,
         "progress": {"approved": done, "total": total},
+        "superseded": superseded,
         "on_operator": on_operator,
         "on_agent": on_agent,
     }

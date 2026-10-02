@@ -324,7 +324,7 @@ def test_assets_route_flags_unservable_files(client, tmp_path):
     a = _asset_with_file(tmp_path, outside=True)
     data = client.get(f"/api/plugins/campaign/campaigns/{a['campaign_id']}/assets").json()
     assert data["assets"][0]["has_file"] is False
-    assert data["statuses"][-2:] == ["approved", "rejected"]
+    assert data["statuses"][-3:] == ["approved", "rejected", "superseded"]
 
 
 def test_review_route_is_the_operators_approve_and_reject(client, registry):

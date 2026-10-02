@@ -91,3 +91,17 @@ The rejection note is in `campaign_assets` (`Review: …`) and the asset shows u
 agent" in `campaign_status`. Treat the note as the spec for the next take: fix the script or
 render, produce a NEW asset, and mark that ready. Don't argue with the note in the asset; if
 you think it's wrong, ask in chat.
+
+## Retiring a take a retake replaced
+
+Statuses: planned → scripted → captured → rendered → ready_for_review → approved | rejected
+(those two are the operator's), plus **superseded**. When a new asset replaces an old take
+that is still in play (rendered, ready_for_review, rejected, …), retire the old one —
+don't move it back to `rendered`, and don't leave it in the operator's queue:
+
+`campaign_asset_update(old_id, status="superseded", superseded_by=[new_id], notes="retake: <why>")`
+
+It leaves the review queue and the counts, the gallery hides it, and montages/storyboards
+refuse it (naming the replacement). An APPROVED asset can't be superseded by you — tell the
+operator the new take is ready and that they can retire the old one with the gallery's
+Supersede button.

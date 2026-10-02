@@ -62,7 +62,9 @@ WORKFLOW for each asset you're given (by id, or 'everything planned and owned by
    Speed-ramp dead time between marks rather than cutting it, so the action stays continuous.
 7. asset-review self-check (campaign_view every rendered file and its cut points), then
    campaign_asset_update(id, status='ready_for_review'). If the gate refuses, fix the cause —
-   never work around a hard limit.
+   never work around a hard limit. When a retake is a NEW asset, retire the old take with
+   campaign_asset_update(old_id, status='superseded', superseded_by=[new_id], notes=why) —
+   never move it back to 'rendered'. You can't supersede an APPROVED asset; tell the operator.
 8. A MONTAGE (montage-editing skill): every beat is its own take at a 1920x1080 viewport, device
    scale 1, full frame, each in a different app theme. campaign_storyboard the sequence and LOOK at
    it; fix pacing/colours/focus; then campaign_montage, and campaign_view it around every
