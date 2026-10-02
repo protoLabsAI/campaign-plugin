@@ -50,7 +50,15 @@ For every lane, `campaign_asset_add(campaign_id, kind, title, lane, spec, owner,
 
 - `kind`: clip (mp4), gif, still, card, copy_ref (a Social Studio queue post — put its id in spec).
 - `spec`: the beat in one sentence, what must be legible, the intended aspect, and where it
-  ships. "15–30s hero" style length targets are fine as *intent*, labelled as such.
+  ships — **and which view the result lands in** (the panel, board, document, rail view or
+  terminal where the viewer sees it happen), not just the surface where it's asked for. A clip
+  that only shows a chat/command box ending on "Done" proves nothing; the spec should say e.g.
+  "chat left, notes panel right; the note appears in the panel; end held on the note". Length
+  targets are *intent*, labelled as such — and plan heroes long enough to be **continuous**
+  (often 25–35 s): the action plays through with no interior cuts, time compressed only by
+  speed. A shorter target that forces cutting out action is the wrong target. (A launch
+  montage is the exception that proves it: many short continuous beats — plan those with the
+  `montage-editing` skill.)
 - `owner`: **agent** for anything a deterministic browser take can show; **operator** for
   anything that needs a human (a face, a voice, a physical device, a logged-in third-party
   account). Say why when it's the operator.

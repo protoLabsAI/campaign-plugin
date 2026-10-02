@@ -168,6 +168,17 @@ def test_render_accepts_yaml_text_and_reports_bad_marks(tools, browser_ok, ffmpe
     assert "FAILED" in out and "nowhere" in out
 
 
+def test_render_flags_a_steep_ramp_as_a_jump_cut_but_lets_it_through_review(tools, browser_ok, ffmpeg_ok):
+    call(tools, "campaign_create", name="L")
+    call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT)
+    spec = [{"name": "hero", "format": "mp4", "start": 0, "end": 5, "speed": [{"from": 1, "to": 3, "factor": 8}]}]
+    out = call(tools, "campaign_render", asset_id=1, outputs=spec)
+    assert "⚠ continuity:" in out and "jump cut" in out, out
+    hero = next(a for a in store.list_assets(1, kind="clip") if a["parent_id"] == 1)
+    assert "jump cut" in hero["meta"]["warnings"][0] and not hero["notes"]
+    assert "ready_for_review" in call(tools, "campaign_asset_update", asset_id=hero["id"], status="ready_for_review")
+
+
 def test_card_tool_registers_a_card(tools, browser_ok):
     call(tools, "campaign_create", name="L")
     out = call(tools, "campaign_card", campaign_id=1, template="og-1280x640", data={"title": "Ship it"})

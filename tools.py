@@ -712,7 +712,8 @@ def build_tools(registry):
         """Cut a recorded take into shareable files with ffmpeg and register each as an asset
         (status 'rendered'). outputs is a list; each item has name, format (mp4 | gif | poster),
         start/end (seconds or a mark name from the take), optional speed ramps
-        [{from, to, factor}] to fast-forward dead time, optional crop {x,y,width,height} (source
+        [{from, to, factor}] to fast-forward dead time (the clip is continuous — no interior
+        cuts — and a ramp above 4x is flagged as a jump cut unless continuous: false), optional crop {x,y,width,height} (source
         px), width, fps, and limit (a hard-limit id such as github_attachment_video_free) and/or
         max_bytes. mp4 is H.264/yuv420p/faststart; when a size ceiling is set, mp4 steps CRF then
         width and gif steps fps then width until it fits. Reports final size, dimensions and
@@ -767,11 +768,12 @@ def build_tools(registry):
                 duration_s=r["duration_s"],
                 limit_id=spec["limit"],
                 parent_id=take["id"],
-                meta={"spec": raw, "attempts": r["attempts"], "violations": r["violations"]},
+                meta={"spec": raw, "attempts": r["attempts"], "violations": r["violations"], "warnings": r["warnings"]},
                 notes=notes,
             )
             made.append(a["id"])
             flag = f"  ⚠ {'; '.join(r['violations'])}" if r["violations"] else ""
+            flag += f"  ⚠ continuity: {'; '.join(r['warnings'])}" if r["warnings"] else ""
             lines.append(
                 f"- #{a['id']} {spec['name']}.{Path(r['path']).suffix.lstrip('.')} — {limits.human_bytes(r['size_bytes'])}, "
                 f"{r['width']}×{r['height']}"
