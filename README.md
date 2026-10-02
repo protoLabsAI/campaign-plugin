@@ -58,8 +58,8 @@ loads nothing from the network at all.
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.2.1`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.2.1`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.2.2`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.2.2`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —
@@ -89,6 +89,7 @@ loads nothing from the network at all.
 | `campaign_shoot` | Record a take (Playwright, headless Chromium, `record_video`) and register the webm + stills |
 | `campaign_render` | mp4 / gif / poster outputs via ffmpeg, under a hard limit |
 | `campaign_card` | Render a branded card template to PNG |
+| `campaign_view` | LOOK at a still/card/poster, or frames of a clip (evenly spaced, or either side of a mark/cut), as images the model sees — downscaled JPEGs, ≤ 3 per call, contained to the campaign's dir. Needs a core with `graph.sdk.multimodal_tool_result` and a vision model; otherwise it says it couldn't show them |
 | `campaign_limits` | The hard-limit table, each row with its source URL and as-of date |
 | `campaign_setup` | What's installed and how to fix what isn't |
 
@@ -110,7 +111,7 @@ redact: {presets: [home_paths, emails, secrets]}
 mask: {selectors: ['[role="alert"]'], mode: remove}   # blur | hide | remove
 steps:
   - goto: /app/
-  - wait_for: {network_idle: true}
+  - wait_for: {role: button, name: Settings, exact: true}   # not network_idle: the console streams (SSE)
   - mark: start
   - click: {role: button, name: Settings, exact: true}
   - click: {role: tab, name: Plugins}
@@ -127,7 +128,11 @@ steps:
 
 Steps: `goto`, `click`, `fill`, `type` (per-char delay), `press`, `hover`, `wait_for`
 (selector/text/role/network idle/ms), `hold`, `scroll`, `mark`, `screenshot`, `mask`, `redact`.
-Targets prefer accessible roles and text over CSS. Tokens never go in a script: use
+Targets prefer accessible roles and text over CSS. Every waiting step gives up after
+`step_timeout_ms` (default 15000); a step that waits on slow real work sets its own
+`timeout_ms` (max 180000 — more is a validation error, never a silent clamp), all bounded by
+`total_timeout_s` (default 300, max 900). Unknown step options are validation errors.
+`network_idle` never settles on an app that holds SSE/websockets open — wait for an element. Tokens never go in a script: use
 `auth: {bearer_env: CAMPAIGN_APP_TOKEN}` (a `CAMPAIGN_*` env var, or one named in the
 `bearer_envs` setting; sent to the `base_url` origin only) or `auth: {storage_state: path}`.
 Re-recording into an existing asset (`asset_id`) replaces that asset's previous take: its

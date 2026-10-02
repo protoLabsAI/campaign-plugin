@@ -161,3 +161,52 @@ def test_garbage_input():
     assert "empty" in _problems("")
     assert "mapping" in _problems("- just\n- a list\n")
     assert "not valid YAML" in _problems("steps: [unclosed")
+
+
+# ── per-step timeout_ms (the 15s cap that silently ate a 17–44s agent run) ────
+def test_a_step_can_ask_for_its_own_timeout_up_to_the_max():
+    s = validate(
+        _with(
+            {"wait_for": {"text": "Done", "timeout_ms": 30_000}},
+            {"click": {"role": "button", "name": "Go", "timeout_ms": 180_000}},
+        )
+    )
+    wf, click = s["steps"][1], s["steps"][2]
+    assert wf["timeout_ms"] == 30_000 and wf["target"] == {"text": "Done"}
+    assert click["timeout_ms"] == shotscript.MAX_STEP_TIMEOUT_MS == 180_000
+    assert "(timeout 30000ms)" in shotscript.describe_step(wf)
+    # Every waiting op takes it.
+    for op, body in (
+        ("goto", {"url": "/x", "timeout_ms": 20_000}),
+        ("hover", {"text": "a", "timeout_ms": 20_000}),
+        ("fill", {"label": "a", "value": "v", "timeout_ms": 20_000}),
+        ("type", {"text": "abc", "timeout_ms": 20_000}),
+        ("press", {"key": "Enter", "timeout_ms": 20_000}),
+        ("scroll", {"y": 100, "timeout_ms": 20_000}),
+        ("screenshot", {"name": "s", "timeout_ms": 20_000}),
+        ("wait_for", {"network_idle": True, "timeout_ms": 20_000}),
+    ):
+        assert validate(_with({op: body}))["steps"][1]["timeout_ms"] == 20_000, op
+
+
+def test_a_timeout_over_the_max_fails_validation_loudly_never_clamps():
+    p = _problems(_with({"wait_for": {"text": "Done", "timeout_ms": 300_000}}))
+    assert "step 2 (wait_for) timeout_ms: 300000ms is over the 180000ms (180s) per-step max" in p
+    p = _problems(_with(step_timeout_ms=200_000))
+    assert "step_timeout_ms: 200000ms is over the 180000ms (180s) per-step max" in p
+    assert "must be an integer" in _problems(_with({"click": {"text": "x", "timeout_ms": "soon"}}))
+    assert "under the 100ms minimum" in _problems(_with({"click": {"text": "x", "timeout_ms": 5}}))
+
+
+def test_a_step_timeout_longer_than_the_whole_shoot_is_an_error():
+    p = _problems(_with({"wait_for": {"text": "Done", "timeout_ms": 60_000}}, total_timeout_s=30))
+    assert "longer than the whole shoot (total_timeout_s=30)" in p
+    assert "longer than the whole shoot" in _problems(_with(step_timeout_ms=60_000, total_timeout_s=30))
+
+
+def test_unknown_step_options_are_errors_not_dropped():
+    p = _problems(_with({"wait_for": {"text": "Done", "timout_ms": 30_000}}))
+    assert "unknown option `timout_ms` (did you mean `timeout_ms`?)" in p
+    assert "did you mean `timeout_ms`" in _problems(_with({"click": {"text": "Go", "timeout": 30}}))
+    assert "unknown option `timeout_ms`" in _problems(_with({"hold": {"ms": 100, "timeout_ms": 5000}}))
+    assert "a fixed `ms` wait doesn't take one" in _problems(_with({"wait_for": {"ms": 500, "timeout_ms": 5000}}))

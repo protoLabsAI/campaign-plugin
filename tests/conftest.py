@@ -135,6 +135,15 @@ class FakePage:
         vdir = Path(ctx.kw["record_video_dir"]) if ctx.kw.get("record_video_dir") else None
         self.video = _Video(str(vdir / "page@abc.webm")) if vdir else None
         self.content = ""
+        # The per-step default timeouts the worker sets (kept off `calls` so call-sequence
+        # assertions stay about what happens on screen).
+        self.default_timeouts: list[float] = []
+
+    def set_default_timeout(self, ms):
+        self.default_timeouts.append(ms)
+
+    def set_default_navigation_timeout(self, ms):
+        pass
 
     def goto(self, url, **kw):
         self.calls.append(("goto", url, kw))

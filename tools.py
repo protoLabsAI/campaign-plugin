@@ -17,7 +17,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from . import cards, deps, limits, paths, render, shoot, shotscript, store
+from . import cards, deps, limits, look, paths, render, shoot, shotscript, store
 
 log = logging.getLogger("protoagent.plugins.campaign")
 
@@ -510,6 +510,43 @@ def build_tools(registry):
         deps.recheck(lambda: deps.report(registry))
         return deps.brief()
 
+    # ── looking at the media ─────────────────────────────────────────────────
+    @tool
+    def campaign_view(
+        campaign_id: int,
+        asset_id: int = 0,
+        path: str = "",
+        frames: int = 3,
+        around: str = "",
+        max_side: int = 1280,
+    ) -> str:
+        """LOOK at a campaign file yourself — the image comes back to you as a picture, not a
+        path. Pass asset_id (from campaign_assets) or a path inside the campaign's media dir.
+        A still, card or poster comes back downscaled (long side <= max_side, 320-2048). A clip
+        or GIF comes back as `frames` evenly spaced frames (1-3: one image each at full size;
+        4-12: one contact sheet), and around=<mark name or seconds> adds the frame just before
+        and just after that moment — use it on every cut, speed-ramp boundary and mark. At most
+        3 images per call; call again for more. This is how the asset-review self-check is done:
+        read every still and the cut frames for secrets, home paths, emails and usernames on
+        screen (terminal and canvas text too), clutter, the wrong theme, and legibility at half
+        size."""
+        try:
+            res = look.view(campaign_id, asset_id, path, frames=frames, around=around, max_side=max_side)
+        except (look.LookError, render.RenderError, ValueError) as e:
+            return f"Can't show it — {e}"
+        text = look.caption(res)
+        envelope = _multimodal_fn()
+        if envelope is None:
+            return (
+                text + "\n\nVision isn't available: this protoAgent core has no multimodal tool results "
+                "(graph.sdk.multimodal_tool_result), so the images above could not be shown to you. You have "
+                "NOT reviewed this file — ask the operator to look at it in the Campaign Studio gallery."
+            )
+        try:
+            return envelope(text, images=[{"b64": i["b64"], "mime": i["mime"]} for i in res["images"]])
+        except ValueError as e:  # core enforces its own caps; say so instead of failing the call
+            return f"{text}\n\nThe host refused the images ({e}) — try a smaller max_side or fewer frames."
+
     # ── shot scripts ─────────────────────────────────────────────────────────
     @tool
     def campaign_script_save(campaign_id: int, script: str, name: str = "") -> str:
@@ -639,7 +676,8 @@ def build_tools(registry):
             f"- stills: {', '.join(f'#{i}' for i in still_ids) or 'none'}\n"
             + "".join(f"- {n}\n" for n in superseded)
             + "\n"
-            "Look at the stills before rendering (legible? anything secret on screen?), then cut it with "
+            "LOOK at it before rendering — campaign_view each still (asset_id) and the clip around its marks "
+            "(legible? anything secret on screen?) — then cut it with "
             f"campaign_render(asset_id={take['id']}, outputs=[…])."
         )
         first = next(iter(res["screenshots"].values()), "")
@@ -726,7 +764,8 @@ def build_tools(registry):
             "Rendered:\n"
             + "\n".join(lines)
             + (
-                "\n\nRun the asset-review self-check, then campaign_asset_update(…, status='ready_for_review')."
+                "\n\nRun the asset-review self-check — campaign_view each file and its cut points — then "
+                "campaign_asset_update(…, status='ready_for_review')."
                 if made
                 else ""
             )
@@ -824,7 +863,20 @@ def build_tools(registry):
         campaign_shoot,
         campaign_render,
         campaign_card,
+        campaign_view,
     ]
+
+
+def _multimodal_fn():
+    """Core's ``multimodal_tool_result`` (graph.sdk, #1930), or None on a core without it.
+
+    A host import, so it stays lazy — the suite and older cores run without it."""
+    try:
+        from graph import sdk
+    except Exception:  # noqa: BLE001 — no host (tests) or a broken import: no vision path
+        return None
+    fn = getattr(sdk, "multimodal_tool_result", None)
+    return fn if callable(fn) else None
 
 
 def _file_facts(path: str) -> dict[str, Any]:

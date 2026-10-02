@@ -268,3 +268,37 @@ def test_real_shoot_browser_cannot_approve_through_the_gallery(host_with_gallery
         shoot.run(script, tmp_path / "t", env=env)
     assert store.get_asset(a["id"])["status"] == "ready_for_review"
     assert h["api_hits"] == [], "no request from the shoot browser ever reached the plugin's API"
+
+
+SLOW_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>slow</title></head><body>
+<h1>Running…</h1><div id="out"></div>
+<script>setTimeout(() => { document.getElementById('out').textContent = 'Run complete'; }, 20000);</script>
+</body></html>"""
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_a_step_waits_past_the_default_15s_when_its_timeout_ms_says_so(site, tmp_path):
+    """The live failure: a Claude Code run that takes 17–44s died at 'Timeout 15000ms exceeded'
+    because the step's timeout_ms was dropped. Real Chromium, an element that appears at ~20s."""
+    (Path(tmp_path) / "site" / "slow.html").write_text(SLOW_PAGE, encoding="utf-8")
+    script = validate(
+        {
+            "name": "slow",
+            "base_url": site,
+            "viewport": {"width": 480, "height": 320},
+            "device_scale_factor": 1,
+            "cursor": False,
+            "steps": [
+                {"goto": "/slow.html"},
+                {"mark": "start"},
+                {"wait_for": {"text": "Run complete", "timeout_ms": 30_000}},
+                {"mark": "done"},
+            ],
+        }
+    )
+    assert script["step_timeout_ms"] == 15_000, "the script-wide default is still 15s"
+    res = shoot.run(script, tmp_path / "take")
+    waited = res["marks"]["done"] - res["marks"]["start"]
+    assert 18 < waited < 30, f"waited {waited:.1f}s — the element appears at ~20s"
+    assert res["error"] == ""
