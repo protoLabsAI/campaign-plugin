@@ -1,6 +1,6 @@
 [project]
 name = "campaign"
-version = "0.2.4"            # keep in lockstep with protoagent.plugin.yaml and __init__.__version__
+version = "0.2.6"            # keep in lockstep with protoagent.plugin.yaml and __init__.__version__
 description = "Campaign Studio — campaign plans + deterministic media production (shot scripts, Playwright takes, ffmpeg renders, cards) for protoAgent."
 requires-python = ">=3.11"
 # The host (protoAgent) provides langchain-core, fastapi and pyyaml. playwright is the one

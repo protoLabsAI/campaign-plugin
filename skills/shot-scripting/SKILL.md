@@ -31,7 +31,22 @@ names. Script against those. Never guess a selector from memory of what the app 
 In a `type` step, `text:` is what gets typed — to target an element by its text, write
 `target: {text: "Search"}`.
 
-A target matching several elements fails loudly (strict mode). Narrow it, or add `nth`.
+### When text appears more than once
+
+Results often show up twice — "3 passed" in a bold summary AND in an inline code span.
+
+- **A wait is fine with that.** `wait_for: {text: "3 passed"}` is satisfied as soon as ANY
+  match is visible (`state: hidden` waits until none is). Don't add `nth` just to wait.
+- **An action needs exactly one** (click, hover, fill, type, press, scroll, an element
+  screenshot). An ambiguous action target fails the step, and the error lists the first few
+  matches (`1) <strong> '3 passed'; 2) <code> 'pytest -q: 3 passed in 0.4s'`). Pick one:
+  `exact: true` (whole-string, case-sensitive — drops the code span here), `nth: 0` / `nth: 1`
+  / `nth: first` / `nth: last` (0-based, DOM order), or a narrower `role` + `name` / selector.
+  Prefer `exact` or a role over `nth` — an index breaks when the page adds a match.
+
+A failed take may already have done things (sent a prompt to an agent, started a job) — the
+app keeps going after the shoot dies. So get targets right BEFORE the take: re-snapshot the
+page in the state the step will see it and check every action target names one element.
 
 ## Inside an iframe — protoAgent plugin views
 
@@ -130,7 +145,8 @@ token and none is set up, ask the operator to create one; never reach for anothe
 
 The error names the step, the cause, and a `failure.png`. Look at the screenshot first:
 - element not found → the page wasn't ready (add `wait_for`) or the name differs (re-snapshot);
-- several matches → narrow the target or add `nth`;
+- `matches N elements: 1) … 2) …` → an action's target is ambiguous: `exact: true`, a
+  narrower role/selector, or `nth` (the listed order is the `nth` order);
 - element not found but you can SEE it → it's inside an iframe (a plugin view): add `frame:`;
 - timeout on `network_idle` → the app polls or streams (SSE); wait for a visible element instead;
 - `Timeout 15000ms exceeded` on something that is just slow → give that step `timeout_ms`.

@@ -449,10 +449,11 @@ def _each_child_frame(page, fn) -> None:
 # ── the shoot ──────────────────────────────────────────────────────────────────
 
 
-def locate(page, target: dict[str, Any]):
+def locate(page, target: dict[str, Any], *, pick: bool = True):
     """A Playwright locator for a normalized target. Strict: >1 match is an error unless nth.
 
-    ``page`` is the page or (for a ``frame:`` target) the Frame :func:`resolve_frame` found."""
+    ``page`` is the page or (for a ``frame:`` target) the Frame :func:`resolve_frame` found.
+    ``pick=False`` ignores ``nth`` — every match (the ambiguity report counts them)."""
     exact = target.get("exact")
     if "selector" in target:
         loc = page.locator(target["selector"])
@@ -473,9 +474,122 @@ def locate(page, target: dict[str, Any]):
         loc = page.get_by_test_id(target["test_id"])
     else:  # the host's validate() makes this unreachable
         raise ValueError(f"unusable target {target!r}")
-    if "nth" in target:
-        loc = loc.nth(int(target["nth"]))
+    if pick and "nth" in target:
+        nth = target["nth"]
+        loc = loc.nth(0 if nth == "first" else -1 if nth == "last" else int(nth))
     return loc
+
+
+# An ACTION needs exactly one element; these ops act on their target (a wait_for doesn't).
+ACTION_OPS = ("click", "hover", "fill", "type", "press", "scroll", "screenshot")
+MAX_LISTED_MATCHES = 3
+_MATCH_JS = """e => {
+  const t = (e.innerText || e.textContent || '').replace(/\\s+/g, ' ').trim();
+  const r = e.getBoundingClientRect();
+  return {tag: e.tagName.toLowerCase(), role: e.getAttribute('role') || '', text: t.slice(0, 60),
+          visible: r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden'};
+}"""
+
+
+def target_label(t: dict[str, Any]) -> str:
+    """``text='3 passed'`` — a target as the script wrote it (frame left out; the step says it)."""
+    for k in ("selector", "role", "text", "label", "placeholder", "test_id"):
+        if k in t:
+            s = f"{k}={t[k]!r}"
+            if k == "role" and t.get("name"):
+                s += f" name={t['name']!r}"
+            return s + (" exact" if t.get("exact") else "")
+    return str(t)
+
+
+class AmbiguousTarget(ValueError):
+    """An action's target matched more than one element."""
+
+
+def is_strict_violation(e: BaseException) -> bool:
+    return "strict mode violation" in str(e)
+
+
+def describe_matches(root, target: dict[str, Any], limit: int = MAX_LISTED_MATCHES) -> tuple[int, list[str]]:
+    """(how many elements the target matches ignoring nth, a short line for each of the first
+    ``limit``) — e.g. ``<strong> "3 passed"``. Best-effort: a match that can't be read is
+    listed as ``?``."""
+    loc = locate(root, target, pick=False)
+    n = loc.count()
+    out = []
+    for i in range(min(n, limit)):
+        try:
+            m = loc.nth(i).evaluate(_MATCH_JS, timeout=1000)
+            role = f" role={m['role']}" if m.get("role") else ""
+            hidden = "" if m.get("visible", True) else " (hidden)"
+            out.append(f"<{m.get('tag', '?')}{role}> {m.get('text', '')!r}{hidden}")
+        except Exception:  # noqa: BLE001 — detached mid-read; the count still tells the story
+            out.append("?")
+    return n, out
+
+
+def ambiguity_message(root, target: dict[str, Any]) -> str:
+    try:
+        n, lines = describe_matches(root, target)
+    except Exception:  # noqa: BLE001 — never mask the real failure with a reporting one
+        n, lines = 0, []
+    listed = "; ".join(f"{i + 1}) {ln}" for i, ln in enumerate(lines))
+    more = f" (+{n - len(lines)} more)" if n > len(lines) else ""
+    found = f"matches {n} elements: {listed}{more}" if n > 1 else "matches more than one element"
+    return (
+        f"{target_label(target)} {found} — an action needs exactly one: pick it with "
+        "`nth` (0-based, or first/last), tighten it with `exact: true`, or use a narrower "
+        "role/name or selector"
+    )
+
+
+def wait_any(root, target: dict[str, Any], state: str, timeout: float) -> None:
+    """Wait for ``target`` to reach ``state`` — satisfied when ANY match does (visible /
+    attached), or when NONE is left (hidden: no visible match; detached: no match). Playwright's
+    strict mode would refuse a target that matches twice; a wait has no reason to."""
+    loc = locate(root, target)
+    if "nth" in target:  # the script picked one — wait on exactly that one
+        loc.wait_for(state=state, timeout=timeout)
+    elif state in ("visible", "hidden"):
+        loc.locator("visible=true").nth(0).wait_for(state=state, timeout=timeout)
+    else:  # attached / detached
+        loc.nth(0).wait_for(state=state, timeout=timeout)
+
+
+def check_targets(page, script: dict[str, Any], timeout_ms: float = 1000) -> list[dict[str, Any]]:
+    """A cheap preflight: how many elements each step's target matches on the page AS IT IS
+    NOW (a script's later targets usually appear only after earlier steps run — read the
+    report against the page state you loaded). One entry per step with a target:
+
+    ``{index, op, desc, count, status, matches}`` — status is ``ok`` (one match, or a picked
+    ``nth`` in range), ``missing`` (none yet), ``ambiguous`` (an ACTION matching several: it
+    will fail), ``ambiguous-wait`` (a wait matching several: fine, it waits for any), or
+    ``frame-missing`` / ``error``."""
+    out: list[dict[str, Any]] = []
+    for step in script.get("steps", []):
+        target = step.get("target")
+        if not target:
+            continue
+        entry: dict[str, Any] = {"index": step.get("index"), "op": step["op"], "desc": describe(step)}
+        try:
+            root, _ = _in_frame(page, target.get("frame") or step.get("frame"), timeout_ms)
+        except Exception as e:  # noqa: BLE001
+            out.append({**entry, "count": 0, "status": "frame-missing", "matches": [], "error": first_line(e)})
+            continue
+        try:
+            n, lines = describe_matches(root, target)
+        except Exception as e:  # noqa: BLE001
+            out.append({**entry, "count": 0, "status": "error", "matches": [], "error": first_line(e)})
+            continue
+        if n == 0:
+            status = "missing"
+        elif n == 1 or "nth" in target:
+            nth = target.get("nth")
+            status = "missing" if isinstance(nth, int) and nth >= n else "ok"
+        else:
+            status = "ambiguous" if step["op"] in ACTION_OPS else "ambiguous-wait"
+        out.append({**entry, "count": n, "status": status, "matches": lines})
+    return out
 
 
 def _move_to(page, loc, timeout: float) -> None:
@@ -639,10 +753,22 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
 
 
 def _do(page, context, step, timeout, out_dir: Path, marks, stills, t0) -> None:
-    op = step["op"]
     target = step.get("target")
     # A frame target: find the frame first (within the step's timeout), then the element in it.
     root, timeout = _in_frame(page, (target or {}).get("frame") or step.get("frame"), timeout)
+    try:
+        _act(page, root, context, step, timeout, out_dir, marks, stills, t0)
+    except Exception as e:
+        # Playwright's strict mode refused an ambiguous target: say WHICH elements matched and
+        # how to pick one, instead of a bare "resolved to 2 elements".
+        if target and step["op"] in ACTION_OPS and "nth" not in target and is_strict_violation(e):
+            raise AmbiguousTarget(ambiguity_message(root, target)) from e
+        raise
+
+
+def _act(page, root, context, step, timeout, out_dir: Path, marks, stills, t0) -> None:
+    op = step["op"]
+    target = step.get("target")
     if op == "goto":
         page.goto(step["_url"], wait_until=step.get("wait_until", "load"), timeout=timeout)
     elif op in ("click", "hover"):
@@ -674,7 +800,7 @@ def _do(page, context, step, timeout, out_dir: Path, marks, stills, t0) -> None:
         elif "ms" in step:
             page.wait_for_timeout(min(step["ms"], timeout))
         elif target:
-            locate(root, target).wait_for(state=step.get("state", "visible"), timeout=timeout)
+            wait_any(root, target, step.get("state", "visible"), timeout)
         else:  # `wait_for: {frame: …}` — the frame is there; let its document parse
             root.wait_for_load_state("domcontentloaded", timeout=timeout)
     elif op == "hold":

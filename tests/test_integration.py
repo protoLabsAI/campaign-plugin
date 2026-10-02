@@ -450,3 +450,87 @@ def test_device_pixel_content_box_matches_the_scale_factor(site, tmp_path):
         }
     )
     assert shoot.run(script, tmp_path / "take")["error"] == ""
+
+
+# ── several matches, for real: Playwright strict mode vs a wait and an action ──
+TWICE_PAGE = """<!doctype html><html><head><meta charset="utf-8"><style>body{font:18px system-ui}</style></head>
+<body><p class="gone" style="display:none">3 passed (stale)</p><div id="out"></div><script>
+  // The result lands late, in TWO places — a bold summary and an inline code span — and a hidden
+  // stale copy sits FIRST in the DOM: a wait must neither refuse the ambiguity nor stall on it.
+  setTimeout(() => { document.getElementById('out').innerHTML =
+    '<p><strong>3 passed</strong></p><p>ran <code>pytest -q: 3 passed in 0.4s</code></p>'; }, 600);
+</script></body></html>"""
+
+
+@pytest.fixture
+def twice_site(site, tmp_path):
+    (Path(tmp_path) / "site" / "twice.html").write_text(TWICE_PAGE, encoding="utf-8")
+    return site
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_real_wait_on_a_twice_matched_text_succeeds_and_a_click_on_it_names_both(twice_site, tmp_path):
+    base = {"base_url": twice_site, "viewport": {"width": 480, "height": 320}, "step_timeout_ms": 5000}
+    ok = validate(
+        {
+            **base,
+            "name": "twice",
+            "steps": [
+                {"goto": "/twice.html"},
+                {"wait_for": {"text": "3 passed"}},  # 3 matches (one hidden) — any visible one will do
+                {"wait_for": {"text": "3 passed", "state": "attached"}},
+                {"click": {"text": "3 passed", "exact": True}},  # exact: only the bold summary
+                {"click": {"text": "3 passed", "nth": "last"}},
+                {"wait_for": {"text": "nothing like this", "state": "hidden"}},
+            ],
+        }
+    )
+    res = shoot.run(ok, tmp_path / "ok")
+    assert res["error"] == ""
+
+    bad = validate({**base, "name": "twice-bad", "steps": [
+        {"goto": "/twice.html"}, {"wait_for": {"text": "3 passed"}}, {"click": {"text": "3 passed"}}]})  # fmt: skip
+    with pytest.raises(shoot.ShootError) as e:
+        shoot.run(bad, tmp_path / "bad")
+    msg = str(e.value)
+    assert msg.startswith("step 3 (click text='3 passed') failed: text='3 passed' matches 3 elements:"), msg
+    assert "<p> '3 passed (stale)' (hidden)" in msg
+    assert "<strong> '3 passed'" in msg and "<code> 'pytest -q: 3 passed in 0.4s'" in msg
+    assert "`nth`" in msg and "exact: true" in msg
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_check_targets_reports_ambiguous_targets_on_a_live_page(twice_site):
+    sync_api = pytest.importorskip("playwright.sync_api")
+    script = validate(
+        {
+            "base_url": twice_site,
+            "steps": [
+                {"goto": "/twice.html"},
+                {"wait_for": {"text": "3 passed"}},
+                {"click": {"text": "3 passed"}},
+                {"click": {"text": "3 passed", "exact": True}},
+                {"click": {"text": "3 passed", "nth": 5}},
+                {"hover": {"role": "button", "name": "Nope"}},
+            ],
+        }
+    )
+    with sync_api.sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.goto(twice_site + "/twice.html")
+            page.get_by_text("3 passed", exact=True).wait_for()
+            report = pw_worker.check_targets(page, script)
+        finally:
+            browser.close()
+    assert [(r["index"], r["status"], r["count"]) for r in report] == [
+        (2, "ambiguous-wait", 3),
+        (3, "ambiguous", 3),
+        (4, "ok", 1),
+        (5, "missing", 3),
+        (6, "missing", 0),
+    ]
+    assert report[1]["matches"][1] == "<strong> '3 passed'"

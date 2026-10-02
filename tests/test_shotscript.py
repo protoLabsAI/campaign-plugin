@@ -74,6 +74,21 @@ def test_target_shapes_normalize():
     assert t[4] == {"text": "Search"}
 
 
+def test_nth_takes_an_index_or_first_last():
+    s = validate(_with({"click": {"text": "a", "nth": "first"}}, {"click": {"text": "a", "nth": "LAST"}},
+                       {"click": {"text": "a", "nth": "2"}}, {"click": {"text": "a", "nth": 0}}))  # fmt: skip
+    assert [st["target"]["nth"] for st in s["steps"][1:]] == ["first", "last", 2, 0]
+    for bad in (-1, "second", True, 1.5, None):
+        assert "nth must be a 0-based index" in _problems(_with({"click": {"text": "a", "nth": bad}})), bad
+
+
+def test_exact_and_nth_show_in_the_step_description():
+    from campaign.shotscript import describe_step
+
+    s = validate(_with({"click": {"text": "3 passed", "exact": True, "nth": "last"}}))
+    assert describe_step(s["steps"][1]) == "click text='3 passed' exact nth=last"
+
+
 def test_top_level_problems_are_all_reported_together():
     msg = _problems(
         {

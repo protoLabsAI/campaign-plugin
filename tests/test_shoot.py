@@ -410,3 +410,47 @@ def test_the_shoot_forces_the_real_scale_factor_so_webgl_canvases_size_right(tmp
     pw = FakePlaywright()
     shoot.run(_script(device_scale_factor=1), tmp_path / "b", playwright_factory=pw)
     assert next(c for c in pw.calls if c[0] == "launch")[1]["args"] == []
+
+
+# ── several matches: a wait takes any, an action needs one ──────────────────────
+TWICE = {"3 passed": ["3 passed", "pytest -q: 3 passed in 0.4s"]}
+
+
+def test_a_wait_on_a_target_that_matches_twice_waits_for_any_visible_match(tmp_path):
+    pw = FakePlaywright(matches=TWICE)
+    res = shoot.run(_script({"wait_for": {"text": "3 passed"}}), tmp_path, playwright_factory=pw)
+    assert res["error"] == ""
+    wait = [c for c in pw.calls if c[0] == "wait_for"][0]
+    assert wait[3]["filter"] == "visible=true" and wait[3]["nth"] == 0 and wait[4]["state"] == "visible"
+
+
+def test_a_wait_that_picks_nth_waits_on_exactly_that_one(tmp_path):
+    pw = FakePlaywright(matches=TWICE)
+    shoot.run(_script({"wait_for": {"text": "3 passed", "nth": "last", "state": "attached"}}), tmp_path,
+              playwright_factory=pw)  # fmt: skip
+    wait = [c for c in pw.calls if c[0] == "wait_for"][0]
+    assert "filter" not in wait[3] and wait[3]["nth"] == -1 and wait[4]["state"] == "attached"
+
+
+def test_an_action_on_an_ambiguous_target_lists_the_matches_and_how_to_pick(tmp_path):
+    pw = FakePlaywright(matches=TWICE)
+    with pytest.raises(shoot.ShootError) as e:
+        shoot.run(_script({"click": {"text": "3 passed"}}), tmp_path, playwright_factory=pw)
+    msg = str(e.value)
+    assert msg.startswith("step 2 (click text='3 passed') failed: text='3 passed' matches 2 elements:")
+    assert "1) <span> '3 passed'; 2) <span> 'pytest -q: 3 passed in 0.4s'" in msg
+    assert "`nth`" in msg and "exact: true" in msg and "narrower" in msg
+
+
+def test_an_action_with_nth_on_an_ambiguous_target_acts_on_that_one(tmp_path):
+    pw = FakePlaywright(matches=TWICE)
+    res = shoot.run(_script({"click": {"text": "3 passed", "nth": 1}}), tmp_path, playwright_factory=pw)
+    assert res["error"] == ""
+    assert [c for c in pw.calls if c[0] == "click"][0][3]["nth"] == 1
+
+
+def test_other_failures_are_not_reworded_as_ambiguity(tmp_path):
+    pw = FakePlaywright(fail_on=lambda action, how, args: action == "click")
+    with pytest.raises(shoot.ShootError) as e:
+        shoot.run(_script({"click": {"text": "Go"}}), tmp_path, playwright_factory=pw)
+    assert "Timeout 15000ms exceeded" in str(e.value) and "matches" not in str(e.value)
