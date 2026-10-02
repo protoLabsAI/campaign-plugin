@@ -318,3 +318,95 @@ def test_step_timeouts_never_outlive_the_shoot():
     assert f({"op": "click"}, 15_000, 400_000) == 15_000
     assert f({"op": "hold", "ms": 5000}, 15_000, 400_000) == 400_000
     assert f({"op": "click"}, 15_000, 0) == 1.0, "never 0 — Playwright reads 0 as 'wait forever'"
+
+
+# ── frames (a protoAgent plugin view is an iframe) ─────────────────────────────
+TERM = "http://app.test/plugins/terminal/view"
+
+
+def test_a_frame_target_waits_for_the_frame_then_acts_inside_it(tmp_path):
+    # The iframe attaches only after a few polls — the step waits for it.
+    pw = FakePlaywright(frames=[(4, TERM, "iframe[title='Terminal']", None)])
+    s = _script(
+        {"wait_for": {"text": "connected", "frame": {"url": "/plugins/terminal/view"}}},
+        {"type": {"target": {"selector": "textarea", "frame": {"selector": "iframe[title='Terminal']"}}, "text": "ls"}},
+        {"press": {"selector": "textarea", "key": "Enter", "frame": "*/plugins/terminal/*"}},
+        {"screenshot": {"name": "term", "frame": "/plugins/terminal/view"}},
+    )
+    res = shoot.run(s, tmp_path, playwright_factory=pw)
+    assert res["error"] == ""
+    waits = [c for c in pw.calls if c[0] == "wait_for"]
+    assert waits[0][1:3] == ("text", ("connected",)) and waits[0][3]["frame"] == TERM
+    clicks = [c for c in pw.calls if c[0] == "click"]
+    assert clicks[0][3]["frame"] == TERM, "the type target is clicked INSIDE the frame"
+    assert ("keyboard.type", "ls", 45) in pw.calls
+    assert [c for c in pw.calls if c[0] == "press"][0][3]["frame"] == TERM
+    assert ("frame_element.screenshot", TERM) in pw.calls
+    polls = [c for c in pw.calls if c[0] == "wait_for_timeout"]
+    assert polls and all(c[1] <= 100 for c in polls), "the frame is polled, not slept on"
+
+
+def test_a_nested_frame_is_found_one_level_down(tmp_path):
+    inner = "http://app.test/inner.html"
+    pw = FakePlaywright(
+        frames=[
+            (1, "http://app.test/outer.html", "iframe.outer", None),
+            (2, inner, "iframe.in", "http://app.test/outer.html"),
+        ]
+    )
+    s = _script({"click": {"text": "deep", "frame": {"selector": "iframe.outer", "frame": {"selector": "iframe.in"}}}})
+    shoot.run(s, tmp_path, playwright_factory=pw)
+    assert [c for c in pw.calls if c[0] == "click"][0][3]["frame"] == inner
+
+
+def test_a_frame_that_never_appears_fails_the_step_naming_the_frames_there_are(tmp_path):
+    pw = FakePlaywright(frames=[(1, "http://app.test/plugins/notes/view", "iframe", None)])
+    s = _script({"wait_for": {"text": "x", "frame": "/plugins/terminal/view", "timeout_ms": 300}})
+    with pytest.raises(shoot.ShootError) as e:
+        shoot.run(s, tmp_path, playwright_factory=pw)
+    msg = str(e.value)
+    assert msg.startswith("step 2 (wait for text='x' in frame(url='/plugins/terminal/view')")
+    assert "Timeout 300ms" in msg and "/plugins/notes/view" in msg
+
+
+def test_two_matching_frames_are_an_error_not_a_guess(tmp_path):
+    pw = FakePlaywright(frames=[(1, TERM + "?a", "iframe", None), (1, TERM + "?b", "iframe", None)])
+    with pytest.raises(shoot.ShootError, match="matches 2 frames"):
+        shoot.run(_script({"click": {"text": "x", "frame": "/plugins/terminal/view"}}), tmp_path, playwright_factory=pw)
+
+
+def test_mask_and_redact_steps_reach_into_frames_already_loaded(tmp_path):
+    pw = FakePlaywright(frames=[(1, TERM, "iframe", None)])
+    s = _script(
+        {"wait_for": {"frame": "/plugins/terminal/view"}},
+        {"mask": {"selectors": [".secret"], "mode": "hide"}},
+        {"redact": {"patterns": ["acme-[0-9]+"]}},
+    )
+    shoot.run(s, tmp_path, playwright_factory=pw)
+    assert ("frame.style", TERM, ".secret { visibility: hidden !important; }") in pw.calls
+    assert any(
+        c[0] == "frame.evaluate" and c[1] == TERM and c[3]["rules"] == [["acme-[0-9]+", "•••"]] for c in pw.calls
+    )
+    # …and frames still to come get both from the context init scripts (Playwright runs them in every frame).
+    init = "\n".join(pw.browser.contexts[0].init_scripts)
+    assert ".secret" in init and "acme-[0-9]+" in init
+
+
+def test_frame_url_patterns_are_substrings_or_whole_url_globs():
+    m = pw_worker.frame_url_matches
+    assert m(TERM, "/plugins/terminal/view") and m(TERM, "*/plugins/terminal/*")
+    assert not m(TERM, "/plugins/terminal/view/x") and not m(TERM, "/plugins/*/view"), "a glob is on the WHOLE url"
+
+
+def test_the_pointer_follows_into_frames_instead_of_a_second_one_drawn_there():
+    js = pw_worker.CURSOR_JS
+    assert "window.top !== window" in js and "postMessage" in js and "stopImmediatePropagation" in js
+
+
+def test_the_shoot_forces_the_real_scale_factor_so_webgl_canvases_size_right(tmp_path):
+    pw = FakePlaywright()
+    shoot.run(_script(device_scale_factor=2), tmp_path / "a", playwright_factory=pw)
+    assert next(c for c in pw.calls if c[0] == "launch")[1]["args"] == ["--force-device-scale-factor=2"]
+    pw = FakePlaywright()
+    shoot.run(_script(device_scale_factor=1), tmp_path / "b", playwright_factory=pw)
+    assert next(c for c in pw.calls if c[0] == "launch")[1]["args"] == []

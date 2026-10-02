@@ -34,6 +34,21 @@ ONE of ``selector`` / ``role`` (+ ``name``, ``exact``) / ``text`` / ``label`` /
 ``placeholder`` / ``test_id``, plus an optional ``nth``. Prefer role/text/label — they
 survive restyles; CSS classes don't.
 
+Frames: a target inside an ``<iframe>`` (a protoAgent console plugin view is one — e.g. the
+Terminal rail view at ``/plugins/terminal/view``) adds ``frame:`` — the step's mapping or the
+target mapping, either. Select the frame by ``url`` (a substring of the frame's URL, or a glob
+on the whole URL when it holds ``*``/``?``/``[``) and/or by ``selector`` (a CSS selector for the
+``<iframe>`` element in its parent); a nested ``frame:`` inside it reaches one level deeper. A
+bare string is a ``url``. The frame is waited for within the step's timeout::
+
+    - wait_for: {text: "connected", frame: {url: "/plugins/terminal/view"}}
+    - type: {target: {selector: "textarea", frame: "/plugins/terminal/view"}, text: "ls"}
+
+``wait_for: {frame: …}`` with no target waits for the frame itself; ``screenshot`` with only a
+``frame`` shoots the iframe element; ``scroll`` with only a ``frame`` scrolls inside it. Masks
+and redaction reach into every frame (including ones that load later) — but CSS can't touch
+text drawn on a ``<canvas>`` (xterm.js), so keep secrets off a canvas terminal in the shot itself.
+
 Waits: every step that waits on the page (goto, click, hover, fill, type, press, wait_for,
 scroll, screenshot) gives up after ``step_timeout_ms`` (script-wide, default 15000). A step
 that waits on something slow — an agent run, a build — sets its own ``timeout_ms`` (up to
@@ -84,6 +99,8 @@ STEP_OPS = (
 )
 TARGET_KEYS = ("selector", "role", "text", "label", "placeholder", "test_id")
 TARGET_OPTS = ("name", "exact", "nth")
+FRAME_KEYS = ("url", "selector", "frame")
+MAX_FRAME_DEPTH = 2  # a frame, and one frame inside it
 COLOR_SCHEMES = ("light", "dark", "no-preference")
 MASK_MODES = ("blur", "hide", "remove")
 REDACT_PRESETS = ("home_paths", "emails", "secrets")
@@ -106,7 +123,7 @@ DEFAULTS = {
     "step_timeout_ms": 15_000,
     "total_timeout_s": 300,
 }
-_TGT = ("target", "selector", "role", "text", "label", "placeholder", "test_id", "name", "exact", "nth")
+_TGT = ("target", "selector", "role", "text", "label", "placeholder", "test_id", "name", "exact", "nth", "frame")
 # Every key a step's mapping body may carry. Anything else is an ERROR naming the key — a typo'd
 # or unsupported option (``timout_ms``, ``timeout``) must never be dropped on the floor.
 STEP_KEYS: dict[str, tuple[str, ...]] = {
@@ -173,6 +190,12 @@ def _target(raw: Any, where: str, problems: list[str], *, required: bool = True)
     if not isinstance(raw, dict):
         problems.append(f"{where}: target must be a string or a mapping, got {type(raw).__name__}")
         return None
+    for k in raw:
+        if k not in (*TARGET_KEYS, *TARGET_OPTS, "frame"):
+            problems.append(
+                f"{where}: unknown target key `{k}`{_suggest(k, (*TARGET_KEYS, *TARGET_OPTS, 'frame'))}"
+                f" — a target takes one of {', '.join(TARGET_KEYS)} plus {', '.join(TARGET_OPTS)}, frame"
+            )
     keys = [k for k in TARGET_KEYS if raw.get(k) not in (None, "")]
     if not keys:
         if required:
@@ -191,7 +214,56 @@ def _target(raw: Any, where: str, problems: list[str], *, required: bool = True)
             out["nth"] = int(raw["nth"])
         except (TypeError, ValueError):
             problems.append(f"{where}: nth must be an integer")
+    if raw.get("frame") is not None:
+        f = _frame(raw["frame"], f"{where} frame", problems)
+        if f is not None:
+            out["frame"] = f
     return out
+
+
+def _frame(raw: Any, where: str, problems: list[str], depth: int = 1) -> dict[str, Any] | None:
+    """``frame:`` — which ``<iframe>`` a target lives in: ``{url, selector, frame}``.
+
+    ``url`` is a substring of the frame's URL (a glob on the whole URL when it holds ``*?[``);
+    ``selector`` is a CSS selector for the ``<iframe>`` element in the parent; a nested ``frame``
+    goes one level deeper. A bare string is a ``url``. Unknown keys are errors."""
+    if isinstance(raw, str):
+        raw = {"url": raw}
+    if not isinstance(raw, dict):
+        problems.append(f"{where}: must be a URL string or {{url: …, selector: …}}, got {type(raw).__name__}")
+        return None
+    bad = False
+    for k in raw:
+        if k not in FRAME_KEYS:
+            problems.append(
+                f"{where}: unknown frame key `{k}`{_suggest(k, FRAME_KEYS)} — a frame takes url, selector, frame"
+            )
+            bad = True
+    out: dict[str, Any] = {}
+    for k in ("url", "selector"):
+        if k in raw:
+            v = raw[k]
+            if not isinstance(v, str) or not v.strip():
+                problems.append(f"{where}.{k}: must be a non-empty string")
+                bad = True
+            else:
+                out[k] = v.strip()
+    if not out and not bad:
+        problems.append(
+            f"{where}: needs a `url` (substring or glob of the frame's URL) and/or a `selector` (the iframe)"
+        )
+        bad = True
+    if raw.get("frame") is not None:
+        if depth >= MAX_FRAME_DEPTH:
+            problems.append(f"{where}: frames nest at most {MAX_FRAME_DEPTH} deep (a frame and one inside it)")
+            bad = True
+        else:
+            inner = _frame(raw["frame"], f"{where}.frame", problems, depth + 1)
+            if inner is None:
+                bad = True
+            else:
+                out["frame"] = inner
+    return None if bad else out
 
 
 def _target_from_mapping(
@@ -199,8 +271,30 @@ def _target_from_mapping(
 ) -> dict | None:
     sub = {k: body[k] for k in (*TARGET_KEYS, *TARGET_OPTS) if k in body and k not in exclude}
     if "target" in body:
-        return _target(body["target"], where, problems, required=required)
-    return _target(sub or None, where, problems, required=required)
+        t = _target(body["target"], where, problems, required=required)
+    else:
+        t = _target(sub or None, where, problems, required=required)
+    if body.get("frame") is not None and t is not None:
+        if "frame" in t:
+            problems.append(f"{where}: `frame` is given twice — on the step and on its target; keep one")
+            return None
+        f = _frame(body["frame"], f"{where} frame", problems)
+        if f is not None:
+            t["frame"] = f
+    return t
+
+
+def _step_frame(body: Any, step: dict[str, Any], where: str, problems: list[str]) -> None:
+    """A ``frame`` on a step with NO target: kept on the step (wait_for / screenshot / scroll
+    act on the frame itself); anywhere else it is an error, never silently dropped."""
+    if not isinstance(body, dict) or body.get("frame") is None or step.get("target"):
+        return
+    if step["op"] in ("wait_for", "screenshot", "scroll") and not step.get("network_idle") and "ms" not in step:
+        f = _frame(body["frame"], f"{where} frame", problems)
+        if f is not None:
+            step["frame"] = f
+    else:
+        problems.append(f"{where}: `frame` needs a target inside that frame (a selector, role, text, …)")
 
 
 def _int(value: Any, where: str, problems: list[str], lo: int, hi: int) -> int | None:
@@ -300,6 +394,8 @@ def _step(i: int, raw: Any, problems: list[str], has_base: bool) -> dict[str, An
                 hint = _suggest(k, allowed)
                 if not hint and k in ("timeout", "timeout_s", "wait_ms"):
                     hint = " (did you mean `timeout_ms`?)" if "timeout_ms" in allowed else ""
+                if k == "frame" and op in ("mask", "redact"):
+                    hint = f" ({op} already reaches into every frame, including ones that load later)"
                 problems.append(f"{where}: unknown option `{k}`{hint} — {op} takes {', '.join(allowed)}")
         if "timeout_ms" in body:
             if op == "wait_for" and "ms" in body:
@@ -372,6 +468,8 @@ def _step(i: int, raw: Any, problems: list[str], has_base: bool) -> dict[str, An
         elif "ms" in body:
             ms = _int(body["ms"], f"{where} ms", problems, 0, MAX_HOLD_MS)
             step["ms"] = ms or 0
+        elif body.get("frame") is not None and "target" not in body and not any(k in body for k in TARGET_KEYS):
+            pass  # wait for the frame itself — _step_frame keeps it
         else:
             t = _target_from_mapping(body, where, problems, required=True)
             if t is None:
@@ -424,6 +522,7 @@ def _step(i: int, raw: Any, problems: list[str], has_base: bool) -> dict[str, An
         if r is None:
             return None
         step.update(r)
+    _step_frame(body, step, where, problems)
     return step
 
 
@@ -506,6 +605,14 @@ def validate(text_or_obj: Any) -> dict[str, Any]:
         if auth.get("storage_state"):
             out["auth"]["storage_state"] = str(auth["storage_state"])
 
+    for key in ("mask", "redact"):
+        if isinstance(data.get(key), dict):
+            for k in data[key]:
+                if k not in STEP_KEYS[key]:
+                    problems.append(
+                        f"{key}: unknown option `{k}`{_suggest(k, STEP_KEYS[key])} — {key} takes "
+                        f"{', '.join(STEP_KEYS[key])} (it already reaches into every frame)"
+                    )
     out["mask"] = _mask(data["mask"], "mask", problems) if data.get("mask") else None
     out["redact"] = _redact(data["redact"], "redact", problems) if data.get("redact") else None
 
@@ -563,6 +670,14 @@ def resolve_url(script: dict[str, Any], url: str) -> str:
     return base + (url if url.startswith("/") else "/" + url)
 
 
+def describe_frame(f: dict[str, Any] | None) -> str:
+    if not f:
+        return ""
+    parts = [f"{k}={f[k]!r}" for k in ("url", "selector") if k in f]
+    inner = describe_frame(f.get("frame"))
+    return "frame(" + " ".join(parts) + ")" + (f" > {inner}" if inner else "")
+
+
 def describe_target(t: dict[str, Any] | None) -> str:
     if not t:
         return "(focused element)"
@@ -573,6 +688,8 @@ def describe_target(t: dict[str, Any] | None) -> str:
                 s += f" name={t['name']!r}"
             if "nth" in t:
                 s += f" nth={t['nth']}"
+            if t.get("frame"):
+                s += f" in {describe_frame(t['frame'])}"
             return s
     return str(t)
 
@@ -601,9 +718,15 @@ def _describe_step(step: dict[str, Any]) -> str:
             return "wait for network idle"
         if "ms" in step:
             return f"wait {step['ms']}ms"
+        if step.get("frame") and not step.get("target"):
+            return f"wait for {describe_frame(step['frame'])}"
         return f"wait for {describe_target(step['target'])} ({step.get('state')})"
     if op in ("hold",):
         return f"hold {step['ms']}ms"
+    if op == "screenshot" and step.get("target"):
+        return f"screenshot {step['name']} of {describe_target(step['target'])}"
+    if op == "screenshot" and step.get("frame"):
+        return f"screenshot {step['name']} of {describe_frame(step['frame'])}"
     if op in ("mark", "screenshot"):
         return f"{op} {step['name']}"
     return op

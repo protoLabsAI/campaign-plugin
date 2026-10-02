@@ -125,6 +125,74 @@ class _Video:
         return self._path
 
 
+class _FakeHandle:
+    def __init__(self, frame):
+        self.frame = frame
+
+    def content_frame(self):
+        return self.frame
+
+    def dispose(self):
+        pass
+
+
+class FakeFrame:
+    """A child frame of a FakePage. Locators made in it log ``frame=<url>`` in their kwargs."""
+
+    def __init__(self, page, url, selector=None, parent=None):
+        self.page, self.url, self.selector, self.parent = page, url, selector, parent
+        self.child_frames: list[FakeFrame] = []
+        self.detached = False
+        self.calls = page.calls
+        self.fail_on = page.fail_on
+
+    def is_detached(self):
+        return self.detached
+
+    def query_selector_all(self, sel):
+        return [_FakeHandle(f) for f in self.child_frames if f.selector == sel]
+
+    def _loc(self, how, args, kw):
+        return FakeLocator(self.page, how, args, dict(kw, frame=self.url))
+
+    def locator(self, sel):
+        return self._loc("locator", (sel,), {})
+
+    def get_by_role(self, role, **kw):
+        return self._loc("role", (role,), kw)
+
+    def get_by_text(self, text, **kw):
+        return self._loc("text", (text,), kw)
+
+    def get_by_label(self, text, **kw):
+        return self._loc("label", (text,), kw)
+
+    def get_by_placeholder(self, text, **kw):
+        return self._loc("placeholder", (text,), kw)
+
+    def get_by_test_id(self, text):
+        return self._loc("test_id", (text,), {})
+
+    def add_style_tag(self, content):
+        self.calls.append(("frame.style", self.url, content))
+
+    def evaluate(self, js, arg=None):
+        self.calls.append(("frame.evaluate", self.url, js[:40], arg))
+
+    def wait_for_load_state(self, state, **kw):
+        self.calls.append(("frame.load_state", self.url, state))
+
+    def frame_element(self):
+        frame = self
+
+        class _El:
+            def screenshot(self, path, **kw):
+                frame.calls.append(("frame_element.screenshot", frame.url))
+                Path(path).write_bytes(PNG_1x1)
+
+        return _El()
+
+
 class FakePage:
     def __init__(self, ctx):
         self.ctx = ctx
@@ -138,6 +206,34 @@ class FakePage:
         # The per-step default timeouts the worker sets (kept off `calls` so call-sequence
         # assertions stay about what happens on screen).
         self.default_timeouts: list[float] = []
+        self.child_frames: list[FakeFrame] = []
+        # Frames to attach after N wait_for_timeout polls: [(polls_left, url, selector, parent_url)]
+        self.pending_frames: list[list] = list(ctx.browser.pw.frames)
+
+    @property
+    def main_frame(self):
+        return self
+
+    @property
+    def frames(self):
+        out, todo = [self], list(self.child_frames)
+        while todo:
+            f = todo.pop(0)
+            out.append(f)
+            todo.extend(f.child_frames)
+        return out
+
+    def query_selector_all(self, sel):
+        return [_FakeHandle(f) for f in self.child_frames if f.selector == sel]
+
+    def _attach_due(self):
+        for item in list(self.pending_frames):
+            item[0] -= 1
+            if item[0] <= 0:
+                self.pending_frames.remove(item)
+                _, url, selector, parent_url = item
+                parent = next((f for f in self.frames if f is not self and f.url == parent_url), self)
+                parent.child_frames.append(FakeFrame(self, url, selector, None if parent is self else parent))
 
     def set_default_timeout(self, ms):
         self.default_timeouts.append(ms)
@@ -147,6 +243,7 @@ class FakePage:
 
     def goto(self, url, **kw):
         self.calls.append(("goto", url, kw))
+        self._attach_due()
         if self.fail_on and self.fail_on("goto", url, ()):
             raise RuntimeError("net::ERR_CONNECTION_REFUSED")
 
@@ -170,6 +267,7 @@ class FakePage:
 
     def wait_for_timeout(self, ms):
         self.calls.append(("wait_for_timeout", ms))
+        self._attach_due()
 
     def wait_for_load_state(self, state, **kw):
         self.calls.append(("load_state", state))
@@ -253,8 +351,10 @@ class _Chromium:
 class FakePlaywright:
     """Call it to get a context manager, exactly like ``sync_playwright()``."""
 
-    def __init__(self, fail_on=None, png_size=2_000, jpeg_sizes=None):
+    def __init__(self, fail_on=None, png_size=2_000, jpeg_sizes=None, frames=None):
         self.calls = []
+        # Child frames the page grows: (after N polls/gotos, url, iframe selector, parent url|None)
+        self.frames = [list(f) for f in (frames or [])]
         self.fail_on = fail_on
         self.chromium = _Chromium(self)
         self.browser = None

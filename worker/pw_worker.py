@@ -42,6 +42,7 @@ Security properties enforced HERE (the host can't reach into this process to enf
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -165,9 +166,37 @@ def guard_context(context, *, base_url: str, bearer: str, fence: list[str]) -> N
 CURSOR_JS = r"""
 (() => {
   if (window.__campaignCursor) return; window.__campaignCursor = true;
+  const KEY = '__campaignCursor';
+  const inFrame = window.top !== window;
+  // A pointer event from a child frame arrives as a message; offset it by that iframe's box.
+  // Registered by the init script, so it runs first: our messages never reach page listeners
+  // (a console's plugin-view bridge, say).
+  const fromChild = (cb) => window.addEventListener('message', e => {
+    const d = e.data && e.data[KEY]; if (!d) return;
+    e.stopImmediatePropagation();
+    const fr = Array.from(document.querySelectorAll('iframe,frame')).find(f => f.contentWindow === e.source);
+    if (!fr) return;
+    const r = fr.getBoundingClientRect();
+    cb(d.x + r.left + fr.clientLeft, d.y + r.top + fr.clientTop, d.t);
+  }, true);
+  if (inFrame) {
+    // Inside an iframe (a plugin view): draw NO second pointer — report this frame's pointer
+    // up to the parent, which offsets it and passes it on, so the top-level dot follows the
+    // mouse into the frame instead of freezing at its edge.
+    const post = (x, y, t) => { try { window.parent.postMessage({[KEY]: {x, y, t}}, '*'); } catch (e) {} };
+    for (const t of ['mousemove', 'mousedown', 'mouseup'])
+      document.addEventListener(t, e => post(e.clientX, e.clientY, t), true);
+    fromChild(post);
+    return;
+  }
+  let c = null, x = -100, y = -100;
+  const set = (nx, ny, t) => {
+    x = nx; y = ny;
+    if (c) c.style.transform = `translate(${x}px,${y}px)` + (t === 'mousedown' ? ' scale(.7)' : '');
+  };
   const install = () => {
     if (!document.body || document.getElementById('__campaign_cursor')) return;
-    const c = document.createElement('div');
+    c = document.createElement('div');
     c.id = '__campaign_cursor';
     c.setAttribute('aria-hidden', 'true');
     c.style.cssText = 'position:fixed;left:0;top:0;width:18px;height:18px;margin:-9px 0 0 -9px;' +
@@ -175,12 +204,10 @@ CURSOR_JS = r"""
       'box-shadow:0 1px 6px rgba(0,0,0,.35);z-index:2147483647;pointer-events:none;' +
       'transition:transform .12s ease;transform:translate(-100px,-100px)';
     document.body.appendChild(c);
-    let x = -100, y = -100;
-    document.addEventListener('mousemove', e => { x = e.clientX; y = e.clientY;
-      c.style.transform = `translate(${x}px,${y}px)`; }, true);
-    document.addEventListener('mousedown', () => { c.style.transform = `translate(${x}px,${y}px) scale(.7)`; }, true);
-    document.addEventListener('mouseup', () => { c.style.transform = `translate(${x}px,${y}px)`; }, true);
   };
+  for (const t of ['mousemove', 'mousedown', 'mouseup'])
+    document.addEventListener(t, e => set(e.clientX, e.clientY, t), true);
+  fromChild(set);
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install); else install();
 })();
 """
@@ -271,6 +298,21 @@ def video_size(script: dict[str, Any]) -> dict[str, int]:
     return {"width": int(vp["width"]) // 2 * 2, "height": int(vp["height"]) // 2 * 2}
 
 
+def launch_args(script: dict[str, Any]) -> list[str]:
+    """Chromium flags for a shoot.
+
+    ``--force-device-scale-factor`` matching the context's ``device_scale_factor``: Playwright's
+    DPR *emulation* sets ``window.devicePixelRatio`` but a ``ResizeObserver`` on
+    ``device-pixel-content-box`` still reports 1x sizes. xterm.js's WebGL renderer (the
+    protoAgent Terminal view) sizes its canvas from that box, so at dsf 2 its canvas came out
+    half the size of its text layer and drew NOTHING — "connected", blank terminal — until a
+    later redraw (measured: Chromium headless shell 1243 / Playwright 1.63; recordVideo and the
+    iframe were not factors; GPU/swiftshader flags didn't help). Forcing the real scale factor
+    makes both agree."""
+    dsf = float(script.get("device_scale_factor") or 1)
+    return [] if dsf == 1 else [f"--force-device-scale-factor={dsf:g}"]
+
+
 def step_timeout_for(step: dict[str, Any], step_timeout_ms: float, remaining_ms: float) -> float:
     """The ms one step may wait: its own ``timeout_ms`` (validated ≤ the per-step max by the
     host), else the script-wide ``step_timeout_ms`` — always bounded by what is left of the
@@ -290,11 +332,127 @@ def describe(step: dict[str, Any]) -> str:
     return str(step.get("_desc") or step.get("op") or "?")
 
 
+# ── frames ─────────────────────────────────────────────────────────────────────
+# A protoAgent console plugin view (the Terminal rail view, …) is an <iframe> at
+# /plugins/<id>/view. A target with ``frame: {url?, selector?, frame?}`` is located inside it.
+
+_GLOB = re.compile(r"[*?\[]")
+
+
+def frame_url_matches(url: str, pattern: str) -> bool:
+    """A frame ``url`` pattern: a glob on the WHOLE URL when it holds ``*?[``, else a substring."""
+    if _GLOB.search(pattern):
+        return fnmatch.fnmatchcase(url or "", pattern)
+    return pattern in (url or "")
+
+
+def describe_frame(spec: dict[str, Any] | None) -> str:
+    if not spec:
+        return ""
+    parts = [f"{k}={spec[k]!r}" for k in ("url", "selector") if k in spec]
+    inner = describe_frame(spec.get("frame"))
+    return "frame(" + " ".join(parts) + ")" + (f" > {inner}" if inner else "")
+
+
+def _descendants(frame) -> list:
+    out, todo = [], list(frame.child_frames)
+    while todo:
+        f = todo.pop(0)
+        out.append(f)
+        todo.extend(f.child_frames)
+    return out
+
+
+def _frame_candidates(parent, spec: dict[str, Any]) -> list:
+    """The frames under ``parent`` matching ONE level of ``spec`` — right now, no waiting."""
+    if "selector" in spec:
+        frames = []
+        for el in parent.query_selector_all(spec["selector"]):
+            try:
+                f = el.content_frame()
+            finally:
+                el.dispose()
+            if f is not None:
+                frames.append(f)
+    else:  # url only: any frame below the parent (plugin views may sit a layout iframe deep)
+        frames = _descendants(parent)
+    if "url" in spec:
+        frames = [f for f in frames if frame_url_matches(f.url, spec["url"])]
+    seen: list = []
+    for f in frames:
+        if not f.is_detached() and not any(f is g for g in seen):
+            seen.append(f)
+    return seen
+
+
+class FrameAmbiguous(ValueError):
+    pass
+
+
+def _find_frame(parent, spec: dict[str, Any]):
+    found = _frame_candidates(parent, spec)
+    if len(found) > 1:
+        raise FrameAmbiguous(
+            f"{describe_frame(spec)} matches {len(found)} frames ({', '.join(f.url for f in found)}) — "
+            "narrow it with a longer url or an iframe selector"
+        )
+    if not found:
+        return None
+    return _find_frame(found[0], spec["frame"]) if spec.get("frame") else found[0]
+
+
+def resolve_frame(page, spec: dict[str, Any], timeout: float):
+    """The Frame ``spec`` names, waiting for it (an iframe attaches and navigates after its
+    parent loads) for at most ``timeout`` ms. A miss names every frame the page DOES have."""
+    deadline = time.monotonic() + timeout / 1000
+    last = ""
+    while True:
+        try:
+            f = _find_frame(page.main_frame, spec)
+            if f is not None:
+                return f
+        except FrameAmbiguous:
+            raise
+        except Exception as e:  # noqa: BLE001 — mid-navigation DOM; retry until the deadline
+            last = first_line(e)
+        left = (deadline - time.monotonic()) * 1000
+        if left <= 0:
+            urls = [f.url for f in page.frames if f is not page.main_frame]
+            raise TimeoutError(
+                f"Timeout {int(timeout)}ms exceeded waiting for {describe_frame(spec)}; "
+                f"frames on the page: {urls or 'none'}" + (f" (last error: {last})" if last else "")
+            )
+        page.wait_for_timeout(min(100.0, max(1.0, left)))
+
+
+def _in_frame(page, spec: dict[str, Any] | None, timeout: float):
+    """(root to locate in, ms left for the step) — the page itself when there's no frame."""
+    if not spec:
+        return page, timeout
+    started = time.monotonic()
+    root = resolve_frame(page, spec, timeout)
+    return root, max(1.0, timeout - (time.monotonic() - started) * 1000)
+
+
+def _each_child_frame(page, fn) -> None:
+    """Apply ``fn`` to every frame below the main one. A frame mid-navigation (or detached)
+    may refuse — the context init script covers it once it loads."""
+    for f in list(page.frames):
+        if f is page.main_frame:
+            continue
+        try:
+            fn(f)
+        except Exception:  # noqa: BLE001 — see above
+            pass
+
+
 # ── the shoot ──────────────────────────────────────────────────────────────────
 
 
 def locate(page, target: dict[str, Any]):
-    """A Playwright locator for a normalized target. Strict: >1 match is an error unless nth."""
+    """A Playwright locator for a normalized target. Strict: >1 match is an error unless nth.
+
+    ``page`` is the page or (for a ``frame:`` target) the Frame :func:`resolve_frame` found."""
     exact = target.get("exact")
     if "selector" in target:
         loc = page.locator(target["selector"])
@@ -375,7 +533,7 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
 
     factory = playwright_factory or _default_factory
     with factory() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(headless=True, args=launch_args(script))
         try:
             ctx_kw: dict[str, Any] = {
                 "viewport": dict(script["viewport"]),
@@ -482,29 +640,32 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
 
 def _do(page, context, step, timeout, out_dir: Path, marks, stills, t0) -> None:
     op = step["op"]
+    target = step.get("target")
+    # A frame target: find the frame first (within the step's timeout), then the element in it.
+    root, timeout = _in_frame(page, (target or {}).get("frame") or step.get("frame"), timeout)
     if op == "goto":
         page.goto(step["_url"], wait_until=step.get("wait_until", "load"), timeout=timeout)
     elif op in ("click", "hover"):
-        loc = locate(page, step["target"])
+        loc = locate(root, target)
         _move_to(page, loc, timeout)
         if op == "click":
             loc.click(timeout=timeout)
         else:
             loc.hover(timeout=timeout)
     elif op == "fill":
-        loc = locate(page, step["target"])
+        loc = locate(root, target)
         _move_to(page, loc, timeout)
         loc.fill(step["value"], timeout=timeout)
     elif op == "type":
-        if step.get("target"):
-            loc = locate(page, step["target"])
+        if target:
+            loc = locate(root, target)
             _move_to(page, loc, timeout)
             loc.click(timeout=timeout)
             _park_below(page, loc, timeout)
         page.keyboard.type(step["text"], delay=step["delay_ms"])
     elif op == "press":
-        if step.get("target"):
-            locate(page, step["target"]).press(step["key"], timeout=timeout)
+        if target:
+            locate(root, target).press(step["key"], timeout=timeout)
         else:
             page.keyboard.press(step["key"])
     elif op == "wait_for":
@@ -512,13 +673,21 @@ def _do(page, context, step, timeout, out_dir: Path, marks, stills, t0) -> None:
             page.wait_for_load_state("networkidle", timeout=timeout)
         elif "ms" in step:
             page.wait_for_timeout(min(step["ms"], timeout))
-        else:
-            locate(page, step["target"]).wait_for(state=step.get("state", "visible"), timeout=timeout)
+        elif target:
+            locate(root, target).wait_for(state=step.get("state", "visible"), timeout=timeout)
+        else:  # `wait_for: {frame: …}` — the frame is there; let its document parse
+            root.wait_for_load_state("domcontentloaded", timeout=timeout)
     elif op == "hold":
         page.wait_for_timeout(min(step["ms"], timeout))
     elif op == "scroll":
-        if step.get("target"):
-            locate(page, step["target"]).scroll_into_view_if_needed(timeout=timeout)
+        if target:
+            locate(root, target).scroll_into_view_if_needed(timeout=timeout)
+        elif root is not page:  # scroll INSIDE the frame — the wheel goes wherever the mouse is
+            root.evaluate(
+                "([x, y, s]) => window.scrollBy({left: x, top: y, behavior: s ? 'smooth' : 'instant'})",
+                [step.get("x", 0), step.get("y", 0), step.get("smooth", True)],
+            )
+            page.wait_for_timeout(700 if step.get("smooth", True) else 50)
         elif step.get("smooth", True):
             page.evaluate(
                 "([x, y]) => window.scrollBy({left: x, top: y, behavior: 'smooth'})",
@@ -534,8 +703,10 @@ def _do(page, context, step, timeout, out_dir: Path, marks, stills, t0) -> None:
         # Stills are reused as card images and posters — the pointer has no place in them.
         page.evaluate(_CURSOR_VIS, "hidden")
         try:
-            if step.get("target"):
-                locate(page, step["target"]).screenshot(path=str(path), timeout=timeout)
+            if target:
+                locate(root, target).screenshot(path=str(path), timeout=timeout)
+            elif root is not page:  # the whole iframe, as it sits in the page
+                root.frame_element().screenshot(path=str(path), timeout=timeout)
             else:
                 page.screenshot(path=str(path), full_page=bool(step.get("full_page")), timeout=timeout)
         finally:
@@ -544,10 +715,14 @@ def _do(page, context, step, timeout, out_dir: Path, marks, stills, t0) -> None:
     elif op == "mask":
         css = mask_css(step)
         page.add_style_tag(content=css)
+        # Frames already on the page get it now; frames (and navigations) still to come get it
+        # from the init script, which Playwright runs in EVERY frame.
+        _each_child_frame(page, lambda f: f.add_style_tag(content=css))
         context.add_init_script(mask_init_js(css))
     elif op == "redact":
         rules = redact_rules(step)
         page.evaluate(f"({REDACT_JS})", {"rules": rules})
+        _each_child_frame(page, lambda f: f.evaluate(f"({REDACT_JS})", {"rules": rules}))
         context.add_init_script(redact_init_js(rules))
     else:  # the host's validate() makes this unreachable
         raise ValueError(f"unknown step {op}")
