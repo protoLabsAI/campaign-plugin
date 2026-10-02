@@ -401,3 +401,12 @@ def test_frame_url_patterns_are_substrings_or_whole_url_globs():
 def test_the_pointer_follows_into_frames_instead_of_a_second_one_drawn_there():
     js = pw_worker.CURSOR_JS
     assert "window.top !== window" in js and "postMessage" in js and "stopImmediatePropagation" in js
+
+
+def test_the_shoot_forces_the_real_scale_factor_so_webgl_canvases_size_right(tmp_path):
+    pw = FakePlaywright()
+    shoot.run(_script(device_scale_factor=2), tmp_path / "a", playwright_factory=pw)
+    assert next(c for c in pw.calls if c[0] == "launch")[1]["args"] == ["--force-device-scale-factor=2"]
+    pw = FakePlaywright()
+    shoot.run(_script(device_scale_factor=1), tmp_path / "b", playwright_factory=pw)
+    assert next(c for c in pw.calls if c[0] == "launch")[1]["args"] == []

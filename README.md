@@ -148,7 +148,9 @@ nesting one level (`frame: {…, frame: {…}}`). The frame is waited for within
 Masks and redaction reach into every frame, including ones that load later — but not into text
 drawn on a `<canvas>` (xterm.js): keep secrets out of a canvas terminal in the shot itself
 (`cd /tmp`, a neutral `PS1`). The request fence applies to frame loads and to requests made
-from inside frames too.
+from inside frames too. The shoot browser launches with `--force-device-scale-factor` matching
+`device_scale_factor`: under DPR emulation alone, xterm.js's WebGL renderer (the Terminal view)
+sized its canvas at 1x and drew a blank terminal at dsf 2.
 Re-recording into an existing asset (`asset_id`) replaces that asset's previous take: its
 stills are removed (any the operator approved are kept).
 

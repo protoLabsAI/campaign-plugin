@@ -298,6 +298,21 @@ def video_size(script: dict[str, Any]) -> dict[str, int]:
     return {"width": int(vp["width"]) // 2 * 2, "height": int(vp["height"]) // 2 * 2}
 
 
+def launch_args(script: dict[str, Any]) -> list[str]:
+    """Chromium flags for a shoot.
+
+    ``--force-device-scale-factor`` matching the context's ``device_scale_factor``: Playwright's
+    DPR *emulation* sets ``window.devicePixelRatio`` but a ``ResizeObserver`` on
+    ``device-pixel-content-box`` still reports 1x sizes. xterm.js's WebGL renderer (the
+    protoAgent Terminal view) sizes its canvas from that box, so at dsf 2 its canvas came out
+    half the size of its text layer and drew NOTHING — "connected", blank terminal — until a
+    later redraw (measured: Chromium headless shell 1243 / Playwright 1.63; recordVideo and the
+    iframe were not factors; GPU/swiftshader flags didn't help). Forcing the real scale factor
+    makes both agree."""
+    dsf = float(script.get("device_scale_factor") or 1)
+    return [] if dsf == 1 else [f"--force-device-scale-factor={dsf:g}"]
+
+
 def step_timeout_for(step: dict[str, Any], step_timeout_ms: float, remaining_ms: float) -> float:
     """The ms one step may wait: its own ``timeout_ms`` (validated ≤ the per-step max by the
     host), else the script-wide ``step_timeout_ms`` — always bounded by what is left of the
@@ -518,7 +533,7 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
 
     factory = playwright_factory or _default_factory
     with factory() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(headless=True, args=launch_args(script))
         try:
             ctx_kw: dict[str, Any] = {
                 "viewport": dict(script["viewport"]),

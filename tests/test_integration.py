@@ -425,3 +425,28 @@ def test_real_take_waits_types_masks_and_shoots_inside_an_iframe(frame_site, tmp
                                {"screenshot": {"name": "bare", "frame": view}}]})  # fmt: skip
     px = _png_pixels(Path(shoot.run(bare, tmp_path / "bare")["screenshots"]["bare"]).read_bytes())
     assert sum(1 for r, g, b in px if r > 200 and g < 60 and b < 60) > 2 * 120 * 60 * 0.9
+
+
+DPR_PAGE = """<!doctype html><html><body><div id="box" style="width:100px;height:50px"></div><p id="out"></p>
+<script>
+  new ResizeObserver(([e]) => { const s = e.devicePixelContentBoxSize[0];
+    document.getElementById('out').textContent = 'dpcb ' + s.inlineSize + 'x' + s.blockSize;
+  }).observe(document.getElementById('box'), {box: 'device-pixel-content-box'});
+</script></body></html>"""
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_device_pixel_content_box_matches_the_scale_factor(site, tmp_path):
+    """xterm's WebGL renderer sizes its canvas from device-pixel-content-box; under DPR
+    emulation alone that box reports 1x and the terminal draws blank (see launch_args)."""
+    (Path(tmp_path) / "site" / "dpr.html").write_text(DPR_PAGE, encoding="utf-8")
+    script = validate(
+        {
+            "base_url": site,
+            "viewport": {"width": 320, "height": 200},
+            "device_scale_factor": 2,
+            "steps": [{"goto": "/dpr.html"}, {"wait_for": {"text": "dpcb 200x100", "timeout_ms": 5000}}],
+        }
+    )
+    assert shoot.run(script, tmp_path / "take")["error"] == ""
