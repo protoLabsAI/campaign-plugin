@@ -75,7 +75,8 @@ a selected tab, a dismissed tour) from ``localStorage``/``sessionStorage`` while
 A string value is stored as-is; anything else is JSON-serialized. Written by a context init
 script — before ANY page script — in top-level documents on that origin only (every load
 there starts from the seed). ``init_script: "<js>"`` is the escape hatch for other set-up: run
-before page scripts in every document on the base_url's origin only, inside a function (assign
+before page scripts in every document on the base_url's origin only (same-origin child frames,
+about:blank/srcdoc ones included), inside a function (assign
 ``window.x`` for a global), ≤ 64 KB. It is operator/agent-authored code, trusted like the rest
 of the script, and runs only in the recording browser (which is fenced off this plugin's API).
 
@@ -519,8 +520,10 @@ def _storage(raw: Any, base: str, problems: list[str]) -> dict[str, Any] | None:
         if not org:
             problems.append(f"storage.origin {o!r} must be an http(s) origin like http://localhost:7871")
             return None
-        rest = o.strip()[len(org) :] if o.strip().lower().startswith(org) else ""
-        if rest not in ("", "/"):
+        from urllib.parse import urlsplit
+
+        u = urlsplit(o.strip())
+        if u.path not in ("", "/") or u.query or u.fragment or u.username or u.password:
             problems.append(f"storage.origin {o!r} must be an origin only — no path, query or fragment")
             return None
     else:

@@ -130,8 +130,8 @@ storage:
   **Upload folders** (`upload_dirs`) setting. It's empty by default, so uploads are refused
   until the operator sets one — ask them for a demo-assets folder and put the files there.
   You can't change that setting yourself.
-- Refused even inside an allowed folder: anything that isn't a regular file, over 50 MB
-  (100 MB per step), key/credential files (`.env`, `secrets.yaml`, `id_rsa`, `*.pem`, …),
+- Refused even inside an allowed folder: anything that isn't a regular file, hardlinked files,
+  over 50 MB (100 MB per step), key/credential files (`.env`, `secrets.yaml`, `id_rsa`, `*.pem`, …),
   credential dirs (`.ssh`, `.aws`, …), and anything in the agent's home (`~/.protoagent`)
   except this plugin's own media. Upload only demo files made for the shot — never a real
   customer file.

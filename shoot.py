@@ -75,16 +75,43 @@ FENCE_PATTERNS = [r"/api/plugins/campaign(?:/|$)"]
 # * never the agent's secrets, even inside an allowlisted dir: credential dirs (.ssh, .aws,
 #   .gnupg, …), key/credential file names (secrets.yaml, .env, id_rsa, *.pem, …), and anything
 #   under the protoAgent home (~/.protoagent, $PROTOAGENT_HOME) except this plugin's own media;
-# * an allowlist entry that is the filesystem root or the home dir itself is ignored — too broad.
+# * an allowlist entry that is the filesystem root, the home dir or any parent of it, or the
+#   agent's home (or a parent of it) is ignored — too broad;
+# * hardlinked files (link count > 1) are refused — a hardlink dodges every name check.
+#
+# Deny checks are CASE-INSENSITIVE and also match by inode (macOS/Windows filesystems are
+# case-insensitive, and ``resolve()`` doesn't fix case: ``~/.PROTOAGENT`` IS ``~/.protoagent``);
+# the allowlist and the media exemption compare exactly, so a case variant fails CLOSED there.
+#
+# The name lists catch common key/credential files, not every secret on a disk: the real
+# fence is the allowlist — point upload_dirs at a folder of demo files, never at one the
+# agent can write into (it could copy anything it can read there).
 MAX_UPLOAD_BYTES = 50 * 1000 * 1000
 MAX_UPLOAD_TOTAL_BYTES = 100 * 1000 * 1000
 _UPLOAD_DIRS: tuple[str, ...] = ()
 SECRET_DIR_NAMES = frozenset(
-    {".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".password-store", ".gcloud", "gcloud", "keychains"}
+    {
+        ".ssh",
+        ".gnupg",
+        ".aws",
+        ".azure",
+        ".kube",
+        ".docker",
+        ".password-store",
+        ".gcloud",
+        "gcloud",
+        "keychains",
+        ".mozilla",
+        "google-chrome",
+        "chromium",
+    }
 )
+# Adjacent directory pairs that hold credentials (lowercased): gh's token, browser profiles.
+SECRET_DIR_PAIRS = frozenset({(".config", "gh"), ("application support", "google"), ("application support", "firefox")})
 SECRET_FILE_RE = re.compile(
     r"^(?:secrets?\.(?:ya?ml|json|toml)|\.env(?:\..*)?|\.netrc|_netrc|\.git-credentials|\.pgpass|\.npmrc|\.pypirc"
-    r"|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?|credentials(?:\..*)?|auth\.json|.*\.(?:pem|key|p12|pfx|kdbx|keychain-db))$",
+    r"|id_(?:rsa|dsa|ecdsa|ed25519)(?:[._-].*)?|\.?credentials(?:\..*)?|auth\.json|\.htpasswd|\.s3cfg|\.boto"
+    r"|cookies|login data|hosts\.ya?ml|.*\.(?:pem|key|p12|pfx|kdbx|keychain-db|keystore|jks))$",
     re.IGNORECASE,
 )
 
@@ -122,7 +149,25 @@ def _protoagent_homes() -> list[Path]:
 
 
 def _within(path: Path, root: Path) -> bool:
+    """Exact containment — for the allowlist and the media exemption (a case variant fails closed)."""
     return path == root or root in path.parents
+
+
+def _ident(p: Path) -> tuple[int, int] | None:
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _within_any_case(path: Path, root: Path) -> bool:
+    """Containment for DENY checks: case-insensitive, and by inode (same dir, any spelling)."""
+    a, b = [x.casefold() for x in path.parts], [x.casefold() for x in root.parts]
+    if a[: len(b)] == b:
+        return True
+    rid = _ident(root)
+    return rid is not None and any(_ident(q) == rid for q in (path, *path.parents))
 
 
 def upload_roots() -> tuple[list[Path], list[str]]:
@@ -130,6 +175,7 @@ def upload_roots() -> tuple[list[Path], list[str]]:
     roots: list[Path] = []
     notes: list[str] = []
     home = Path.home().resolve()
+    agent_homes = _protoagent_homes()
     for d in _UPLOAD_DIRS:
         p = Path(d).expanduser()
         if not p.is_absolute():
@@ -142,8 +188,11 @@ def upload_roots() -> tuple[list[Path], list[str]]:
             continue
         if not r.is_dir():
             notes.append(f"upload_dirs entry {d!r} is not a directory — ignored")
-        elif r == Path(r.anchor) or r == home:
-            notes.append(f"upload_dirs entry {d!r} is the filesystem root or your home dir — too broad, ignored")
+        elif r == Path(r.anchor) or any(_within_any_case(h, r) for h in (home, *agent_homes)):
+            notes.append(
+                f"upload_dirs entry {d!r} is the filesystem root, your home dir (or a parent of it), or the "
+                "agent's home — too broad, ignored"
+            )
         else:
             roots.append(r)
     return roots, notes
@@ -163,6 +212,8 @@ def upload_problem(raw: str, roots: list[Path]) -> tuple[str | None, str, int]:
         return f"{raw!r} doesn't exist", "", 0
     if not stat.S_ISREG(st.st_mode):
         return f"{raw!r} is not a regular file", "", 0
+    if st.st_nlink > 1:
+        return f"{raw!r} is hardlinked elsewhere — copy it instead (a hardlink dodges the name checks)", "", 0
     # Symlinks are resolved FIRST, so a link inside an allowlisted dir can't point out of it.
     if not any(_within(real, r) for r in roots):
         return (
@@ -171,9 +222,9 @@ def upload_problem(raw: str, roots: list[Path]) -> tuple[str | None, str, int]:
             "",
             0,
         )
-    parts = [x.lower() for x in real.parts]
-    gh_config = any(a == ".config" and b == "gh" for a, b in zip(parts, parts[1:]))
-    if gh_config or any(x in SECRET_DIR_NAMES for x in parts):
+    parts = [x.casefold() for x in (*p.parts, *real.parts)]
+    pairs = set(zip(parts, parts[1:]))
+    if pairs & SECRET_DIR_PAIRS or any(x in SECRET_DIR_NAMES for x in parts):
         return f"{raw!r} is inside a credentials directory — never uploaded", "", 0
     if SECRET_FILE_RE.match(real.name) or SECRET_FILE_RE.match(p.name):
         return f"{raw!r} looks like a key or credentials file — never uploaded", "", 0
@@ -184,7 +235,7 @@ def upload_problem(raw: str, roots: list[Path]) -> tuple[str | None, str, int]:
     except Exception:  # noqa: BLE001 — no media root → nothing under the agent home is exempt
         own_media = None
     for h in _protoagent_homes():
-        if _within(real, h) and not (own_media and _within(real, own_media)):
+        if _within_any_case(real, h) and not (own_media and _within(real, own_media)):
             return f"{raw!r} is inside the agent's home ({h}) — never uploaded (only this plugin's own media is)", "", 0
     if st.st_size > MAX_UPLOAD_BYTES:
         return f"{raw!r} is {st.st_size} bytes, over the {MAX_UPLOAD_BYTES // 1_000_000} MB per-file max", "", 0

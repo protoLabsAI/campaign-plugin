@@ -661,9 +661,17 @@ def upload(page, root, target: dict[str, Any], files: list[str], timeout: float)
     resolved symlinks; this re-checks only that each is still a regular file."""
     if not files:
         raise ValueError("upload step carries no checked files (the host's upload fence didn't run)")
+    import stat
+
     for f in files:
-        if not Path(f).is_file():
-            raise FileNotFoundError(f"{f} is no longer a regular file")
+        # The host resolved symlinks and checked the link count; re-check WITHOUT following a
+        # link, so a file swapped for a symlink (or a hardlink) since then isn't uploaded.
+        try:
+            st = os.lstat(f)
+        except OSError as e:
+            raise FileNotFoundError(f"{f} is gone since the host checked it") from e
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            raise ValueError(f"{f} changed since the host checked it (not a plain, unlinked regular file) — refusing")
     started = time.monotonic()
     loc = locate(root, target)
     loc.wait_for(state="attached", timeout=timeout)

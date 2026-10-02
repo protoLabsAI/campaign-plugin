@@ -190,12 +190,16 @@ pages and frames. Neither is a place for a credential — the script is stored i
 target (a button, a drop zone) is clicked and the file chooser it opens gets them
 (`expect_file_chooser`). The host checks every path at shoot time, symlinks resolved, before
 the browser starts: it must be a regular file under the **`upload_dirs`** setting (empty — the
-default — refuses every upload; the filesystem root or the whole home dir is ignored as too
-broad), ≤ 50 MB (100 MB per step), and never a key/credential file (`.env*`, `secrets.yaml`,
-`id_rsa`, `*.pem`, `.netrc`, …), inside a credential dir (`.ssh`, `.aws`, `.gnupg`,
-`.config/gh`, …), or inside the agent's home (`~/.protoagent`, `$PROTOAGENT_HOME`) other than
-this plugin's own media. `upload_dirs` is marked `spawns: true`, so the agent's `set_config`
-can't widen it.
+default — refuses every upload; the filesystem root, the home dir or any parent of it, and the
+agent's home are ignored as too broad), not hardlinked, ≤ 50 MB (100 MB per step), never a
+common key/credential file name (`.env*`, `secrets.yaml`, `.credentials.json`, `id_rsa*`,
+`*.pem`, `.netrc`, browser `Cookies`, …), never inside a credential dir (`.ssh`, `.aws`,
+`.gnupg`, `.config/gh`, browser profiles, …), and never inside the agent's home
+(`~/.protoagent`, `$PROTOAGENT_HOME`; matched case-insensitively and by inode) other than this
+plugin's own media. The worker re-checks each file without following links just before the
+upload. The name lists are a backstop, not the fence: the fence is the allowlist, so point
+`upload_dirs` at a folder of demo files the agent can't write into. `upload_dirs` is marked
+`spawns: true`, so the agent's `set_config` can't widen it.
 
 Re-recording into an existing asset (`asset_id`) replaces that asset's previous take: its
 stills are removed (any the operator approved are kept).

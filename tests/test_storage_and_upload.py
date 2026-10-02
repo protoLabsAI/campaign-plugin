@@ -163,6 +163,10 @@ def test_an_allowlisted_file_is_resolved_into_the_job(uploads, tmp_path):
         (lambda d, t: str(d / "deploy.pem"), "key or credentials file"),
         (lambda d, t: str(d / "id_ed25519"), "key or credentials file"),
         (lambda d, t: str(d / ".ssh" / "notes.txt"), "credentials directory"),
+        (lambda d, t: str(d / ".credentials.json"), "key or credentials file"),
+        (lambda d, t: str(d / "id_ed25519_github"), "key or credentials file"),
+        (lambda d, t: str(d / "Cookies"), "key or credentials file"),
+        (lambda d, t: str(d / "hard.png"), "hardlinked"),
         (lambda d, t: str(d / "big.bin"), "per-file max"),
     ],
 )
@@ -171,7 +175,17 @@ def test_the_upload_fence(uploads, tmp_path, monkeypatch, make, msg):
     (uploads / "sub").mkdir()
     (uploads / "x").mkdir()
     os.symlink(tmp_path / "outside.png", uploads / "link.png")
-    for name in ("secrets.yaml", ".env.local", "deploy.pem", "id_ed25519"):
+    (tmp_path / "other.png").write_bytes(b"x")
+    os.link(tmp_path / "other.png", uploads / "hard.png")
+    for name in (
+        "secrets.yaml",
+        ".env.local",
+        "deploy.pem",
+        "id_ed25519",
+        ".credentials.json",
+        "id_ed25519_github",
+        "Cookies",
+    ):
         (uploads / name).write_text("s")
     (uploads / ".ssh").mkdir()
     (uploads / ".ssh" / "notes.txt").write_text("s")
@@ -191,6 +205,62 @@ def test_the_agents_home_is_refused_even_when_allowlisted(tmp_path, monkeypatch)
     with pytest.raises(shoot.ShootError) as e:
         shoot.build_job(_upload_script(str(home / "config" / "notes.png")), tmp_path / "t")
     assert "inside the agent's home" in str(e.value)
+
+
+def test_the_agents_home_is_refused_in_any_letter_case(tmp_path, monkeypatch):
+    """macOS/Windows: ~/.PROTOAGENT is ~/.protoagent, and resolve() doesn't fix the case."""
+    home = tmp_path / "agent-home"
+    (home / "db").mkdir(parents=True)
+    (home / "db" / "chat.png").write_bytes(b"x")
+    monkeypatch.setenv("PROTOAGENT_HOME", str(home))
+    # The operator allowlisted a folder spelled in another case: it isn't a parent of the
+    # agent home (so not "too broad"), and the exact allowlist match passes — the home check
+    # is what has to catch it.
+    shoot.configure("", str(tmp_path / "AGENT-HOME" / "db"))
+    upper = tmp_path / "AGENT-HOME" / "db" / "chat.png"
+    if not upper.exists():
+        pytest.skip("case-sensitive filesystem — the case variant is a different (missing) path")
+    roots, _ = shoot.upload_roots()
+    problem, _, _ = shoot.upload_problem(str(upper), roots)
+    assert problem and "inside the agent's home" in problem
+
+
+def test_deny_containment_matches_by_inode_not_just_spelling(tmp_path):
+    """Another spelling of the same directory (a symlinked alias, a case variant) is the same place."""
+    home = tmp_path / "agent-home"
+    home.mkdir()
+    (home / "a.png").write_bytes(b"x")
+    os.symlink(home, tmp_path / "alias")
+    assert shoot._within_any_case(home / "a.png", tmp_path / "alias")  # unresolved alias root: by inode
+    assert shoot._within_any_case(Path(str(home).upper()) / "a.png", home)  # by casefold
+    assert not shoot._within_any_case(tmp_path / "elsewhere.png", home)
+
+
+def test_parents_of_home_and_the_agent_home_are_too_broad(tmp_path, monkeypatch):
+    agent = tmp_path / "agent"
+    agent.mkdir()
+    monkeypatch.setenv("PROTOAGENT_HOME", str(agent))
+    shoot.configure("", f"{Path.home().parent}, {agent}, {tmp_path}")
+    roots, notes = shoot.upload_roots()
+    assert roots == [], roots  # tmp_path is a parent of the agent home
+    assert len(notes) == 3 and all("too broad" in n for n in notes)
+
+
+def test_storage_origin_may_spell_out_the_default_port():
+    s = _script(storage={"origin": "http://localhost:80", "local": {"k": "v"}})
+    assert s["storage"]["origin"] == "http://localhost"
+    assert "origin only" in _problems(storage={"origin": "http://x.test/?a=1", "local": {"k": "v"}})
+
+
+def test_the_worker_refuses_a_file_swapped_for_a_symlink_after_the_check(uploads, tmp_path):
+    job = shoot.build_job(_upload_script(str(uploads / "logo.png")), tmp_path / "t")
+    f = Path(job["script"]["steps"][1]["_files"][0])
+    secret = tmp_path / "secret.txt"
+    secret.write_text("s")
+    f.unlink()
+    os.symlink(secret, f)
+    rep = pw_worker.run_job(json.loads(json.dumps(job)), FakePlaywright(file_inputs={"input[type=file]"}))
+    assert not rep["ok"] and "changed since the host checked it" in rep["error"]
 
 
 def test_the_plugins_own_media_is_exempt_from_the_agent_home_rule(tmp_path, monkeypatch, isolated_data_dir):
