@@ -31,7 +31,7 @@ from .paths import data_dir
 DB_NAME = "campaign.db"
 
 CAMPAIGN_STATUSES = ("draft", "active", "launched", "done", "paused", "archived")
-ASSET_KINDS = ("clip", "gif", "still", "card", "copy_ref")
+ASSET_KINDS = ("clip", "gif", "still", "card", "copy_ref", "montage")
 ASSET_STATUSES = ("planned", "scripted", "captured", "rendered", "ready_for_review", "approved", "rejected")
 AGENT_ASSET_STATUSES = ASSET_STATUSES[:5]
 OWNERS = ("agent", "operator")
@@ -503,6 +503,7 @@ def review_gate(asset: dict[str, Any]) -> list[str]:
             width=asset.get("width") or None,
             height=asset.get("height") or None,
             fmt=f.suffix.lstrip("."),
+            duration=asset.get("duration_s") or None,
         )
     return problems
 

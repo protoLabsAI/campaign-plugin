@@ -9,7 +9,20 @@ def test_every_default_row_has_a_source_url_and_an_as_of_date():
     for key, row in limits.DEFAULT_LIMITS.items():
         assert row["source"].startswith("https://"), key
         assert len(row["as_of"]) == 10, key
-        assert row.get("max_bytes"), key
+        assert any(row.get(k) for k in ("max_bytes", "max_duration_s", "max_width")), f"{key} states no hard number"
+
+
+def test_video_platform_rows_check_duration_dimensions_and_orientation():
+    assert limits.check("x_video", size=50_000_000, width=1920, height=1080, fmt="mp4", duration=60) == []
+    assert any("140s maximum" in p for p in limits.check("x_video", size=1, duration=150))
+    assert any("0.5s minimum" in p for p in limits.check("x_video", size=1, duration=0.2))
+    assert any("1280px maximum" in p for p in limits.check("x_api_video", size=1, width=1920, height=1080))
+    assert limits.check("youtube_shorts", size=1, width=1080, height=1920, duration=45) == []
+    assert limits.check("youtube_shorts", size=1, width=1080, height=1080, duration=45) == []
+    probs = limits.check("youtube_shorts", size=1, width=1920, height=1080, duration=200)
+    assert any("landscape" in p for p in probs) and any("180s maximum" in p for p in probs)
+    assert limits.orientation(1080, 1920) == "vertical" and limits.orientation(10, 10) == "square"
+    assert "`x_video`" in limits.brief() and "0.5–140s" in limits.brief()
 
 
 def test_documented_github_numbers():

@@ -20,7 +20,8 @@ from typing import Any
 
 MB = 1_000_000
 
-# id → {label, kinds, formats, max_bytes, min_width, min_height, width, height, source, as_of, note}
+# id → {label, kinds, formats, max_bytes, min_width, min_height, width, height,
+#       min_duration_s, max_duration_s, orientations, source, as_of, note}
 DEFAULT_LIMITS: dict[str, dict[str, Any]] = {
     "github_attachment_image": {
         "label": "GitHub issue/PR/README attachment — image or GIF",
@@ -33,7 +34,7 @@ DEFAULT_LIMITS: dict[str, dict[str, Any]] = {
     },
     "github_attachment_video_free": {
         "label": "GitHub attachment — video, free plan",
-        "kinds": ["clip"],
+        "kinds": ["clip", "montage"],
         "formats": ["mp4", "mov", "webm"],
         "max_bytes": 10 * MB,
         "source": "https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/attaching-files",
@@ -42,7 +43,7 @@ DEFAULT_LIMITS: dict[str, dict[str, Any]] = {
     },
     "github_attachment_video_paid": {
         "label": "GitHub attachment — video, paid plan",
-        "kinds": ["clip"],
+        "kinds": ["clip", "montage"],
         "formats": ["mp4", "mov", "webm"],
         "max_bytes": 100 * MB,
         "source": "https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/attaching-files",
@@ -61,6 +62,60 @@ DEFAULT_LIMITS: dict[str, dict[str, Any]] = {
         "source": "https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/customizing-your-repositorys-social-media-preview",
         "as_of": "2026-10-01",
         "note": "Under 1 MB; at least 640x320; 1280x640 recommended for best display.",
+    },
+    # ── video platforms a launch montage ships to ──
+    "x_video": {
+        "label": "X (Twitter) post video — non-Premium account, web/app upload",
+        "kinds": ["clip", "montage"],
+        "formats": ["mp4", "mov"],
+        "max_bytes": 512 * MB,
+        "min_duration_s": 0.5,
+        "max_duration_s": 140,
+        "source": "https://help.x.com/en/using-x/x-videos",
+        "as_of": "2026-10-01",
+        "note": "2 min 20 s and 512 MB for accounts without Premium (Premium uploads run longer). The X "
+        "API's own media rules differ (docs.x.com/x-api/media/quickstart/best-practices: ≤1280×1024, "
+        "yuv420p, square pixels, ≤60 fps) — use x_api_video when posting through the API.",
+    },
+    "x_api_video": {
+        "label": "X API media upload — video (posting through the API)",
+        "kinds": ["clip", "montage"],
+        "formats": ["mp4", "mov"],
+        "max_bytes": 8000 * MB,
+        "max_width": 1280,
+        "max_height": 1024,
+        "min_duration_s": 0.5,
+        "max_duration_s": 1200,
+        "source": "https://docs.x.com/x-api/media/quickstart/best-practices",
+        "as_of": "2026-10-01",
+        "note": "8 GB, 32x32 to 1280x1024, ≤60 fps, YUV 4:2:0, 1:1 pixel aspect, 0.5 s–20 min on a default "
+        "account. Render a 1280×720 / 720×1280 / 720×720 size for it.",
+    },
+    "linkedin_video": {
+        "label": "LinkedIn feed video",
+        "kinds": ["clip", "montage"],
+        "formats": ["mp4", "mov", "webm"],
+        "max_bytes": 5000 * MB,
+        "min_width": 256,
+        "min_height": 144,
+        "max_width": 4096,
+        "max_height": 2304,
+        "min_duration_s": 3,
+        "max_duration_s": 900,
+        "source": "https://www.linkedin.com/help/linkedin/answer/a548372",
+        "as_of": "2026-10-01",
+        "note": "75 KB–5 GB, 3 s–15 min (2 s on mobile), 256x144–4096x2304, 10–60 fps.",
+    },
+    "youtube_shorts": {
+        "label": "YouTube Shorts — what YouTube classifies as a Short",
+        "kinds": ["clip", "montage"],
+        "formats": ["mp4", "mov", "webm"],
+        "max_duration_s": 180,
+        "orientations": ["vertical", "square"],
+        "source": "https://support.google.com/youtube/answer/15424877",
+        "as_of": "2026-10-01",
+        "note": "Square or vertical and up to 3 minutes is categorised as a Short; a 16:9 upload is "
+        "long-form however short it is.",
     },
 }
 
@@ -116,7 +171,13 @@ def get(limit_id: str) -> dict[str, Any] | None:
 
 
 def check(
-    limit_id: str, *, size: int | None, width: int | None = None, height: int | None = None, fmt: str = ""
+    limit_id: str,
+    *,
+    size: int | None,
+    width: int | None = None,
+    height: int | None = None,
+    fmt: str = "",
+    duration: float | None = None,
 ) -> list[str]:
     """Violations of ``limit_id`` for a file with these properties ([] = within limits)."""
     row = get(limit_id)
@@ -132,7 +193,26 @@ def check(
         problems.append(f"width {width}px is under the {row['min_width']}px minimum")
     if height is not None and row.get("min_height") and int(height) < int(row["min_height"]):
         problems.append(f"height {height}px is under the {row['min_height']}px minimum")
+    if width is not None and row.get("max_width") and int(width) > int(row["max_width"]):
+        problems.append(f"width {width}px is over the {row['max_width']}px maximum ({row['label']})")
+    if height is not None and row.get("max_height") and int(height) > int(row["max_height"]):
+        problems.append(f"height {height}px is over the {row['max_height']}px maximum ({row['label']})")
+    if duration is not None and row.get("max_duration_s") and float(duration) > float(row["max_duration_s"]):
+        problems.append(f"{duration:.1f}s is over the {float(row['max_duration_s']):g}s maximum ({row['label']})")
+    if duration is not None and row.get("min_duration_s") and float(duration) < float(row["min_duration_s"]):
+        problems.append(f"{duration:.1f}s is under the {float(row['min_duration_s']):g}s minimum ({row['label']})")
+    if width and height and row.get("orientations"):
+        shape = orientation(int(width), int(height))
+        if shape not in row["orientations"]:
+            problems.append(
+                f"a {shape} {width}×{height} video isn't accepted ({' or '.join(row['orientations'])} only)"
+            )
     return problems
+
+
+def orientation(width: int, height: int) -> str:
+    """landscape | vertical | square."""
+    return "square" if width == height else ("vertical" if height > width else "landscape")
 
 
 def human_bytes(n: int | float | None) -> str:
@@ -151,15 +231,22 @@ def brief() -> str:
     lines = [
         "Hard limits enforced by Campaign Studio (decimal MB; soft norms are NOT here — research and date those in the plan):",
         "",
-        "| id | limit | max size | dims | source | as of |",
+        "| id | limit | max size | dims / length | source | as of |",
         "|---|---|---|---|---|---|",
     ]
     for key, row in table().items():
         dims = ""
         if row.get("min_width"):
             dims = f"≥{row['min_width']}×{row.get('min_height', '?')}"
+        if row.get("max_width"):
+            dims += f" ≤{row['max_width']}×{row.get('max_height', '?')}"
         if row.get("width"):
             dims += f" (rec. {row['width']}×{row.get('height', '?')})"
+        if row.get("orientations"):
+            dims += f" {'/'.join(row['orientations'])} only"
+        if row.get("max_duration_s"):
+            lo = f"{float(row['min_duration_s']):g}–" if row.get("min_duration_s") else "≤"
+            dims += f" {lo}{float(row['max_duration_s']):g}s"
         label = row.get("label", key) + (" *(override)*" if row.get("overridden") else "")
         lines.append(
             f"| `{key}` | {label} | {human_bytes(row.get('max_bytes')) if row.get('max_bytes') else '—'} | "

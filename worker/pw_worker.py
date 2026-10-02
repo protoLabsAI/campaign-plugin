@@ -22,7 +22,8 @@ Job (``v: 1``) — secrets travel ONLY in this stdin payload, never argv or a fi
      "fence": {"block_paths": ["<regex, case-insensitive, on every normalized form of the path>", ...]},   # REQUIRED
      # shoot: "script": {validated script, goto steps carry "_url"}, "out_dir": "...",
      #        "bearer": "<token or ''>"
-     # card:  "html": "...", "out_path": "...png", "width": W, "height": H, "max_bytes": N|null}
+     # card:  "html": "...", "out_path": "...png", "width": W, "height": H, "max_bytes": N|null,
+     #        "transparent": bool (optional — PNG with alpha, for a montage's lower-third overlay)}
 
 Report: ``{"ok": bool, "kind": ..., "result": {...}, "error": "..."}``. The bearer is scrubbed
 from every string in it.
@@ -872,6 +873,7 @@ def run_card(job: dict[str, Any], playwright_factory: Callable | None = None) ->
     out_path.parent.mkdir(parents=True, exist_ok=True)
     w, h = int(job["width"]), int(job["height"])
     max_bytes = int(job["max_bytes"]) if job.get("max_bytes") else None
+    transparent = bool(job.get("transparent"))
     attempts: list[dict[str, Any]] = []
     factory = playwright_factory or _default_factory
     with factory() as pw:
@@ -887,7 +889,7 @@ def run_card(job: dict[str, Any], playwright_factory: Callable | None = None) ->
                 page.evaluate("document.fonts && document.fonts.ready.then(() => true)")
             except Exception:  # noqa: BLE001 — fonts.ready is a nicety
                 pass
-            page.screenshot(path=str(out_path), type="png")
+            page.screenshot(path=str(out_path), type="png", omit_background=transparent)
             final = out_path
             attempts.append({"format": "png", "size_bytes": out_path.stat().st_size})
             if max_bytes and out_path.stat().st_size > max_bytes:

@@ -28,6 +28,8 @@ PRODUCER_TOOLS = [
     "campaign_render",
     "campaign_card",
     "campaign_view",
+    "campaign_montage",
+    "campaign_storyboard",
     # core agent_browser plugin — explore the target before scripting it
     "browser_open",
     "browser_snapshot",
@@ -61,6 +63,10 @@ WORKFLOW for each asset you're given (by id, or 'everything planned and owned by
 7. asset-review self-check (campaign_view every rendered file and its cut points), then
    campaign_asset_update(id, status='ready_for_review'). If the gate refuses, fix the cause —
    never work around a hard limit.
+8. A MONTAGE (montage-editing skill): every beat is its own take at a 1920x1080 viewport, device
+   scale 1, full frame, each in a different app theme. campaign_storyboard the sequence and LOOK at
+   it; fix pacing/colours/focus; then campaign_montage, and campaign_view it around every
+   transition before marking it ready_for_review.
 
 Report: each asset id you produced, its file path, size, dimensions, duration, and anything the
 operator must decide. Never state a number (views, conversions, 'performs best') you did not measure."""

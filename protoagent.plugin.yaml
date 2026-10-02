@@ -1,14 +1,16 @@
 id: campaign
 name: Campaign Studio
-version: 0.2.5
+version: 0.3.0
 description: >-
   Campaign plans and deterministic, repeatable media production for launching ANY app or
   product. Plans hold the goal and its math, lanes, a shot list of assets (who records what),
   milestones, and the decisions only the operator can make. Declarative shot scripts drive
   headless Chromium (Playwright) to record takes with named marks and stills; ffmpeg cuts
   them into H.264 mp4s, palette-optimised GIFs and posters held under documented hard size
-  limits; branded HTML cards render to PNG (social preview, 16:9, square, end slide). Adds a
-  background producer subagent, three skills, and an asset gallery for approving what ships.
+  limits; branded HTML cards render to PNG (social preview, 16:9, square, end slide); montages
+  cut many short themed beats + tagline/end cards into one launch video with colour-wipe
+  transitions (landscape, vertical, square), reviewed first as a storyboard. Adds a background
+  producer subagent, four skills, and an asset gallery for approving what ships.
   Draft-only: it never posts, holds no platform credentials, and only the operator approves.
   Copy is Social Studio's job and browsing is agent_browser's — referenced by name, never
   imported.

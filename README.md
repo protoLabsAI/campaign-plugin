@@ -15,6 +15,11 @@ product: the planning + production half of a "Brand & Launch" agent.
   its **hard** limit — and refusing to call it ready if it still doesn't.
 - **Cards** — branded HTML templates rendered to PNG: `og-1280x640` (kept under GitHub's 1 MB
   social-preview limit), `x-card-1600x900`, `square-1080`, `title-slide-1920x1080`.
+- **Montages** — many short beats (each recorded in a different app theme) + tagline cards +
+  an end card, cut into one launch video: every clip normalised to one canvas (1920×1080
+  canonical, 1080×1920, 1080×1080), xfade transitions plus a signature **colour wipe** in the
+  next beat's theme colour, brand-font lower thirds, H.264 under a size/length limit, a poster,
+  and an optional GIF. `campaign_storyboard` reviews the cut as a contact sheet first.
 - **Gallery** — one console view, for browsing: every clip/GIF/still/card of a campaign,
   playable, with status, size, dimensions, and the operator-only **Approve / Reject** buttons.
 
@@ -58,8 +63,8 @@ loads nothing from the network at all.
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.2.5`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.2.5`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.3.0`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.3.0`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —
@@ -90,10 +95,12 @@ loads nothing from the network at all.
 | `campaign_render` | mp4 / gif / poster outputs via ffmpeg, under a hard limit |
 | `campaign_card` | Render a branded card template to PNG |
 | `campaign_view` | LOOK at a still/card/poster, or frames of a clip (evenly spaced, or either side of a mark/cut), as images the model sees — downscaled JPEGs, ≤ 3 per call, contained to the campaign's dir. Needs a core with `graph.sdk.multimodal_tool_result` and a vision model; otherwise it says it couldn't show them |
+| `campaign_montage` | Cut an ordered `sequence` of clips + cards into one mp4 (see **Montages**) and register it as a `montage` asset with its poster (+ GIF) |
+| `campaign_storyboard` | The montage's contact sheet — one frame per item, a swatch per transition — returned as an image, plus the cut sheet |
 | `campaign_limits` | The hard-limit table, each row with its source URL and as-of date |
 | `campaign_setup` | What's installed and how to fix what isn't |
 
-Plus: skills `campaign-planning`, `shot-scripting`, `asset-review`; the `campaign_producer`
+Plus: skills `campaign-planning`, `shot-scripting`, `asset-review`, `montage-editing`; the `campaign_producer`
 subagent (allowlist: `campaign_*`, `browser_open/snapshot/screenshot/get_text`,
 `social_brand_kit`, `show_artifact`).
 
@@ -132,10 +139,6 @@ Targets prefer accessible roles and text over CSS. Every waiting step gives up a
 `step_timeout_ms` (default 15000); a step that waits on slow real work sets its own
 `timeout_ms` (max 180000 — more is a validation error, never a silent clamp), all bounded by
 `total_timeout_s` (default 300, max 900). Unknown step options are validation errors.
-A target can add `exact: true` (whole-string match) and `nth` (0-based, or `first`/`last`).
-Several matches: a `wait_for` is satisfied when ANY match is visible (text shown twice is fine
-to wait on); an action (click/hover/fill/type/press/scroll/element screenshot) on an ambiguous
-target fails the step with the first matches listed and how to pick one.
 `network_idle` never settles on an app that holds SSE/websockets open — wait for an element. Tokens never go in a script: use
 `auth: {bearer_env: CAMPAIGN_APP_TOKEN}` (a `CAMPAIGN_*` env var, or one named in the
 `bearer_envs` setting; sent to the `base_url` origin only) or `auth: {storage_state: path}`.
@@ -161,11 +164,79 @@ stills are removed (any the operator approved are kept).
 Then: `campaign_render(asset_id, outputs=[{name: hero, format: mp4, start: start, end: end,
 speed: [{from: start, to: plugins, factor: 2}], limit: github_attachment_video_free}, …])`.
 
+## Montages
+
+```python
+campaign_montage(campaign_id, sequence, output={...}, title="", lane="", asset_id=0)
+campaign_storyboard(campaign_id, sequence, output={...})
+```
+
+`sequence` is ordered; each item is a clip or a card:
+
+```yaml
+- {clip: 41, in: 1.2, out: 7.0, speed: 1.5, label: "Schedules", theme_color: "#22c55e",
+   focus: {x: 1200, y: 200, w: 600, h: 600}, transition: colorwipe}
+- {card: {title: "Your agent. Your data. Your way.", subtitle: "…", eyebrow: "…", url: "…",
+          cta: "Star it on GitHub", bg: "#0d0f14", fg: "#f4f5f7", accent: "#7c5cff", logo: true},
+   duration: 3, zoom: true, transition: {style: fade, duration: 0.6}}
+```
+
+`output` (a mapping, or just a preset name): `name`, `title`, `preset` (`landscape`
+1920×1080 · `vertical` 1080×1920 · `square` 1080×1080) or `size: WxH`, `fit`
+(`auto` · `letterbox` · `crop`), `fps` (30), `background`, `transition` (`colorwipe`) and
+`transition_duration` (0.45 s), `limit` / `max_bytes`, `crf`, `poster`, `poster_at`, `gif`,
+`gif_limit`, `gif_width`, `label_font`, `card_engine` (`auto` · `html` · `ffmpeg`),
+`label_engine` (`auto` · `drawtext` · `html` · `none`). Unknown keys anywhere are refused, with
+every problem listed at once.
+
+- **Continuous footage.** A clip item is one unbroken stretch of its take: `in`/`out` trim
+  only its ends; `speed` is one factor, 0.25–4×. No ramps, no interior cuts.
+- **One canvas.** 1920×1080 is canonical: a 1920×1080 clip (a beat recorded at a 1920×1080
+  viewport, device scale 1, full frame) passes through untouched. Any other size is
+  letterboxed (or crop-filled with `fit: crop`), and the reply names it. On a vertical or
+  square cut a clip is centre-cropped — or cropped to its `focus` rect (source pixels), grown
+  to the canvas's shape and kept inside the frame (a focus outside the source is refused).
+  Every item is normalised to the canvas's size, fps, square pixels, yuv420p and one timebase.
+- **Transitions** (into an item): `colorwipe` — a full-frame bar in the NEXT item's
+  `theme_color` (a card's `accent`; else the brand accent) sweeps across, covers the outgoing
+  shot, then sweeps on and reveals the incoming one (two hard-edged `xfade` wipes through a
+  `color` source; `colorwipe_left`/`_up`/`_down` change direction); `cut`; or an xfade style —
+  `fade`, `fadeblack`, `fadewhite`, `dissolve`, `wipe*`, `slide*`, `smooth*`, `circleopen`,
+  `circleclose`, `circlecrop`, `rectcrop`, `horzopen/close`, `vertopen/close`, `radial`,
+  `pixelize`. A colour wipe of T covers the last T/2 of one item and the first T/2 of the next
+  without shortening the cut; an xfade of T overlaps the two by T.
+- **Cards** render through the card renderer (the `title-slide` template, HTML → PNG in the
+  out-of-process browser, brand from the Social Studio kit's `visual:` section) and loop into
+  N-second segments; `zoom: true` adds a slow 4 % push. With no browser, a plain ffmpeg
+  `drawtext` card is drawn instead (and the reply says so).
+- **Labels** are lower thirds — an accent bar in the clip's theme colour beside the text on a
+  translucent brand-background box — drawn with `drawtext` in the brand heading font, resolved
+  to a font file (a well-known sans when it isn't installed as a file). An ffmpeg built
+  without `drawtext` (e.g. Homebrew's) gets the same lower third as a transparent HTML overlay;
+  with neither, labels are skipped and the reply says so. Vertical labels sit above the
+  bottom ~22 % where Shorts/Reels draw their own UI.
+- **Output**: the graph renders once to a near-lossless master; the mp4 (H.264 High, yuv420p,
+  `+faststart`) is encoded from it, stepping CRF and then a capped bitrate until it fits the
+  size ceiling. A `limit` is checked twice — length/orientation/dimensions before rendering,
+  size after. The poster is a PNG at the middle of the first clip (or `poster_at`); the GIF
+  (`gif: true`) is kept only if it fits `gif_limit` (GitHub's 10 MB by default).
+- **Approval**: a montage may use clips that are only `ready_for_review` (or earlier) — the
+  reply warns, the asset's notes start `DRAFT INPUTS: …` and its `meta.unapproved_inputs`
+  lists them. Rejected clips are refused.
+
+The montage registers as a `montage` asset (the gallery plays it and filters by it) with
+`meta.sequence`, the cut sheet (`meta.timeline`), the encode attempts and the engines used;
+its poster and GIF are child assets.
+
 ## Hard limits, not folklore
 
 `limits.py` is the only table of platform constraints, and it holds only *documented* limits —
 GitHub's 10 MB image/GIF and free-plan video attachment ceilings, its 100 MB paid-plan video
-ceiling, and the repository social preview (< 1 MB, ≥ 640×320, 1280×640 recommended). Every row
+ceiling, the repository social preview (< 1 MB, ≥ 640×320, 1280×640 recommended), and for
+montages: X post video (512 MB, 0.5–140 s without Premium), X API video (≤ 1280×1024),
+LinkedIn feed video (5 GB, 3 s–15 min, 256×144–4096×2304) and YouTube Shorts (vertical or
+square, ≤ 3 min). Rows can carry `max_duration_s` / `min_duration_s`, `max_width` /
+`max_height` and `orientations` besides bytes and minimum dimensions. Every row
 carries its `source` URL and `as_of` date; bytes are counted as decimal MB to be safe.
 Override or add rows with the **Hard-limit overrides** setting. Soft norms (ideal clip length,
 "best" aspect) are deliberately absent — the agent researches them and writes them into the
@@ -193,7 +264,10 @@ The suite is host-free: it bootstraps the plugin as a synthetic package (`tests/
 runs the REAL worker code in-process against a fake `sync_playwright()` (the job still
 round-trips through JSON), fakes ffmpeg at its runner, and exercises the subprocess machinery
 for real (interpreter probe, stdin-only secrets, bounded output, kill of an overrunning process
-tree). The `integration` tests drive real Chromium through the real worker process: a take →
+tree). The montage tests check validation, framing and the exact filtergraph with no ffmpeg,
+and a real-ffmpeg montage of synthetic solid-colour clips asserts the duration, resolution,
+codec/faststart, and that frames mid-transition carry the next clip's theme colour. The
+`integration` tests drive real Chromium through the real worker process: a take →
 render, the fence + bearer scoping inside the worker, a card that can't phone home, a hung
 browser that gets killed, and a shoot + card from a host process that is forbidden to import
 playwright. CI runs both: the unit job, and an integration job that installs Chromium + ffmpeg.

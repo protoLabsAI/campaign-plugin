@@ -230,8 +230,11 @@ def resolve(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         out["fonts"][slot] = ov_fonts.get(slot) or kit_vis["fonts"].get(slot) or cfg_fonts.get(slot) or ""
     # The logo: the call's own, else the kit's variant for this background (resolved against
     # the KIT's directory), else the plugin setting. Only the kit's paths are kit-relative.
+    # ``logo: False`` (a montage card that opts out) means NO logo, not "fall through".
     out["logo"] = (
-        _str(ov.get("logo"))
+        ""
+        if ov.get("logo") is False
+        else _str(ov.get("logo"))
         or _pick_logo(kit_vis["logos"], is_dark(out["colors"]["bg"]))
         or str(_CONFIG.get("brand_logo") or "").strip()
     )
