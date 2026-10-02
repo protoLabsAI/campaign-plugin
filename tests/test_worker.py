@@ -332,3 +332,143 @@ def test_a_hung_real_browser_is_killed_not_abandoned(tmp_path, monkeypatch):
         ln for ln in names.splitlines() if ln.split() and int(ln.split()[0]) in found and alive(int(ln.split()[0]))
     ]
     assert not survivors, f"processes outlived the kill: {survivors}"
+
+
+# ── the fence vs. every URL trick, in a REAL Chromium ─────────────────────────
+# Paths a page may ask for that all mean "this plugin's data API" to some hop: case,
+# double/triple percent-encoding (the fleet proxy decodes once and forwards), encoded slashes,
+# `..` split around the target, backslashes, `//` runs, a control char, and the fleet-proxy
+# `/agents/<slug>/` form. The recording server must see ZERO of them.
+_FENCED_PATHS = (
+    "/api/plugins/campaign/assets/1/review",
+    "/API/Plugins/CAMPAIGN/assets/1/review",
+    "/api/plugins/%63ampaign/assets/1/review",
+    "/api/plugins/%2563ampaign/assets/1/review",
+    "/api/plugins/%252563ampaign/assets/1/review",
+    "/api%2Fplugins%2Fcampaign/assets/1/review",
+    "/api%252Fplugins%252Fcampaign/assets/1/review",
+    "/api/plugins/x%2F..%2Fcampaign/assets/1/review",
+    "/api/plugins/x/%2e%2e/campaign/assets/1/review",
+    "/api/x/../plugins/campaign/assets/1/review",
+    "/api\\plugins\\campaign/assets/1/review",
+    "/api%5Cplugins%5Ccampaign/assets/1/review",
+    "//api//plugins///campaign/assets/1/review",
+    "/api/plugins/camp%09aign/assets/1/review",
+    "/agents/foo/api/plugins/campaign/assets/1/review",
+    "/agents/foo/api/plugins/%2563ampaign/assets/1/review",
+    "/agents/foo/%2Fapi%2Fplugins%2Fcampaign/assets/1/review",
+    "/agents/foo/x%2F..%2F..%2Fapi/plugins/campaign/assets/1/review",
+)
+_CONTROLS = {"/landing", "/ok-before", "/ok-after", "/favicon.ico"}
+
+
+class _Recorder(http.server.BaseHTTPRequestHandler):
+    hits: list = []
+    landing = b""
+
+    def log_message(self, *a):
+        pass
+
+    def _answer(self):
+        type(self).hits.append((self.command, self.path))
+        page = self.path == "/landing"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html" if page else "text/plain")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(type(self).landing if page else b"ok")
+
+    do_GET = do_POST = do_PUT = do_DELETE = _answer
+
+
+def _recorders():
+    """A recording server on 127.0.0.1 and (when the box has it) one on [::1], sharing hits."""
+    import socket
+
+    handler = type("R", (_Recorder,), {"hits": []})
+    servers = [http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)]
+    origins = [f"http://127.0.0.1:{servers[0].server_address[1]}"]
+
+    class V6(http.server.ThreadingHTTPServer):
+        address_family = socket.AF_INET6
+
+    try:
+        servers.append(V6(("::1", 0), handler))
+        origins.append(f"http://[::1]:{servers[1].server_address[1]}")
+    except OSError:
+        pass
+    for s in servers:
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    return servers, handler, origins
+
+
+def _trick_urls(origins):
+    v4 = origins[0]
+    port = v4.rsplit(":", 1)[1]
+    hosts = [*origins, f"http://127.0.0.1.:{port}", f"http://localhost.:{port}", f"http://localhost:{port}"]
+    urls = [h + p for h in hosts for p in _FENCED_PATHS]
+    # userinfo — both "credentials@host" and the "host:port@" confusion
+    urls += [f"http://u:pw@127.0.0.1:{port}{p}" for p in _FENCED_PATHS[:4]]
+    return urls
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_real_chromium_cannot_reach_the_fenced_api_by_any_url_trick(tmp_path):
+    servers, handler, origins = _recorders()
+    tricks = _trick_urls(origins)
+    handler.landing = (
+        "<html><body><h1>app</h1><div id=imgs></div><script>"
+        f"const urls = {json.dumps(tricks)};"
+        """
+        const imgs = document.getElementById('imgs');
+        const hit = (u, init) => fetch(u, {mode: 'no-cors', ...init}).catch(() => null);
+        fetch('/ok-before').then(async () => {
+          const jobs = [];
+          for (const u of urls) {
+            const i = new Image(); i.src = u; imgs.appendChild(i);       // subresource
+            jobs.push(hit(u), hit(u, {method: 'POST', body: 'approve'}));  // fetch GET + POST
+            try { navigator.sendBeacon(u, 'approve'); } catch (e) {}
+          }
+          await Promise.allSettled(jobs);
+          await new Promise(r => setTimeout(r, 500));
+          await fetch('/ok-after');
+          const p = document.createElement('p'); p.textContent = 'fence-probe-done';
+          document.body.appendChild(p);
+        });
+        </script></body></html>"""
+    ).encode()
+    try:
+        s = validate(
+            {
+                "base_url": origins[0],
+                "steps": [
+                    {"goto": "/landing"},
+                    {"wait_for": {"text": "fence-probe-done", "timeout_ms": 60000}},
+                    {"wait_for": {"network_idle": True}},
+                ],
+            }
+        )
+        report = shoot.run_worker(shoot.build_job(s, tmp_path / "sub", bearer="app-tok"), 180)
+        assert report["ok"], report
+        paths = [p for _, p in handler.hits]
+        assert "/ok-before" in paths and "/ok-after" in paths, f"the probe page never ran: {paths}"
+        leaked = [(m, p) for m, p in handler.hits if p not in _CONTROLS]
+        assert leaked == [], f"the fence let these subresource requests through: {leaked}"
+        # Top-level navigation to a fenced URL is refused too (the step fails; nothing is hit).
+        for i, url in enumerate(
+            [
+                origins[0] + "/api/plugins/%2563ampaign/assets/1/review",
+                origins[0] + "/agents/foo/API/plugins/campaign/assets/1/review",
+                origins[0].replace("http://", "http://u:pw@") + "/api/plugins/x%2F..%2Fcampaign/x",
+                origins[-1] + "/api/plugins/campaign/x",
+            ]
+        ):
+            nav = validate({"base_url": origins[0], "steps": [{"goto": {"url": url, "timeout_ms": 15000}}]})
+            r = shoot.run_worker(shoot.build_job(nav, tmp_path / f"nav{i}"), 120)
+            assert not r["ok"], f"navigating to {url} should have been aborted: {r}"
+    finally:
+        for srv in servers:
+            srv.shutdown()
+    leaked = [(m, p) for m, p in handler.hits if p not in _CONTROLS]
+    assert leaked == [], f"the fence let these navigations through: {leaked}"

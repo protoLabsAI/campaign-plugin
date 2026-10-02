@@ -271,3 +271,29 @@ def test_render_caps_the_number_of_outputs(tools, browser_ok, ffmpeg_ok):
     outs = [{"name": f"o{i}", "format": "poster"} for i in range(render.MAX_OUTPUTS + 1)]
     assert "too many" in call(tools, "campaign_render", asset_id=1, outputs=outs)
     assert ffmpeg_ok.cmds and all(c[0].endswith("ffprobe") for c in ffmpeg_ok.cmds), "no ffmpeg run started"
+
+
+def test_a_numeric_lane_must_exist_in_this_campaign(tools):
+    call(tools, "campaign_create", name="A", product="A", goal="g", target_url="http://a.test")
+    call(tools, "campaign_create", name="B", product="B", goal="g", target_url="http://b.test")
+    call(tools, "campaign_lane", campaign_id=1, name="authors")  # lane 1, campaign 1
+    call(tools, "campaign_lane", campaign_id=2, name="ops")  # lane 2, campaign 2
+    call(tools, "campaign_lane", campaign_id=2, name="2024")  # lane 3: an all-digit NAME
+
+    def add(cid, lane):
+        return call(tools, "campaign_asset_add", campaign_id=cid, kind="clip", title="x", lane=lane)
+
+    # A lane id that doesn't exist, and another campaign's lane id, are refused — nothing filed.
+    assert "no lane 99 in campaign 1" in add(1, "99")
+    assert "no lane 2 in campaign 1" in add(1, "2")
+    assert store.list_assets(1) == []
+    # This campaign's own lane id, its name, and an all-digit name all resolve.
+    assert "Added asset" in add(1, "1") and "Added asset" in add(1, "authors")
+    assert [a["lane_id"] for a in store.list_assets(1)] == [1, 1]
+    assert "Added asset" in add(2, "2024") and store.list_assets(2)[0]["lane_id"] == 3
+    assert "Added asset" in add(2, "0") and store.list_assets(2)[-1]["lane_id"] == 0, "0 = no lane"
+    # The same check guards moving an asset and filtering by lane.
+    first = store.list_assets(1)[0]["id"]
+    assert "no lane 2 in campaign 1" in call(tools, "campaign_asset_update", asset_id=first, lane="2")
+    assert store.get_asset(first)["lane_id"] == 1
+    assert "no lane 2 in campaign 1" in call(tools, "campaign_assets", campaign_id=1, lane="2")

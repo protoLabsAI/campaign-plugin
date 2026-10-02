@@ -333,6 +333,12 @@ def lanes(campaign_id: int) -> list[dict[str, Any]]:
     return _read("SELECT * FROM lanes WHERE campaign_id = ? ORDER BY id", (int(campaign_id),))
 
 
+def lane_by_id(campaign_id: int, lane_id: int) -> dict[str, Any] | None:
+    """Lane ``lane_id`` — only if it belongs to ``campaign_id``."""
+    rows = _read("SELECT * FROM lanes WHERE id = ? AND campaign_id = ?", (int(lane_id), int(campaign_id)))
+    return rows[0] if rows else None
+
+
 def lane_by_name(campaign_id: int, name: str) -> dict[str, Any] | None:
     rows = _read("SELECT * FROM lanes WHERE campaign_id = ? AND name = ?", (int(campaign_id), (name or "").strip()))
     return rows[0] if rows else None
