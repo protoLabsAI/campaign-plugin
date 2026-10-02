@@ -492,7 +492,9 @@ _MATCH_JS = """e => {
 
 
 def target_label(t: dict[str, Any]) -> str:
-    """``text='3 passed'`` — a target as the script wrote it (frame left out; the step says it)."""
+    """``text='3 passed'`` — a target as the script wrote it (frame left out; the step says it).
+    Mirrors ``shotscript.describe_target``: the worker runs out of process and imports nothing
+    from the plugin, so the few lines are repeated on purpose."""
     for k in ("selector", "role", "text", "label", "placeholder", "test_id"):
         if k in t:
             s = f"{k}={t[k]!r}"
@@ -546,7 +548,11 @@ def ambiguity_message(root, target: dict[str, Any]) -> str:
 def wait_any(root, target: dict[str, Any], state: str, timeout: float) -> None:
     """Wait for ``target`` to reach ``state`` — satisfied when ANY match does (visible /
     attached), or when NONE is left (hidden: no visible match; detached: no match). Playwright's
-    strict mode would refuse a target that matches twice; a wait has no reason to."""
+    strict mode would refuse a target that matches twice; a wait has no reason to.
+
+    ``hidden`` really means NONE visible: a locator re-resolves on every poll, so when the
+    first visible match hides, the next one becomes ``visible=true >> nth=0`` and the wait
+    goes on (pinned by a real-Chromium test)."""
     loc = locate(root, target)
     if "nth" in target:  # the script picked one — wait on exactly that one
         loc.wait_for(state=state, timeout=timeout)

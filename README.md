@@ -58,8 +58,8 @@ loads nothing from the network at all.
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.2.4`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.2.4`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.2.6`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.2.6`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —

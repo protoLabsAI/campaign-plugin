@@ -534,3 +534,32 @@ def test_check_targets_reports_ambiguous_targets_on_a_live_page(twice_site):
         (6, "missing", 0),
     ]
     assert report[1]["matches"][1] == "<strong> '3 passed'"
+
+
+HIDE_PAGE = """<!doctype html><html><body><p id="a">3 passed</p><p id="b">ran: 3 passed</p><script>
+  setTimeout(() => { document.getElementById('a').style.display = 'none'; }, 300);
+  setTimeout(() => { document.getElementById('b').style.display = 'none'; }, 1800);
+</script></body></html>"""
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_real_wait_for_hidden_on_a_twice_matched_text_waits_for_the_last_one(site, tmp_path):
+    # The locator re-resolves every poll: when the first visible match hides, the next one
+    # becomes "the first visible match" — so `hidden` holds only once NONE is visible.
+    (Path(tmp_path) / "site" / "hide.html").write_text(HIDE_PAGE, encoding="utf-8")
+    script = validate(
+        {
+            "base_url": site,
+            "name": "hide",
+            "step_timeout_ms": 5000,
+            "steps": [
+                {"goto": "/hide.html"},
+                {"mark": "loaded"},
+                {"wait_for": {"text": "3 passed", "state": "hidden"}},
+                {"mark": "gone"},
+            ],
+        }
+    )
+    res = shoot.run(script, tmp_path / "hide")
+    assert res["marks"]["gone"] - res["marks"]["loaded"] > 1.2, res["marks"]
