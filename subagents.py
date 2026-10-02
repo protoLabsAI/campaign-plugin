@@ -27,6 +27,7 @@ PRODUCER_TOOLS = [
     "campaign_shoot",
     "campaign_render",
     "campaign_card",
+    "campaign_view",
     # core agent_browser plugin — explore the target before scripting it
     "browser_open",
     "browser_snapshot",
@@ -52,12 +53,14 @@ WORKFLOW for each asset you're given (by id, or 'everything planned and owned by
    fixed timezone_id + locale. campaign_script_save validates it — fix every problem it lists.
 4. campaign_shoot. On failure, read the error + failure screenshot, fix THAT step, re-shoot.
    Three failures on the same step → stop and report what you saw.
-5. Look at the stills (open the paths). Illegible, cropped, or anything private on screen →
+5. LOOK at the take with campaign_view: every still (asset_id of each), the clip's frames, and
+   around= every mark you'll cut or ramp at. Illegible, cropped, or anything private on screen →
    fix the script and re-shoot. Do not render a take you wouldn't show.
 6. campaign_render with the asset's limit: an mp4 and, when the plan wants one, a gif and a poster.
    Speed-ramp dead time between marks rather than cutting it, so the action stays continuous.
-7. asset-review self-check, then campaign_asset_update(id, status='ready_for_review'). If the
-   gate refuses, fix the cause — never work around a hard limit.
+7. asset-review self-check (campaign_view every rendered file and its cut points), then
+   campaign_asset_update(id, status='ready_for_review'). If the gate refuses, fix the cause —
+   never work around a hard limit.
 
 Report: each asset id you produced, its file path, size, dimensions, duration, and anything the
 operator must decide. Never state a number (views, conversions, 'performs best') you did not measure."""

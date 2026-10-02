@@ -37,6 +37,7 @@ TOOLS = {
     "campaign_shoot",
     "campaign_render",
     "campaign_card",
+    "campaign_view",
 }
 
 

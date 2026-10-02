@@ -222,6 +222,19 @@ def video_size(script: dict[str, Any]) -> dict[str, int]:
     return {"width": int(vp["width"]) // 2 * 2, "height": int(vp["height"]) // 2 * 2}
 
 
+def step_timeout_for(step: dict[str, Any], step_timeout_ms: float, remaining_ms: float) -> float:
+    """The ms one step may wait: its own ``timeout_ms`` (validated ≤ the per-step max by the
+    host), else the script-wide ``step_timeout_ms`` — always bounded by what is left of the
+    shoot's ``total_timeout_s``. Fixed waits (``hold``, ``wait_for: {ms}``) are bounded by the
+    total budget alone: their length IS the step."""
+    if step.get("op") == "hold" or (step.get("op") == "wait_for" and "ms" in step):
+        return max(1.0, remaining_ms)
+    own = step.get("timeout_ms")
+    limit = float(own) if own else float(step_timeout_ms)
+    # Never 0: to Playwright a 0 timeout means "wait forever".
+    return max(1.0, min(limit, remaining_ms))
+
+
 def describe(step: dict[str, Any]) -> str:
     """The host's step description, carried in the job (``_desc``) so the worker needs no
     plugin import; a bare op name is the fallback."""
@@ -348,8 +361,12 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
                                 f"total_timeout_s={script['total_timeout_s']} spent"
                             )
                             break
-                        # Holds are bounded by the total budget, not the per-step timeout.
-                        timeout = remaining_ms() if step["op"] == "hold" else min(step_timeout, remaining_ms())
+                        timeout = step_timeout_for(step, step_timeout, remaining_ms())
+                        # Any Playwright call in the step that takes no explicit timeout (an
+                        # evaluate, a keyboard op's auto-wait) must honour the SAME ceiling — not
+                        # the context default, which is only the script-wide step_timeout_ms.
+                        page.set_default_timeout(timeout)
+                        page.set_default_navigation_timeout(timeout)
                         entry = {"index": step["index"], "op": step["op"], "desc": describe(step)}
                         entry["t_start"] = round(time.monotonic() - t0, 3)
                         try:

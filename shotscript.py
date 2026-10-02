@@ -19,11 +19,12 @@ Example::
     redact: {presets: [home_paths, emails, secrets]}
     steps:
       - goto: /app/
-      - wait_for: {network_idle: true}
+      - wait_for: {role: button, name: Settings}
       - mark: start
       - click: {role: button, name: Settings}
       - type: {placeholder: "https://github.com/…", text: "https://github.com/acme/x", delay_ms: 45}
       - hold: 1500
+      - wait_for: {text: "Installed", timeout_ms: 60000}
       - screenshot: dialog
       - mark: end
 
@@ -32,6 +33,14 @@ Targets (click/hover/fill/type/press/wait_for/scroll/screenshot) are either a st
 ONE of ``selector`` / ``role`` (+ ``name``, ``exact``) / ``text`` / ``label`` /
 ``placeholder`` / ``test_id``, plus an optional ``nth``. Prefer role/text/label — they
 survive restyles; CSS classes don't.
+
+Waits: every step that waits on the page (goto, click, hover, fill, type, press, wait_for,
+scroll, screenshot) gives up after ``step_timeout_ms`` (script-wide, default 15000). A step
+that waits on something slow — an agent run, a build — sets its own ``timeout_ms`` (up to
+180000 = 3 min; more is a validation error, not a silent clamp), and every step is also
+bounded by what is left of ``total_timeout_s`` (default 300, max 900). Don't use
+``wait_for: {network_idle: true}`` on an app that holds a stream open (SSE / websockets — the
+protoAgent console does): it never settles. Wait for the element you need instead.
 """
 
 from __future__ import annotations
@@ -73,6 +82,8 @@ STEP_OPS = (
     "mask",
     "redact",
 )
+# Steps that wait on the page and so accept a per-step ``timeout_ms`` override.
+TIMEOUT_OPS = ("goto", "click", "hover", "fill", "type", "press", "wait_for", "scroll", "screenshot")
 TARGET_KEYS = ("selector", "role", "text", "label", "placeholder", "test_id")
 TARGET_OPTS = ("name", "exact", "nth")
 COLOR_SCHEMES = ("light", "dark", "no-preference")
@@ -80,7 +91,12 @@ MASK_MODES = ("blur", "hide", "remove")
 REDACT_PRESETS = ("home_paths", "emails", "secrets")
 
 MAX_HOLD_MS = 60_000
-MAX_STEP_TIMEOUT_MS = 120_000
+# The ceiling for ONE step's wait (script-wide ``step_timeout_ms`` or a step's own
+# ``timeout_ms``). 180s covers a slow real run on screen (an agent turn, a build, an install)
+# while still failing a stuck step inside one shoot. A larger ask is a validation ERROR — never
+# silently clamped — and every step is also bounded by what is left of ``total_timeout_s``.
+MAX_STEP_TIMEOUT_MS = 180_000
+MIN_STEP_TIMEOUT_MS = 100
 MAX_TOTAL_S = 900
 DEFAULTS = {
     "viewport": {"width": 1280, "height": 800},
@@ -91,6 +107,24 @@ DEFAULTS = {
     "cursor": True,
     "step_timeout_ms": 15_000,
     "total_timeout_s": 300,
+}
+_TGT = ("target", "selector", "role", "text", "label", "placeholder", "test_id", "name", "exact", "nth")
+# Every key a step's mapping body may carry. Anything else is an ERROR naming the key — a typo'd
+# or unsupported option (``timout_ms``, ``timeout``) must never be dropped on the floor.
+STEP_KEYS: dict[str, tuple[str, ...]] = {
+    "goto": ("url", "wait_until", "timeout_ms"),
+    "click": (*_TGT, "timeout_ms"),
+    "hover": (*_TGT, "timeout_ms"),
+    "fill": (*_TGT, "value", "timeout_ms"),
+    "type": (*_TGT, "delay_ms", "timeout_ms"),
+    "press": (*_TGT, "key", "timeout_ms"),
+    "wait_for": (*_TGT, "state", "network_idle", "ms", "timeout_ms"),
+    "hold": ("ms",),
+    "scroll": (*_TGT, "x", "y", "smooth", "timeout_ms"),
+    "mark": ("name",),
+    "screenshot": (*_TGT, "full_page", "timeout_ms"),
+    "mask": ("selectors", "mode"),
+    "redact": ("presets", "patterns", "replacement"),
 }
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
@@ -183,6 +217,25 @@ def _int(value: Any, where: str, problems: list[str], lo: int, hi: int) -> int |
     return v
 
 
+def _timeout_ms(value: Any, where: str, problems: list[str]) -> int | None:
+    """A per-step (or script-wide) wait ceiling in ms. Over the max is an ERROR, never a clamp."""
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        problems.append(f"{where}: must be an integer number of milliseconds, got {value!r}")
+        return None
+    if v > MAX_STEP_TIMEOUT_MS:
+        problems.append(
+            f"{where}: {v}ms is over the {MAX_STEP_TIMEOUT_MS}ms ({MAX_STEP_TIMEOUT_MS // 1000}s) per-step max — "
+            "wait for an intermediate sign of progress first and split the wait into several steps"
+        )
+        return None
+    if v < MIN_STEP_TIMEOUT_MS:
+        problems.append(f"{where}: {v}ms is under the {MIN_STEP_TIMEOUT_MS}ms minimum")
+        return None
+    return v
+
+
 def _mask(raw: Any, where: str, problems: list[str]) -> dict[str, Any] | None:
     if isinstance(raw, str):
         raw = [raw]
@@ -242,6 +295,24 @@ def _step(i: int, raw: Any, problems: list[str], has_base: bool) -> dict[str, An
         problems.append(f"step {i}: unknown step `{op}`{_suggest(op, STEP_OPS)} — steps are {', '.join(STEP_OPS)}")
         return None
     step: dict[str, Any] = {"op": op, "index": i}
+    if isinstance(body, dict):
+        allowed = STEP_KEYS[op]
+        for k in body:
+            if k not in allowed:
+                hint = _suggest(k, allowed)
+                if not hint and k in ("timeout", "timeout_s", "wait_ms"):
+                    hint = " (did you mean `timeout_ms`?)" if "timeout_ms" in allowed else ""
+                problems.append(f"{where}: unknown option `{k}`{hint} — {op} takes {', '.join(allowed)}")
+        if "timeout_ms" in body:
+            if op == "wait_for" and "ms" in body:
+                problems.append(
+                    f"{where}: `timeout_ms` bounds a wait for an element or network idle — a fixed "
+                    "`ms` wait doesn't take one"
+                )
+            else:
+                t = _timeout_ms(body["timeout_ms"], f"{where} timeout_ms", problems)
+                if t is not None:
+                    step["timeout_ms"] = t
 
     if op == "goto":
         url = body.get("url") if isinstance(body, dict) else body
@@ -410,9 +481,7 @@ def validate(text_or_obj: Any) -> dict[str, Any]:
     out["locale"] = str(data.get("locale", DEFAULTS["locale"]))
     out["cursor"] = bool(data.get("cursor", True))
 
-    st = _int(
-        data.get("step_timeout_ms", DEFAULTS["step_timeout_ms"]), "step_timeout_ms", problems, 500, MAX_STEP_TIMEOUT_MS
-    )
+    st = _timeout_ms(data.get("step_timeout_ms", DEFAULTS["step_timeout_ms"]), "step_timeout_ms", problems)
     out["step_timeout_ms"] = st or DEFAULTS["step_timeout_ms"]
     tt = _int(data.get("total_timeout_s", DEFAULTS["total_timeout_s"]), "total_timeout_s", problems, 5, MAX_TOTAL_S)
     out["total_timeout_s"] = tt or DEFAULTS["total_timeout_s"]
@@ -466,6 +535,18 @@ def validate(text_or_obj: Any) -> dict[str, Any]:
         problems.append("the script never navigates — add a `goto` step")
     elif norm and norm[0]["op"] not in ("goto", "mask", "redact", "mark"):
         problems.append("step 1 should be `goto` (or a mask/redact before it) — nothing is loaded yet")
+    budget_ms = out["total_timeout_s"] * 1000
+    if "step_timeout_ms" in data and out["step_timeout_ms"] > budget_ms:
+        problems.append(
+            f"step_timeout_ms={out['step_timeout_ms']} is longer than the whole shoot "
+            f"(total_timeout_s={out['total_timeout_s']}) — raise total_timeout_s (max {MAX_TOTAL_S})"
+        )
+    for st_ in norm:
+        if st_.get("timeout_ms", 0) > budget_ms:
+            problems.append(
+                f"step {st_['index']} ({st_['op']}) timeout_ms: {st_['timeout_ms']}ms is longer than the whole shoot "
+                f"(total_timeout_s={out['total_timeout_s']}) — raise total_timeout_s (max {MAX_TOTAL_S})"
+            )
     hold_total = sum(s.get("ms", 0) for s in norm if s["op"] in ("hold", "wait_for"))
     if hold_total / 1000 > out["total_timeout_s"]:
         problems.append(
@@ -499,6 +580,13 @@ def describe_target(t: dict[str, Any] | None) -> str:
 
 
 def describe_step(step: dict[str, Any]) -> str:
+    desc = _describe_step(step)
+    if step.get("timeout_ms"):
+        desc += f" (timeout {step['timeout_ms']}ms)"
+    return desc
+
+
+def _describe_step(step: dict[str, Any]) -> str:
     op = step["op"]
     if op == "goto":
         return f"goto {step['url']}"

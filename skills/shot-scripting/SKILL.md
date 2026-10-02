@@ -6,7 +6,7 @@ description: >-
   survive restyles, readable holds, marks for trimming, redaction of secrets, and fixed
   timezone/locale. Triggers: "record a demo of", "capture a clip of", "shoot the flow",
   "the take failed", "re-record", "make a GIF of the app doing X".
-tools: [campaign_script_save, campaign_shoot, campaign_get, browser_open, browser_snapshot, browser_screenshot]
+tools: [campaign_script_save, campaign_shoot, campaign_view, campaign_get, browser_open, browser_snapshot, browser_screenshot]
 ---
 
 # Shot scripts
@@ -35,8 +35,19 @@ A target matching several elements fails loudly (strict mode). Narrow it, or add
 
 ## Timing — a viewer has to read it
 
-- `wait_for` before every click on something that loads (`{text: …}`, `{role: …}`, or
-  `{network_idle: true}` after a navigation). Never a bare `hold` as a "wait".
+- `wait_for` before every click on something that loads (`{text: …}`, `{role: …}`). Never a
+  bare `hold` as a "wait".
+- **Don't wait for `network_idle` on an app that streams.** The protoAgent console (and any
+  chat UI, dashboard or live log) keeps SSE/websocket connections open, so `networkidle` never
+  settles and the step just times out. Navigate with the default `wait_until: load` and then
+  `wait_for` the specific element you need.
+- **Slow real work gets its own `timeout_ms`.** Every waiting step gives up after
+  `step_timeout_ms` (script-wide, default 15000). When the screen shows something that takes
+  real time — an agent run (often 17–45s), a build, an install — give THAT step its own
+  ceiling: `- wait_for: {text: "Run complete", timeout_ms: 90000}`. The per-step max is
+  180000 (3 min); asking for more fails validation — wait for an intermediate sign of progress
+  first and split the wait. Every step is also bounded by what's left of `total_timeout_s`
+  (default 300, max 900), so raise that for a long take. Speed-ramp the wait in the render.
 - `hold: 1200`–`2000` on every frame a viewer must read (a dialog, a result). Too short is the
   most common reason a clip is useless.
 - `type` with `delay_ms: 35–60` for realism; `fill` when the typing isn't the point.
@@ -69,7 +80,8 @@ mask: {selectors: [".account-menu", "[data-private]"], mode: blur}
 `mode`: `blur` (default), `hide` (keeps its space), or `remove` (collapses it — good for
 banners and toasts that aren't part of the story). Top-level `redact`/`mask` apply from the first frame; a `- mask:` step applies from that point.
 If the app shows tokens, paths, emails, internal hostnames or customer data anywhere in frame,
-mask it — then CHECK the stills; redaction is a safety net, not proof.
+mask it — then LOOK at the stills with `campaign_view`; redaction is a safety net, not proof
+(it can't reach text drawn on a canvas, e.g. a terminal).
 
 ## Auth
 
@@ -84,6 +96,7 @@ token and none is set up, ask the operator to create one; never reach for anothe
 The error names the step, the cause, and a `failure.png`. Look at the screenshot first:
 - element not found → the page wasn't ready (add `wait_for`) or the name differs (re-snapshot);
 - several matches → narrow the target or add `nth`;
-- timeout on `network_idle` → the app polls; wait for a visible element instead.
+- timeout on `network_idle` → the app polls or streams (SSE); wait for a visible element instead;
+- `Timeout 15000ms exceeded` on something that is just slow → give that step `timeout_ms`.
 Fix that ONE step and re-shoot. Same step failing three times → report to the operator with
 the screenshot rather than flailing.

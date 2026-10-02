@@ -224,3 +224,30 @@ def test_runs_fine_from_inside_an_event_loop(tmp_path):
         return shoot.run(_script(), tmp_path, playwright_factory=FakePlaywright())
 
     assert asyncio.run(main())["video"]
+
+
+def test_a_steps_own_timeout_reaches_playwright_bounded_by_the_budget(tmp_path):
+    pw = FakePlaywright()
+    s = _script(
+        {"wait_for": {"text": "Done", "timeout_ms": 30_000}},
+        {"click": {"text": "Go"}},
+        {"wait_for": {"ms": 20_000}},
+        step_timeout_ms=15_000,
+    )
+    shoot.run(s, tmp_path, playwright_factory=pw)
+    waits = [c for c in pw.calls if c[0] == "wait_for"]
+    assert waits[0][4]["timeout"] == 30_000.0, "the step's timeout_ms, not the 15s script default"
+    clicks = [c for c in pw.calls if c[0] == "click"]
+    assert clicks[0][4]["timeout"] == 15_000.0, "steps without one keep step_timeout_ms"
+    # A fixed 20s wait is its own length — never cut to the 15s step timeout.
+    assert ("wait_for_timeout", 20_000) in pw.calls
+    page = pw.browser.contexts[0].page
+    assert 30_000.0 in page.default_timeouts, "calls without an explicit timeout honour it too"
+
+
+def test_step_timeouts_never_outlive_the_shoot():
+    f = pw_worker.step_timeout_for
+    assert f({"op": "wait_for", "timeout_ms": 120_000}, 15_000, 40_000) == 40_000
+    assert f({"op": "click"}, 15_000, 400_000) == 15_000
+    assert f({"op": "hold", "ms": 5000}, 15_000, 400_000) == 400_000
+    assert f({"op": "click"}, 15_000, 0) == 1.0, "never 0 — Playwright reads 0 as 'wait forever'"
