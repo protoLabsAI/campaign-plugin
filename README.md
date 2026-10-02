@@ -172,7 +172,7 @@ sized its canvas at 1x and drew a blank terminal at dsf 2.
 ```yaml
 storage:
   origin: http://localhost:7871      # optional — default: base_url's origin
-  local: {protoagent.ui: {state: {panelWidths: {right: 860}}, version: 0}}   # objects → JSON
+  local: {protoagent.ui: {state: {rightWidth: 860}, version: 14}}   # objects → JSON
   session: {lastTab: plugins}        # strings stored as-is
 init_script: "window.__demo = true;" # optional escape hatch (≤ 64 KB)
 ```

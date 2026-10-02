@@ -69,7 +69,7 @@ a selected tab, a dismissed tour) from ``localStorage``/``sessionStorage`` while
 
     storage:
       origin: http://localhost:7871          # optional — default: base_url's origin
-      local: {protoagent.ui: {state: {panelWidths: {right: 860}}, version: 0}}
+      local: {protoagent.ui: {state: {rightWidth: 860}, version: 14}}
       session: {tab: plugins}
 
 A string value is stored as-is; anything else is JSON-serialized. Written by a context init

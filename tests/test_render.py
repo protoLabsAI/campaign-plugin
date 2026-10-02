@@ -291,7 +291,7 @@ def test_the_shot_scripting_worked_example_is_a_valid_script_and_a_continuous_re
     """The skill's example is copied by agents — it must validate as written."""
     skill = (Path(render.__file__).parent / "skills" / "shot-scripting" / "SKILL.md").read_text()
     blocks = re.findall(r"```yaml\n(.*?)```", skill, re.S)
-    script = shotscript.validate(next(b for b in blocks if "base_url:" in b))
+    script = shotscript.validate(next(b for b in blocks if "base_url:" in b and "steps:" in b))
     ops = [st["op"] for st in script["steps"]]
     marks = [st["name"] for st in script["steps"] if st["op"] == "mark"]
     assert ops.index("click") < ops.index("type"), "the result's view is opened BEFORE the action"

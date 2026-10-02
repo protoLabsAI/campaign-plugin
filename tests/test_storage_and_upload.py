@@ -13,7 +13,7 @@ from campaign.shotscript import ScriptError, browser_origin, validate
 from campaign.worker import pw_worker
 from conftest import FakePlaywright
 
-UI = {"state": {"panelWidths": {"right": 860}}, "version": 0}
+UI = {"state": {"rightWidth": 860}, "version": 14}
 
 
 def _script(*steps, **top):

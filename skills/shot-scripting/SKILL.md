@@ -96,7 +96,7 @@ base_url: http://localhost:7871
 storage:
   # origin: http://localhost:7871     # optional — defaults to base_url's origin
   local:
-    protoagent.ui: {state: {panelWidths: {right: 860}}, version: 0}   # an object → JSON
+    protoagent.ui: {state: {rightWidth: 860}, version: 14}   # an object → JSON
     onboarding.done: "1"                                                # a string → as-is
   session: {lastTab: plugins}
 ```

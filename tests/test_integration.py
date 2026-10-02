@@ -570,7 +570,7 @@ STORAGE_PAGE = """<!doctype html><html><head><meta charset="utf-8"><script>
   // Runs while the page PARSES — before any shot-script step could touch it. The init scripts
   // must already have run for the first render to see the seed.
   let w = 'none';
-  try { w = JSON.parse(localStorage.getItem('protoagent.ui')).state.panelWidths.right; } catch (e) {}
+  try { w = JSON.parse(localStorage.getItem('protoagent.ui')).state.rightWidth; } catch (e) {}
   window.__first = 'width ' + w + ' / tab ' + (sessionStorage.getItem('tab') || 'none')
     + ' / init ' + (window.__campaignInit || 'no');
 </script></head><body><p id="out"></p>
@@ -591,7 +591,7 @@ def test_real_storage_is_seeded_before_the_app_boots_and_only_on_its_origin(site
             "device_scale_factor": 1,
             "step_timeout_ms": 5000,
             "storage": {
-                "local": {"protoagent.ui": {"state": {"panelWidths": {"right": 860}}, "version": 0}},
+                "local": {"protoagent.ui": {"state": {"rightWidth": 860}, "version": 14}},
                 "session": {"tab": "plugins"},
             },
             "init_script": "window.__campaignInit = 'yes';",
