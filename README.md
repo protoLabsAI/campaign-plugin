@@ -139,6 +139,10 @@ Targets prefer accessible roles and text over CSS. Every waiting step gives up a
 `step_timeout_ms` (default 15000); a step that waits on slow real work sets its own
 `timeout_ms` (max 180000 — more is a validation error, never a silent clamp), all bounded by
 `total_timeout_s` (default 300, max 900). Unknown step options are validation errors.
+A target can add `exact: true` (whole-string match) and `nth` (0-based, or `first`/`last`).
+Several matches: a `wait_for` is satisfied when ANY match is visible (text shown twice is fine
+to wait on); an action (click/hover/fill/type/press/scroll/element screenshot) on an ambiguous
+target fails the step with the first matches listed and how to pick one.
 `network_idle` never settles on an app that holds SSE/websockets open — wait for an element. Tokens never go in a script: use
 `auth: {bearer_env: CAMPAIGN_APP_TOKEN}` (a `CAMPAIGN_*` env var, or one named in the
 `bearer_envs` setting; sent to the `base_url` origin only) or `auth: {storage_state: path}`.
