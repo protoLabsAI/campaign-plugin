@@ -80,6 +80,8 @@ class FakeLocator:
         return len(self.page.matches.get(self.args[0], ["x"]))
 
     def evaluate(self, js, arg=None, **kw):
+        if "type=file" in js or "'file'" in js:  # the upload step's "is this a file input?" probe
+            return self.args[0] in self.page.file_inputs
         texts = self.page.matches.get(self.args[0], ["x"])
         return {"tag": "span", "role": "", "text": texts[self.idx or 0], "visible": True}
 
@@ -97,6 +99,9 @@ class FakeLocator:
 
     def wait_for(self, **kw):
         self._log("wait_for", **kw)
+
+    def set_input_files(self, files, **kw):
+        self._log("set_input_files", files=list(files))
 
     def scroll_into_view_if_needed(self, **kw):
         self._log("scroll_into_view")
@@ -213,6 +218,7 @@ class FakePage:
         self.calls = ctx.calls
         self.fail_on = ctx.fail_on
         self.matches = ctx.browser.pw.matches
+        self.file_inputs = ctx.browser.pw.file_inputs
         self.keyboard = _Keyboard(self)
         self.mouse = _Mouse(self)
         vdir = Path(ctx.kw["record_video_dir"]) if ctx.kw.get("record_video_dir") else None
@@ -279,6 +285,28 @@ class FakePage:
 
     def get_by_test_id(self, text):
         return FakeLocator(self, "test_id", (text,), {})
+
+    def expect_file_chooser(self, **kw):
+        page = self
+
+        class _Chooser:
+            def is_multiple(self):
+                return True
+
+            def set_files(self, files, **kw):
+                page.calls.append(("chooser.set_files", list(files)))
+
+        class _Info:
+            value = _Chooser()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        self.calls.append(("expect_file_chooser", kw.get("timeout")))
+        return _Info()
 
     def wait_for_timeout(self, ms):
         self.calls.append(("wait_for_timeout", ms))
@@ -366,8 +394,10 @@ class _Chromium:
 class FakePlaywright:
     """Call it to get a context manager, exactly like ``sync_playwright()``."""
 
-    def __init__(self, fail_on=None, png_size=2_000, jpeg_sizes=None, frames=None, matches=None):
+    def __init__(self, fail_on=None, png_size=2_000, jpeg_sizes=None, frames=None, matches=None, file_inputs=()):
         self.calls = []
+        # Target args that are an <input type=file> (an upload sets files on them directly).
+        self.file_inputs = set(file_inputs)
         # What a target arg matches on the page: {"3 passed": ["3 passed", "pytest: 3 passed"]}.
         # Unlisted targets match one element. An action on >1 without nth = strict violation.
         self.matches = dict(matches or {})

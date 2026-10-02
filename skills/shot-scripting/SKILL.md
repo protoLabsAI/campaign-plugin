@@ -4,8 +4,8 @@ description: >-
   Use to write a robust Campaign Studio shot script — the declarative YAML that records a
   deterministic browser take of any web app — and to fix one that failed. Covers targets that
   survive restyles, readable holds, continuous action with no jump cuts, staging the result in
-  the app's own view (not just its chat/command surface), marks, redaction of secrets, and
-  fixed timezone/locale. Triggers: "record a demo of", "capture a clip of", "shoot the flow",
+  the app's own view (not just its chat/command surface), marks, redaction of secrets, fixed
+  timezone/locale, pre-seeded browser storage, and file uploads. Triggers: "record a demo of", "capture a clip of", "shoot the flow",
   "the take failed", "re-record", "make a GIF of the app doing X".
 tools: [campaign_script_save, campaign_shoot, campaign_view, campaign_get, browser_open, browser_snapshot, browser_screenshot]
 ---
@@ -83,6 +83,60 @@ top-level `mask`/`redact` covers plugin views too. **But CSS can't touch text dr
 itself*: `cd /tmp` (not your home dir) before you start, set a neutral prompt
 (`export PS1='$ '`), never `cat` an env file or print a token, and `clear` before the beat that
 matters. Or `mask` the whole terminal element (`.xterm`) for a beat you can't keep clean.
+
+## Seed browser storage before the app boots
+
+Many apps restore UI state from `localStorage` while they start — panel widths, the open tab,
+a dismissed onboarding tour. A fresh recording browser has none of it, so the app boots at its
+defaults (the protoAgent console docks panels at 360 px instead of the 860 you wanted). Clicking
+and dragging to fix that on camera wastes the clip. Seed it instead:
+
+```yaml
+base_url: http://localhost:7871
+storage:
+  # origin: http://localhost:7871     # optional — defaults to base_url's origin
+  local:
+    protoagent.ui: {state: {rightWidth: 860}, version: 14}   # an object → JSON
+    onboarding.done: "1"                                                # a string → as-is
+  session: {lastTab: plugins}
+```
+
+- Use it when the look of the FIRST frame depends on persisted state. Read the real key and
+  shape first: `browser_open` the app, set the UI the way you want it, then read
+  `localStorage` (or ask the operator) — copy the JSON, don't guess it. For a zustand `persist`
+  store the value is `{state: {…}, version: N}`; a wrong `version` makes the app discard it.
+- It's written before ANY page script runs, only in top-level pages on that one origin; every
+  `goto`/reload there starts from the seed. Other origins never see it.
+- Need more set-up than key/values (a feature flag on `window`, a stubbed `Date`)? Use
+  `init_script: "window.__demo = true;"` — JavaScript run before page scripts in every page on
+  the `base_url` origin only, inside a function (assign `window.x` for globals), ≤ 64 KB. It's
+  stored in the plan like the rest of the script: never put a token in it.
+- Not for auth — that's `auth:` (below).
+
+## File uploads
+
+```yaml
+- upload: {role: button, name: "Attach files", files: [/Users/me/demo-assets/screenshot.png]}
+- upload: {target: {text: "Drop files here"}, files: /Users/me/demo-assets/data.csv}
+- upload: {selector: "input[type=file]", files: [/Users/me/demo-assets/a.png, /Users/me/demo-assets/b.png]}
+- wait_for: {text: "screenshot.png"}
+```
+
+- Target the **button or drop zone the viewer sees** — it's clicked and the file chooser it
+  opens gets the files (the native dialog never shows in the video). A hidden
+  `<input type=file>` works too (files set directly, nothing clicked); use it when the
+  control only accepts a real drag-and-drop.
+- `files` are absolute paths and must sit under a folder the operator listed in the plugin's
+  **Upload folders** (`upload_dirs`) setting. It's empty by default, so uploads are refused
+  until the operator sets one — ask them for a demo-assets folder and put the files there.
+  You can't change that setting yourself.
+- Refused even inside an allowed folder: anything that isn't a regular file, hardlinked files,
+  over 50 MB (100 MB per step), key/credential files (`.env`, `secrets.yaml`, `id_rsa`, `*.pem`, …),
+  credential dirs (`.ssh`, `.aws`, …), and anything in the agent's home (`~/.protoagent`)
+  except this plugin's own media. Upload only demo files made for the shot — never a real
+  customer file.
+- A target that is neither a file input nor opens a chooser fails the step with what to
+  target instead.
 
 ## Timing — a viewer has to read it
 
@@ -241,5 +295,8 @@ The error names the step, the cause, and a `failure.png`. Look at the screenshot
 - element not found but you can SEE it → it's inside an iframe (a plugin view): add `frame:`;
 - timeout on `network_idle` → the app polls or streams (SSE); wait for a visible element instead;
 - `Timeout 15000ms exceeded` on something that is just slow → give that step `timeout_ms`.
+- panels/tabs at the wrong size or state in the first frame → seed it with `storage:`;
+- `upload … refused` → the file isn't under `upload_dirs` (or is a credential) — move a demo
+  file into the allowed folder, or ask the operator; never work around it.
 Fix that ONE step and re-shoot. Same step failing three times → report to the operator with
 the screenshot rather than flailing.

@@ -20,7 +20,7 @@ import logging
 
 log = logging.getLogger("protoagent.plugins.campaign")
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 
 def _host_store(registry) -> str:
@@ -46,7 +46,7 @@ def register(registry) -> None:
         for w in limits.configure(cfg.get("limit_overrides", "")):
             log.warning("[campaign] %s", w)
         deps.configure(str(cfg.get("ffmpeg_path", "") or ""), str(cfg.get("interpreter", "") or ""))
-        shoot.configure(cfg.get("bearer_envs", ""))
+        shoot.configure(cfg.get("bearer_envs", ""), cfg.get("upload_dirs", ""))
 
         # registry.host's services are populated by the server AFTER register() runs, so
         # resolve host.config at call time rather than capturing a None now.

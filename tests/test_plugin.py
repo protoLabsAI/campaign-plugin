@@ -68,9 +68,11 @@ def test_every_config_key_has_a_settings_row_and_vice_versa():
 def test_settings_that_name_a_program_to_run_are_marked_spawns():
     """The agent's set_config may tune this plugin, but must never point it at a binary it
     then runs (protoAgent ADR 0019 §3b). `ffmpeg_path` has no name the core fence can see,
-    so the marker is the only thing fencing it; data paths must stay unmarked."""
+    so the marker is the only thing fencing it; data paths must stay unmarked — except
+    `upload_dirs`, a TRUST boundary (which local files a script may hand to a web page): an
+    agent that could widen it could upload anything it can read."""
     spawns = {s["key"] for s in MANIFEST["settings"] if s.get("spawns") is True}
-    assert spawns == {"ffmpeg_path", "interpreter"}
+    assert spawns == {"ffmpeg_path", "interpreter", "upload_dirs"}
 
 
 def test_playwright_is_declared_runtime_scoped_and_optional():
