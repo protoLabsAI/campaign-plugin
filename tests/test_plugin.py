@@ -38,6 +38,8 @@ TOOLS = {
     "campaign_render",
     "campaign_card",
     "campaign_view",
+    "campaign_montage",
+    "campaign_storyboard",
 }
 
 
@@ -357,7 +359,12 @@ SKILL_FILES = sorted((ROOT / "skills").glob("*/SKILL.md"))
 
 
 def test_the_expected_skills_ship():
-    assert {p.parent.name for p in SKILL_FILES} == {"campaign-planning", "shot-scripting", "asset-review"}
+    assert {p.parent.name for p in SKILL_FILES} == {
+        "campaign-planning",
+        "shot-scripting",
+        "asset-review",
+        "montage-editing",
+    }
 
 
 @pytest.mark.parametrize("skill_path", SKILL_FILES, ids=lambda p: p.parent.name)

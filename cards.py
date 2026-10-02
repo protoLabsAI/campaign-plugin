@@ -180,6 +180,41 @@ def build_html(template: str, data: dict[str, Any], size: tuple[int, int], look:
     )
 
 
+def render_page(
+    page_html: str,
+    out_path: str | Path,
+    width: int,
+    height: int,
+    *,
+    max_bytes: int | None = None,
+    transparent: bool = False,
+    playwright_factory: Callable | None = None,
+) -> dict[str, Any]:
+    """Render a finished, self-contained HTML page to PNG in the out-of-process worker.
+
+    Returns the worker's ``{path, attempts}``. ``transparent`` keeps the page's own alpha (a
+    montage's lower-third overlay); the page loads nothing from the network either way."""
+    out_path = Path(out_path).with_suffix(".png")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    from . import shoot  # the worker runner (and its fence) lives with the shoot
+
+    job = {
+        "v": pw_worker.JOB_VERSION,
+        "kind": "card",
+        "html": page_html,
+        "out_path": str(out_path),
+        "width": int(width),
+        "height": int(height),
+        "max_bytes": max_bytes,
+        "transparent": bool(transparent),
+        "fence": shoot.fence(),
+    }
+    report = shoot.run_worker(job, CARD_TIMEOUT_S, playwright_factory)
+    if not report.get("ok"):
+        raise shoot.WorkerError(f"the card didn't render: {report.get('error') or 'unknown error'}")
+    return report["result"]
+
+
 def render(
     template: str,
     data: dict[str, Any],
@@ -201,24 +236,7 @@ def render(
     if limit_id and row is None:
         raise ValueError(f"unknown limit {limit_id!r} — campaign_limits lists them")
     max_bytes = int(row["max_bytes"]) if row and row.get("max_bytes") else None
-    out_path = Path(out_path).with_suffix(".png")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    from . import shoot  # the worker runner (and its fence) lives with the shoot
-
-    job = {
-        "v": pw_worker.JOB_VERSION,
-        "kind": "card",
-        "html": page_html,
-        "out_path": str(out_path),
-        "width": w,
-        "height": h,
-        "max_bytes": max_bytes,
-        "fence": shoot.fence(),
-    }
-    report = shoot.run_worker(job, CARD_TIMEOUT_S, playwright_factory)
-    if not report.get("ok"):
-        raise shoot.WorkerError(f"the card didn't render: {report.get('error') or 'unknown error'}")
-    res = report["result"]
+    res = render_page(page_html, out_path, w, h, max_bytes=max_bytes, playwright_factory=playwright_factory)
     final = Path(res["path"])
     size_bytes = final.stat().st_size
     violations = (

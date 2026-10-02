@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import tool
 
-from . import cards, deps, limits, look, paths, render, shoot, shotscript, store
+from . import cards, deps, limits, look, montage, paths, render, shoot, shotscript, store
 
 log = logging.getLogger("protoagent.plugins.campaign")
 
@@ -37,6 +38,13 @@ def _parse_obj(value: Any, what: str) -> Any:
             return yaml.safe_load(text)
         except Exception as e:  # noqa: BLE001
             raise ValueError(f"{what} is neither JSON nor YAML: {e}") from e
+
+
+def _output_arg(output: Any) -> Any:
+    """A montage ``output``: a mapping, JSON/YAML text of one, or a bare preset name / WxH."""
+    if isinstance(output, str) and (output.strip().startswith("{") or ":" in output):
+        return _parse_obj(output, "output")
+    return output
 
 
 def _lane_id(campaign_id: int, lane: str) -> int:
@@ -331,7 +339,7 @@ def build_tools(registry):
         limit_id: str = "",
         notes: str = "",
     ) -> str:
-        """Add a planned asset to the shot list. kind is clip, gif, still, card, or copy_ref (a
+        """Add a planned asset to the shot list. kind is clip, gif, still, card, montage, or copy_ref (a
         pointer to copy owned by the Social Studio queue — put its post id in spec). spec says
         what it shows and how (the beat, length intent, aspect, what must be legible). owner is
         who records it: 'agent' for browser captures, 'operator' for anything needing a human
@@ -858,6 +866,213 @@ def build_tools(registry):
             f" (brand from {r['brand_source']})\n{r['path']}{flag}" + _embed(r["path"], mime, template)
         )
 
+    # ── montage ──────────────────────────────────────────────────────────────
+    def _sequence(sequence: Any) -> list:
+        seq = _parse_obj(sequence, "sequence")
+        if not isinstance(seq, list):
+            raise montage.MontageError("sequence must be a list of {clip: …} / {card: …} items")
+        return seq
+
+    def _problems(e: montage.MontageError) -> str:
+        return "\n".join(f"- {p}" for p in e.problems)
+
+    @tool
+    def campaign_montage(
+        campaign_id: int,
+        sequence: list | str,
+        output: dict | str = "",
+        title: str = "",
+        lane: str = "",
+        asset_id: int = 0,
+    ) -> str:
+        """Cut many short clips + title cards into ONE launch montage mp4 with colour-keyed
+        transitions, and register it as a 'montage' asset (+ its poster, + a GIF if asked and it
+        fits). sequence is an ordered list of items:
+        {clip: asset_id, in?: s, out?: s, speed?: 0.25-4, label?: 'lower third', theme_color?: '#hex',
+        focus?: {x,y,w,h} source px, transition?: style | {style, duration}} or
+        {card: {title, subtitle?, eyebrow?, url?, cta?, bg?, fg?, accent?, logo?: bool}, duration: s,
+        zoom?: bool, theme_color?, transition?}. A clip is ONE continuous stretch: in/out trim only
+        its ends, speed is one uniform factor (no ramps, no interior cuts). Transitions (into an
+        item): colorwipe (default — a full-frame bar in the NEXT item's theme_color sweeps across
+        and reveals it; also colorwipe_left/_up/_down), cut, or an xfade style (fade, wipeleft,
+        slideleft, smoothleft, circleopen, …). output (mapping, or just a preset name): name,
+        preset landscape 1920x1080 (canonical — 1920x1080 clips pass through untouched) |
+        vertical 1080x1920 | square 1080x1080, fit auto|letterbox|crop, fps, transition,
+        transition_duration (0.45), limit (a hard-limit id — duration and size are enforced),
+        max_bytes, gif, poster_at. Unknown keys and missing/foreign/rejected clips are refused;
+        clips not yet approved are allowed but the montage is marked DRAFT INPUTS. Run
+        campaign_storyboard first to review the cut. Follow the montage-editing skill."""
+        if (reason := deps.need_ffmpeg()) is not None:
+            return reason
+        try:
+            c = store.require_campaign(campaign_id)
+            seq = _sequence(sequence)
+            raw_out = _output_arg(output)
+            opts = montage.normalize_output(raw_out)
+            lane_id = _lane_id(campaign_id, lane)
+            if asset_id:
+                target = _own_asset(campaign_id, asset_id)
+                if target["kind"] != "montage":
+                    return f"Not rendered — asset #{asset_id} is a {target['kind']}; fill a planned montage asset or leave asset_id off."
+            out_dir = paths.unique_dir(
+                paths.campaign_dir(c["id"], c["name"]) / "montages",
+                f"{opts['name']}-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}",
+            )
+        except montage.MontageError as e:
+            return "Not rendered — fix these and resend:\n" + _problems(e)
+        except ValueError as e:
+            return f"Not rendered — {e}"
+        try:
+            r = montage.render_montage(campaign_id, seq, raw_out, out_dir)
+        except montage.MontageError as e:
+            shutil.rmtree(out_dir, ignore_errors=True)
+            return "Not rendered — fix these and resend:\n" + _problems(e)
+        except (render.RenderError, shoot.WorkerError) as e:
+            return f"The montage didn't render — {e}"
+        notes = []
+        if r["violations"]:
+            notes.append("VIOLATES: " + "; ".join(r["violations"]))
+        if r["unapproved"]:
+            notes.append(
+                "DRAFT INPUTS: built from unapproved "
+                + ", ".join(f"#{i}" for i in r["unapproved"])
+                + " — get those approved (or swap them) before this ships"
+            )
+        meta = {
+            "sequence": seq,
+            "output": raw_out or {},
+            "timeline": r["timeline"],
+            "attempts": r["attempts"],
+            "engines": r["engines"],
+            "warnings": r["warnings"],
+            "violations": r["violations"],
+            "inputs": r["inputs"],
+            "unapproved_inputs": r["unapproved"],
+        }
+        fields = dict(
+            path=r["path"],
+            status="rendered",
+            size_bytes=r["size_bytes"],
+            width=r["width"],
+            height=r["height"],
+            duration_s=r["duration_s"],
+            limit_id=r["opts"]["limit"],
+            meta=meta,
+            notes=" ".join(notes),
+        )
+        try:
+            if asset_id:
+                a = store.update_asset(asset_id, **fields)
+            else:
+                a = store.add_asset(
+                    campaign_id, "montage", title or r["opts"]["title"] or r["opts"]["name"], lane_id=lane_id, **fields
+                )
+        except ValueError as e:
+            return f"Rendered to {r['path']} but couldn't register it — {e}"
+        extra = []
+        if r["poster"]:
+            p = store.add_asset(
+                campaign_id, "still", f"{a['title']}: poster", lane_id=a["lane_id"], status="rendered",
+                path=r["poster"], parent_id=a["id"], **_file_facts(r["poster"]),
+            )  # fmt: skip
+            extra.append(f"- poster → asset #{p['id']}: {r['poster']}")
+        if r["gif"]:
+            g = store.add_asset(
+                campaign_id, "gif", f"{a['title']}: gif", lane_id=a["lane_id"], status="rendered",
+                path=r["gif"]["path"], parent_id=a["id"], limit_id=r["opts"]["gif_limit"],
+                **_file_facts(r["gif"]["path"]),
+            )  # fmt: skip
+            extra.append(f"- gif → asset #{g['id']}: {limits.human_bytes(g['size_bytes'])}, {r['gif']['path']}")
+        _emit("render_finished", {"campaign_id": campaign_id, "source_asset_id": 0, "assets": [a["id"]]})
+        lines = [
+            f"Montage → asset #{a['id']}: {r['width']}×{r['height']} mp4, {r['duration_s']:.2f}s "
+            f"(planned {r['expected_duration_s']:.2f}s), {limits.human_bytes(r['size_bytes'])} "
+            f"({len(r['attempts'])} encode attempt{'s' if len(r['attempts']) != 1 else ''})",
+            r["path"],
+            *extra,
+            "",
+            "Cut sheet:",
+            montage.cut_sheet(r["timeline"], r["expected_duration_s"]),
+        ]
+        if r["violations"]:
+            lines += ["", "⚠ " + "; ".join(r["violations"])]
+        if r["unapproved"]:
+            lines += [
+                "",
+                "⚠ DRAFT — built from inputs the operator hasn't approved: "
+                + ", ".join(f"#{i}" for i in r["unapproved"]),
+            ]
+        if r["warnings"]:
+            lines += ["", "Notes:", *(f"- {w}" for w in r["warnings"] if "not approved" not in w)]
+        lines += [
+            "",
+            f"LOOK at it before offering it: campaign_view(asset_id={a['id']}, frames=12) and around= each transition "
+            "time above — then campaign_asset_update(…, status='ready_for_review').",
+        ]
+        out = "\n".join(lines)
+        if r["poster"]:
+            out += _embed(r["poster"], "image/png", f"{a['title']} poster")
+        return out
+
+    @tool
+    def campaign_storyboard(campaign_id: int, sequence: list | str, output: dict | str = "") -> str:
+        """Review a montage cut BEFORE rendering it: a contact sheet comes back to you as a
+        picture — one frame per item (a clip's middle frame, framed exactly as the montage will
+        frame it; each card rendered), in order, with a swatch between items for the transition
+        (the colour wipe's colour, an xfade's real midpoint, a thin bar for a cut) — plus the cut
+        sheet: every item's start time, length after speed, and each transition's moment.
+        Same sequence and output as campaign_montage; it validates them identically (unknown
+        keys, missing clips, transitions longer than the items, a hard limit the runtime breaks).
+        Check: one idea per beat, theme colours that differ beat to beat, tagline cadence, the
+        end card last, and a focus that keeps the subject in a vertical/square cut."""
+        if (reason := deps.need_ffmpeg()) is not None:
+            return reason
+        try:
+            c = store.require_campaign(campaign_id)
+            seq = _sequence(sequence)
+            raw_out = _output_arg(output)
+            opts = montage.normalize_output(raw_out)
+            dst = (
+                paths.unique_dir(
+                    paths.campaign_dir(c["id"], c["name"]) / "storyboards", datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+                )
+                / f"{opts['name']}-storyboard.png"
+            )
+            b = montage.storyboard(campaign_id, seq, raw_out, dst)
+        except montage.MontageError as e:
+            return "Can't storyboard it — fix these and resend:\n" + _problems(e)
+        except (render.RenderError, shoot.WorkerError, ValueError) as e:
+            return f"Can't storyboard it — {e}"
+        g = b["grid"]
+        text = (
+            f"Storyboard — {len(b['timeline'])} items, {b['total']:.2f}s at {b['opts']['width']}×{b['opts']['height']} "
+            f"({b['opts']['preset']}). Read the sheet left → right, top → bottom ({g['columns']} items a row); "
+            "the narrow tile after an item is the transition into the next.\n"
+            f"{b['path']}\n\nCut sheet:\n{montage.cut_sheet(b['timeline'], b['total'])}"
+            + ("\n\nNotes:\n" + "\n".join(f"- {w}" for w in b["warnings"]) if b["warnings"] else "")
+        )
+        ff = deps.ffmpeg()
+        envelope = _multimodal_fn()
+        if envelope is None or not ff:
+            return (
+                text + "\n\nVision isn't available on this core, so the sheet couldn't be shown to you — "
+                "ask the operator to look at it." + _embed(b["path"], "image/png", "storyboard")
+            )
+        import base64
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="campaign-board-") as td:
+            try:
+                data = look._encode(
+                    render._default_runner, ff, ["-i", b["path"]], look._scale(2048, 2048), Path(td) / "board.jpg"
+                )
+            except look.LookError as e:
+                return f"{text}\n\nCouldn't encode the sheet for viewing ({e})."
+        try:
+            return envelope(text, images=[{"b64": base64.b64encode(data).decode(), "mime": "image/jpeg"}])
+        except ValueError as e:
+            return f"{text}\n\nThe host refused the image ({e})."
+
     return [
         campaign_create,
         campaign_update,
@@ -877,6 +1092,8 @@ def build_tools(registry):
         campaign_render,
         campaign_card,
         campaign_view,
+        campaign_montage,
+        campaign_storyboard,
     ]
 
 

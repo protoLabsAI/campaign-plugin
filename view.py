@@ -74,7 +74,7 @@ PAGE = r"""<!doctype html>
     <select id="lane" aria-label="Lane"><option value="">All lanes</option></select>
     <select id="kind" aria-label="Kind">
       <option value="">All kinds</option><option>clip</option><option>gif</option>
-      <option>still</option><option>card</option><option>copy_ref</option>
+      <option>still</option><option>card</option><option>montage</option><option>copy_ref</option>
     </select>
     <span class="spacer"></span>
     <button id="refresh" title="Reload">Refresh</button>
@@ -148,7 +148,7 @@ PAGE = r"""<!doctype html>
     el.className = "card"; el.dataset.id = a.id;
     const dims = a.width ? `${a.width}×${a.height}` : "";
     const dur = a.duration_s ? `${a.duration_s.toFixed(1)}s` : "";
-    const violated = (a.notes || "").startsWith("VIOLATES");
+    const violated = /^(VIOLATES|DRAFT INPUTS)/.test(a.notes || "");
     el.innerHTML =
       `<div class="prev">${a.has_file ? "loading…" : (a.path ? "file unavailable" : "no file yet")}</div>` +
       `<div class="body">` +
