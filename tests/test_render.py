@@ -175,6 +175,29 @@ def test_eased_time_is_monotonic_continuous_and_of_the_expected_duration(factor,
     assert max(abs(b - a) for a, b in zip(rate, rate[1:])) < 0.05, "no step in the rate: it eases"
 
 
+def _eval_setpts(expr: str, t: float, tb: float = 1 / 1000) -> float:
+    """Evaluate a remap expression the way ffmpeg's setpts does: ``T`` is the frame's time in
+    SECONDS, the result is in timebase units (hence the trailing ``/TB``). Returns seconds."""
+    assert set(re.findall(r"[A-Za-z_]+", expr)) <= {"if", "lt", "pow", "T", "TB"}, expr
+    py = expr.replace("if(", "_if(").replace("lt(", "_lt(")
+    env = {"_if": lambda c, a, b: a if c else b, "_lt": lambda a, b: a < b, "pow": pow, "T": t, "TB": tb}
+    return eval(py, {"__builtins__": {}}, env) * tb  # noqa: S307 — our own generated arithmetic
+
+
+@pytest.mark.parametrize("factor, ease", [(4.0, 0.4), (0.25, 0.5), (3.0, 1.0)])
+def test_the_ffmpeg_expression_and_the_python_curve_agree(factor, ease):
+    """eased_time (Python) and ease_expr/remap_expr (the ffmpeg string) are one curve, twice."""
+    piece = render.ease_expr(2.0, factor, ease)
+    for i in range(0, 260):
+        t = i / 100
+        assert _eval_setpts(piece, t) == pytest.approx(render.eased_time(t, 2.0, factor, ease), abs=1e-7)
+    segs = render.segments(0.5, 9.0, [(1.0, 3.0, factor), (4.0, 6.0, 2.0), (7.0, 8.5, 0.5)], [ease, 0.3, 0.0])
+    whole = render.remap_expr(segs)
+    for i in range(50, 900):
+        t = i / 100
+        assert _eval_setpts(whole, t, tb=1 / 90000) == pytest.approx(render.timeline_time(segs, t), abs=1e-6)
+
+
 def test_an_eased_ramp_is_a_quoted_setpts_remap_and_its_duration_adds_up():
     s = _spec(start="start", end="end", speed=[{"from": "typed", "to": "dialog", "factor": 4, "ease": 0.5}])
     segs = render.segments(s["start"], s["end"], s["ramps"], s["eases"])
@@ -359,19 +382,32 @@ def test_real_eased_ramp_keeps_every_frame_in_order_and_lasts_as_computed(tmp_pa
 
 @pytest.mark.integration
 @pytest.mark.skipif(not have_ffmpeg(), reason="ffmpeg/ffprobe not installed")
-@pytest.mark.parametrize("factor, tail", [(0.25, 7.5), (4.0, 1.875)])
-def test_real_eased_ramp_tail_starts_on_the_exact_boundary(tmp_path, factor, tail):
+@pytest.mark.parametrize(
+    "factor, tail, container",
+    [(0.25, 7.5, "webm"), (4.0, 1.875, "webm"), (0.25, 7.5, "ts"), (4.0, 1.875, "ts")],
+)
+def test_real_eased_ramp_tail_starts_on_the_exact_boundary(tmp_path, factor, tail, container):
     # Review repro (ffmpeg 8.0.1, 25 fps, ramp 1–3 s, ease 0.5): concat sized the ramp's last
     # frame as if flat, so the tail started at 7.591 / 1.852 s instead of 7.500 / 1.875 s.
     import shutil
 
+    # T in setpts is the frame time in SECONDS whatever the stream's timebase (ffmpeg-filters:
+    # "T  the time in seconds of the current frame"); the remap divides by TB once, at the end.
+    # So the same boundary holds on a 1/1000 webm and a 1/90000 MPEG-TS.
     ff = shutil.which("ffmpeg")
-    src = tmp_path / "take.webm"
+    src = tmp_path / f"take.{container}"
+    codec = ["-c:v", "libvpx-vp9", "-b:v", "100k"] if container == "webm" else ["-c:v", "libx264", "-f", "mpegts"]
     subprocess.run(
         [ff, "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=160x100:rate=25", "-t", "4",
-         "-c:v", "libvpx-vp9", "-b:v", "100k", str(src)],
+         *codec, str(src)],
         check=True,
     )  # fmt: skip
+    tb = subprocess.run(
+        [shutil.which("ffprobe"), "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=time_base",
+         "-of", "csv=p=0", str(src)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()  # fmt: skip
+    assert set(tb.split()) == {"1/1000" if container == "webm" else "1/90000"}
     segs = render.segments(0.0, 4.0, [(1.0, 3.0, factor)], [0.5])
     assert render.timeline_time(segs, 3.0) == pytest.approx(tail)
     times = _frame_times(ff, src, render.timeline_filter(segs, None, None))
