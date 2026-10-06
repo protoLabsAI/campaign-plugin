@@ -23,13 +23,13 @@ or a render report is not a review. Before `ready_for_review` you must have view
 - **every still** of the take — `campaign_view(campaign_id, asset_id=<still id>)` for each
   (the take's stills are listed in `campaign_assets` with `kind=still`), plus every card and
   poster you're handing over;
-- **the clip's flow, ~1 frame per second across the WHOLE clip** — start with
-  `campaign_view(campaign_id, asset_id=<clip id>, frames=12)` (one contact sheet; 12 is the
-  most one call spreads over the clip). That's 1/s only for a clip of ≤ 12 s; for a longer one,
-  fill the gaps with `around=<seconds>` calls (each returns the frames 0.3 s either side of
-  that time) every ~2 s through the action — `around=1.5`, `3.5`, `5.5`, … — until no second
-  of it is unseen. Six evenly spaced frames of a 30 s clip can't show a missing chunk of
-  action; one a second can. Use `frames=3` for full-size frames when text must be read;
+- **the clip's flow, ~1 frame per second across the WHOLE clip** —
+  `campaign_view(campaign_id, asset_id=<clip id>, every_s=1)` returns the first 12 seconds as
+  one contact sheet; a longer clip is paged, and the reply names the next page
+  (`NEXT PAGE: … start=12`) — call it until no page is left (a 30 s clip is 3 calls). Six
+  evenly spaced frames of a 30 s clip can't show a missing chunk of action; one a second can.
+  `start`/`end` (seconds or marks) narrow it to the action. Use `frames=3` (with `start`/`end`
+  for a span) for full-size frames when text must be read;
 - **both sides of every cut** — `around=<mark>` on the take for each mark you trimmed or
   speed-ramped at (`around` also takes seconds in the rendered file), so a jump never lands on
   a half-drawn dialog, a spinner, or a frame with something private in it.

@@ -404,3 +404,64 @@ def test_a_numeric_lane_must_exist_in_this_campaign(tools):
     assert "no lane 2 in campaign 1" in call(tools, "campaign_asset_update", asset_id=first, lane="2")
     assert store.get_asset(first)["lane_id"] == 1
     assert "no lane 2 in campaign 1" in call(tools, "campaign_assets", campaign_id=1, lane="2")
+
+
+# ── reading a saved script back; one-step fixes with overrides ───────────────
+def test_script_get_returns_the_saved_yaml_with_numbered_steps(tools):
+    from campaign import shotscript, subagents
+
+    call(tools, "campaign_create", name="L")
+    call(tools, "campaign_script_save", campaign_id=1, script=SCRIPT)
+    out = call(tools, "campaign_script_get", script_id=1)
+    assert out.startswith("Shot script #1 'hero' (campaign 1")
+    yml = out.split("```yaml\n", 1)[1].rsplit("```", 1)[0]
+    assert "  # step 3\n  - click: {role: button, name: Go}\n" in yml
+    # It round-trips: what comes back parses to exactly what was saved.
+    assert shotscript.parse(yml) == store.get_script(1)["body"]
+    assert "No shot script #9" in call(tools, "campaign_script_get", script_id=9)
+    assert "campaign_script_get(script_id)" in call(tools, "campaign_get", campaign_id=1)
+    assert "campaign_script_get" in subagents.PRODUCER_TOOLS, "the producer can read the scripts it fixes"
+
+
+def test_shoot_overrides_fix_one_step_and_save_it(tools, browser_ok, ffmpeg_ok):
+    call(tools, "campaign_create", name="L")
+    call(tools, "campaign_script_save", campaign_id=1, script=SCRIPT)
+    out = call(
+        tools,
+        "campaign_shoot",
+        campaign_id=1,
+        script_id=1,
+        overrides={
+            "3": {"click": {"role": "button", "name": "Save", "exact": True}},  # replace step 3
+            4: {"full_page": True},  # merge into step 4 (`screenshot: result` written short → refused below)
+        },
+    )
+    assert "written in short form" in out and "nothing was recorded or saved" in out
+    assert not [c for c in browser_ok.calls if c[0] == "click"], "an invalid override records nothing"
+    assert store.get_script(1)["body"]["steps"][2] == {"click": {"role": "button", "name": "Go"}}, "nor saves"
+
+    out = call(
+        tools,
+        "campaign_shoot",
+        campaign_id=1,
+        script_id=1,
+        overrides='{"3": {"click": {"role": "button", "name": "Save"}}}',
+    )
+    assert "Recorded take" in out, out
+    click = next(c for c in browser_ok.calls if c[0] == "click")
+    assert click[1:4] == ("role", ("button",), {"name": "Save"})
+    saved = store.get_script(1)
+    assert saved["body"]["steps"][2] == {"click": {"role": "button", "name": "Save"}}, "the fix is saved"
+    assert len(store.scripts(1)) == 1 and store.get_asset(1)["script_id"] == 1, "same script, updated in place"
+
+    # Options merge into a step written as a mapping.
+    call(tools, "campaign_shoot", campaign_id=1, script_id=1, overrides={3: {"timeout_ms": 30000}})
+    assert store.get_script(1)["body"]["steps"][2] == {"click": {"role": "button", "name": "Save", "timeout_ms": 30000}}
+
+    # A bad step number or an invalid result is named; validation is the same validator's.
+    out = call(tools, "campaign_shoot", campaign_id=1, script_id=1, overrides={9: {"hold": 100}})
+    assert "overrides: 9 is not a step number 1..5" in out
+    out = call(tools, "campaign_shoot", campaign_id=1, script_id=1, overrides={3: {"clik": {"text": "x"}}})
+    assert "unknown option `clik`" in out and "nothing was recorded" in out
+    out = call(tools, "campaign_shoot", campaign_id=1, script_id=1, overrides={3: {"hold": {"ms": 999999}}})
+    assert "step 3 (hold)" in out and "is outside 0..60000" in out

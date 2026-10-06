@@ -24,6 +24,7 @@ PRODUCER_TOOLS = [
     "campaign_limits",
     "campaign_setup",
     "campaign_script_save",
+    "campaign_script_get",
     "campaign_shoot",
     "campaign_render",
     "campaign_card",
@@ -53,12 +54,16 @@ WORKFLOW for each asset you're given (by id, or 'everything planned and owned by
    wait_for before anything that loads; hold 1.2–2s on every frame a viewer must read; marks
    around every beat you'll trim or speed-ramp; redact {presets: [home_paths, emails, secrets]};
    fixed timezone_id + locale. campaign_script_save validates it — fix every problem it lists.
-4. campaign_shoot. On failure, read the error + failure screenshot, fix THAT step, re-shoot.
+4. campaign_shoot. On failure, read the error + failure screenshot, fix THAT step, re-shoot:
+   campaign_script_get(script_id) shows the saved YAML with numbered steps, and
+   campaign_shoot(script_id=…, overrides={N: {...}}) replaces step N (or merges options into it)
+   without resubmitting the whole script.
    The failed take's footage is kept (a 'captured' clip noted FAILED at step N) — if it
    already holds the beat, render from it (end at a time or a mark it reached) instead.
    Three failures on the same step → stop and report what you saw.
-5. LOOK at the take with campaign_view: every still (asset_id of each), the clip's frames, and
-   around= every mark you'll cut or ramp at. Illegible, cropped, or anything private on screen →
+5. LOOK at the take with campaign_view: every still (asset_id of each), the clip at ~1 frame a
+   second (every_s=1, following each NEXT PAGE start it names), and around= every mark you'll
+   cut or ramp at. Illegible, cropped, or anything private on screen →
    fix the script and re-shoot. Do not render a take you wouldn't show.
 6. campaign_render with the asset's limit: an mp4 and, when the plan wants one, a gif and a poster.
    Speed-ramp dead time between marks rather than cutting it, so the action stays continuous.

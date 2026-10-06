@@ -158,6 +158,42 @@ def test_frame_times_are_slice_centres():
     assert look.frame_times(0, 4) == [0.0]
 
 
+# ── every_s / start / end: a ~1 s review of a long clip, paged 12 to a sheet ──
+def test_every_s_pages_twelve_frames_at_a_time_and_names_the_next_page():
+    times, note = look._span_times("", "", 1.0, 3, {}, 30.0, None)
+    assert times == [float(t) for t in range(12)]
+    assert "frames 1–12 of 30" in note and "NEXT PAGE: campaign_view(..., every_s=1, start=12)" in note
+    times, note = look._span_times(24, "", 1.0, 3, {}, 30.0, None)
+    assert times == [24.0, 25.0, 26.0, 27.0, 28.0, 29.0] and "NEXT PAGE" not in note and "of 6" in note
+    # Marks work as start/end, and the next page keeps the end.
+    times, note = look._span_times("typed", "result", 0.5, 3, {"typed": 2.0, "result": 9.0}, 30.0, None)
+    assert times[0] == 2.0 and times[-1] == 7.5 and len(times) == 12
+    assert "start=8, end='result')" in note and "(2 more frame(s))" in note
+
+
+def test_start_end_without_every_s_spread_frames_over_the_span():
+    times, note = look._span_times(10, 16, 0, 3, {}, 30.0, None)
+    assert times == [11.0, 13.0, 15.0] and note == "span 10.00s–16.00s"
+    assert look._span_times("", "", 0, 3, {}, 6.0, None) == ([1.0, 3.0, 5.0], "")
+
+
+def test_bad_spans_are_explained():
+    with pytest.raises(look.LookError, match="past the end"):
+        look._span_times(40, "", 1.0, 3, {}, 30.0, None)
+    with pytest.raises(look.LookError, match="must be after start"):
+        look._span_times(10, 5, 1.0, 3, {}, 30.0, None)
+    with pytest.raises(look.LookError, match="neither seconds nor a mark"):
+        look._span_times("nope", "", 1.0, 3, {"cut": 1.0}, 30.0, None)
+
+
+def test_paging_args_are_validated_by_the_tool(tools, core, camp):
+    c, root = camp
+    (root / "s.png").write_bytes(_png(8, 8))
+    assert "every_s must be 0.1..600" in view(tools, campaign_id=c["id"], path="s.png", every_s=0.01)
+    assert "a still is a single frame" in view(tools, campaign_id=c["id"], path="s.png", every_s=1)
+    assert "a still is a single frame" in view(tools, campaign_id=c["id"], path="s.png", start=2)
+
+
 def test_the_producer_can_look():
     from campaign import subagents
 
@@ -217,6 +253,20 @@ def test_real_frames_from_a_clip(tools, core, camp, tmp_path):
     assert "before cut @ 1.70s" in text and "after cut @ 2.30s" in text and "contact sheet" in text
     before, after = (base64.b64decode(i["b64"]) for i in imgs[:2])
     assert before != after and _dims(before, tmp_path) == (640, 360)
+
+    # every_s: a 4 s clip at 1/s is one 4-frame sheet, no next page; a span narrows it.
+    view(tools, campaign_id=c["id"], asset_id=a["id"], every_s=1)
+    text, imgs = core.calls[-1]
+    assert len(imgs) == 1 and "contact sheet" in text and "@ 0.00s, 1.00s, 2.00s, 3.00s" in text
+    assert "frames 1–4 of 4" in text and "NEXT PAGE" not in text
+    view(tools, campaign_id=c["id"], asset_id=a["id"], every_s=0.25, start="cut")
+    text, imgs = core.calls[-1]
+    assert "frames 1–8 of 8" in text and "@ 2.00s, 2.25s" in text
+    view(tools, campaign_id=c["id"], asset_id=a["id"], every_s=0.25)
+    text, imgs = core.calls[-1]
+    assert len(imgs) == 1 and "frames 1–12 of 16" in text and "start=3" in text
+    view(tools, campaign_id=c["id"], asset_id=a["id"], every_s=1, start=1, end=3)
+    assert len(core.calls[-1][1]) == 2, "two frames come back one image each"
 
     # seconds work too; a mark the take doesn't have is named.
     view(tools, campaign_id=c["id"], asset_id=a["id"], frames=0, around="3.5")

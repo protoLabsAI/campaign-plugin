@@ -260,6 +260,7 @@ def campaign_brief(campaign_id: int) -> str:
     if scripts:
         out.append("\n## Shot scripts")
         out += [f"- script #{s['id']} {s['name']} ({len(s['body'].get('steps', []))} steps)" for s in scripts]
+        out.append("(campaign_script_get(script_id) shows a script's YAML, steps numbered)")
     return "\n".join(out)
 
 
@@ -645,19 +646,36 @@ def build_tools(registry):
         frames: int = 3,
         around: str = "",
         max_side: int = 1280,
+        every_s: float = 0,
+        start: str | float = "",
+        end: str | float = "",
     ) -> str:
         """LOOK at a campaign file yourself — the image comes back to you as a picture, not a
         path. Pass asset_id (from campaign_assets) or a path inside the campaign's media dir.
         A still, card or poster comes back downscaled (long side <= max_side, 320-2048). A clip
         or GIF comes back as `frames` evenly spaced frames (1-3: one image each at full size;
         4-12: one contact sheet), and around=<mark name or seconds> adds the frame just before
-        and just after that moment — use it on every cut, speed-ramp boundary and mark. At most
-        3 images per call; call again for more. This is how the asset-review self-check is done:
+        and just after that moment — use it on every cut, speed-ramp boundary and mark.
+        start/end (seconds or a mark name) limit the frames to that span. every_s=1 takes a
+        frame every second from start instead of `frames` — up to 12 per call (one contact
+        sheet); a longer span is paged and the reply names the NEXT PAGE's start, so a ~1 s
+        review of a whole clip is a few calls. At most 3 images per call (around's two + one
+        sheet). This is how the asset-review self-check is done:
         read every still and the cut frames for secrets, home paths, emails and usernames on
         screen (terminal and canvas text too), clutter, the wrong theme, and legibility at half
         size."""
         try:
-            res = look.view(campaign_id, asset_id, path, frames=frames, around=around, max_side=max_side)
+            res = look.view(
+                campaign_id,
+                asset_id,
+                path,
+                frames=frames,
+                around=around,
+                max_side=max_side,
+                every_s=every_s,
+                start=start,
+                end=end,
+            )
         except (look.LookError, render.RenderError, ValueError) as e:
             return f"Can't show it — {e}"
         text = look.caption(res)
@@ -699,13 +717,38 @@ def build_tools(registry):
         )
 
     @tool
+    def campaign_script_get(script_id: int) -> str:
+        """Read a saved shot script back as YAML — the whole script as saved, every step
+        commented with its number (the numbers validation errors and failed takes use). Use it
+        to fix a script without rewriting it from memory: change one step with
+        campaign_shoot(script_id=…, overrides={N: …}), or edit the YAML and campaign_script_save
+        it again. campaign_get lists a campaign's scripts by id."""
+        row = store.get_script(script_id)
+        if row is None:
+            return f"No shot script #{script_id} — campaign_get(campaign_id) lists a campaign's scripts."
+        return (
+            f"Shot script #{row['id']} {row['name']!r} (campaign {row['campaign_id']}, saved {row['updated']}):\n"
+            f"```yaml\n{_script_yaml(row['body'])}```"
+        )
+
+    @tool
     def campaign_shoot(
-        campaign_id: int, script_id: int = 0, script: str = "", asset_id: int = 0, title: str = "", lane: str = ""
+        campaign_id: int,
+        script_id: int = 0,
+        script: str = "",
+        asset_id: int = 0,
+        title: str = "",
+        lane: str = "",
+        overrides: dict | str = "",
     ) -> str:
         """Record a take: run a shot script in headless Chromium (Playwright) with video on,
         and register the .webm, the named stills, and a timing log of every mark as campaign
         assets (status 'captured'). Pass script_id for a saved script, or script (YAML/JSON) to
         validate, save and run in one go. Pass asset_id to fill a planned asset with this take.
+        overrides={N: change} fixes step N (1-based, as errors number them) without resubmitting
+        the script: a whole step ({"click": {"role": "button", "name": "Save"}}) replaces it,
+        options ({"timeout_ms": 90000}) are merged into it. The patched script is validated like
+        any other and SAVED (same name), so the take stays re-recordable.
         On a failed step you get the step number, the error, and a screenshot of the page at
         that moment — and the recording up to the failure is KEPT as a new 'captured' clip noted
         'FAILED at step N: …' with the marks it reached, so campaign_render can still cut a beat
@@ -723,13 +766,19 @@ def build_tools(registry):
                 if not script.strip():
                     return "Pass script_id (a saved script) or script (YAML/JSON)."
                 data = shotscript.parse(script)
+            changed: list[int] = []
+            if overrides not in (None, "", {}):
+                data, changed = shotscript.apply_overrides(data, _parse_obj(overrides, "overrides"))
             norm = shotscript.validate(data)
             if not script_id:
                 script_id = store.save_script(campaign_id, norm["name"], data)["id"]
+            elif changed:
+                store.save_script(campaign_id, row["name"], data)
             lane_id = _lane_id(campaign_id, lane)
             previous = _own_asset(campaign_id, asset_id) if asset_id else None
         except shotscript.ScriptError as e:
-            return "Script is invalid — nothing was recorded:\n" + "\n".join(f"- {p}" for p in e.problems)
+            what = "Script (with your overrides) is invalid" if overrides not in (None, "", {}) else "Script is invalid"
+            return f"{what} — nothing was recorded or saved:\n" + "\n".join(f"- {p}" for p in e.problems)
         except ValueError as e:
             return str(e)
 
@@ -1232,6 +1281,7 @@ def build_tools(registry):
         campaign_limits,
         campaign_setup,
         campaign_script_save,
+        campaign_script_get,
         campaign_shoot,
         campaign_render,
         campaign_card,
@@ -1239,6 +1289,30 @@ def build_tools(registry):
         campaign_montage,
         campaign_storyboard,
     ]
+
+
+def _script_yaml(body: dict[str, Any]) -> str:
+    """A saved script as YAML that round-trips (``shotscript.parse`` reads it back to ``body``),
+    each step preceded by a ``# step N`` comment."""
+    import yaml
+
+    def dump(obj: Any, flow: bool | None = None) -> str:
+        return yaml.safe_dump(obj, sort_keys=False, allow_unicode=True, width=100, default_flow_style=flow)
+
+    # Top-level keys in block style; each step's body inline-where-small, as scripts are written.
+    out = "".join(
+        dump({k: v}, flow=None if isinstance(v, (dict, list)) else False) for k, v in body.items() if k != "steps"
+    )
+    steps = body.get("steps")
+    if isinstance(steps, list):
+        out += "steps:\n"
+        for i, st in enumerate(steps, start=1):
+            nested = isinstance(st, dict) and any(isinstance(v, (dict, list)) for v in st.values())
+            item = dump([st], flow=None if nested else False).rstrip("\n").replace("\n", "\n  ")
+            out += f"  # step {i}\n  {item}\n"
+    elif steps is not None:
+        out += dump({"steps": steps})
+    return out
 
 
 def _multimodal_fn():

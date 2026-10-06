@@ -8,7 +8,11 @@ into at most a few downscaled JPEGs:
 * a clip or GIF → ``frames`` evenly spaced frames (1–3 come back one image each, full
   ``max_side``; 4–12 come back as ONE contact sheet in reading order);
 * ``around=<mark or seconds>`` → a frame just before and just after that moment (a cut, a
-  speed-ramp boundary, a mark), each full size.
+  speed-ramp boundary, a mark), each full size;
+* ``start``/``end`` (seconds or marks) → the frames come from that span only;
+* ``every_s=1`` → a frame every second from ``start`` (instead of ``frames`` evenly spaced),
+  12 per contact sheet at most: a longer span is PAGED — the caption names the next page's
+  ``start`` — so a ~1 s review of a whole clip is one or a few calls.
 
 The tool wraps the result in protoAgent core's ``multimodal_tool_result`` envelope (via
 ``graph.sdk``, looked up lazily and getattr-guarded — older cores lack it), which the host's
@@ -33,7 +37,8 @@ STILL_EXT = (".png", ".jpg", ".jpeg", ".webp")
 MOTION_EXT = (".webm", ".mp4", ".mov", ".mkv", ".m4v", ".gif")
 MAX_IMAGES = 3  # core's MAX_IMAGES_PER_RESULT
 MAX_IMAGE_BYTES = 2 * 1024 * 1024  # core's MAX_IMAGE_BYTES (decoded)
-MAX_FRAMES = 12
+MAX_FRAMES = 12  # per call — one contact sheet; `every_s` pages past it
+MIN_EVERY_S, MAX_EVERY_S = 0.1, 600.0
 DEFAULT_MAX_SIDE = 1280
 MIN_SIDE, MAX_SIDE = 320, 2048
 AROUND_OFFSET_S = 0.3  # how far either side of `around` the two frames are taken
@@ -118,6 +123,9 @@ def view(
     frames: int = 3,
     around: str = "",
     max_side: int = DEFAULT_MAX_SIDE,
+    every_s: float = 0,
+    start: Any = "",
+    end: Any = "",
     runner=None,
 ) -> dict[str, Any]:
     """Build the images. Returns ``{"text": caption, "images": [{"b64", "mime", "label"}]}``."""
@@ -126,8 +134,11 @@ def view(
     try:
         max_side = int(max_side)
         frames = int(frames)
+        every_s = float(every_s or 0)
     except (TypeError, ValueError):
-        raise LookError("frames and max_side must be integers") from None
+        raise LookError("frames and max_side must be integers, every_s a number of seconds") from None
+    if every_s and not MIN_EVERY_S <= every_s <= MAX_EVERY_S:
+        raise LookError(f"every_s must be {MIN_EVERY_S:g}..{MAX_EVERY_S:g} seconds")
     if not MIN_SIDE <= max_side <= MAX_SIDE:
         raise LookError(f"max_side must be {MIN_SIDE}..{MAX_SIDE}")
     if not 0 <= frames <= MAX_FRAMES:
@@ -139,8 +150,8 @@ def view(
     is_still = src.suffix.lower() in STILL_EXT
 
     if is_still:
-        if around:
-            raise LookError("`around` is for clips — a still is a single frame")
+        if around or every_s or start not in (None, "") or end not in (None, ""):
+            raise LookError("`around`, `every_s`, `start` and `end` are for clips — a still is a single frame")
         if ff:
             with tempfile.TemporaryDirectory(prefix="campaign-look-") as td:
                 data = _encode(runner, ff, ["-i", str(src)], _scale(max_side, max_side), Path(td) / "still.jpg")
@@ -158,8 +169,8 @@ def view(
 
     if not ff:
         raise LookError("pulling frames from a clip needs ffmpeg — " + deps.ffmpeg_hint())
-    if frames == 0 and not around:
-        raise LookError("ask for frames (1–12) and/or around=<mark or seconds>")
+    if frames == 0 and not around and not every_s:
+        raise LookError("ask for frames (1–12), every_s=<seconds> and/or around=<mark or seconds>")
     try:
         info = render.probe(src, runner)
     except render.RenderError as e:
@@ -169,20 +180,14 @@ def view(
     marks = ((asset or {}).get("meta") or {}).get("marks") or {}
     if marks:
         head.append("marks: " + ", ".join(f"{k}={v:.2f}s" for k, v in marks.items()))
+    times, page_note = _span_times(start, end, every_s, frames, marks, dur, asset)
+    if page_note:
+        head.append(page_note)
 
     with tempfile.TemporaryDirectory(prefix="campaign-look-") as td:
         tmp = Path(td)
         if around:
-            try:
-                t = render.resolve_time(around, marks, "around")
-            except render.RenderError as e:
-                parent = (asset or {}).get("parent_id")
-                hint = (
-                    f" — marks are timed on the recorded take (asset #{parent}); view that, or give seconds in this file"
-                    if parent and not marks
-                    else ""
-                )
-                raise LookError(f"{e}{hint}") from None
+            t = _time(around, marks, "around", asset)
             if t is None or t > dur + 0.05:
                 raise LookError(f"around={around!r} is past the end of this {dur:.2f}s file")
             for side, at in (("before", _clamp(t - AROUND_OFFSET_S, dur)), ("after", _clamp(t + AROUND_OFFSET_S, dur))):
@@ -195,19 +200,18 @@ def view(
                     }
                 )
         room = MAX_IMAGES - len(images)
-        one_each = frames == 1 or (not around and frames <= room)
-        if frames and one_each:
-            for i, at in enumerate(frame_times(dur, frames), start=1):
-                at = _clamp(at, dur)
+        n = len(times)
+        one_each = n == 1 or (not around and n <= room)
+        if n and one_each:
+            for i, at in enumerate(times, start=1):
                 data = _frame(runner, ff, src, at, max_side, max_side, tmp / f"f{i:03d}.jpg")
                 images.append(
                     {"b64": base64.b64encode(data).decode(), "mime": "image/jpeg", "label": f"frame @ {at:.2f}s"}
                 )
-        elif frames:
-            cols = min(frames, 4 if frames > 9 else 3)
-            rows = math.ceil(frames / cols)
+        elif n:
+            cols = min(n, 4 if n > 9 else 3)
+            rows = math.ceil(n / cols)
             cell_w, cell_h = max(64, (max_side - 4 * (cols - 1)) // cols), max(64, (max_side - 4 * (rows - 1)) // rows)
-            times = [_clamp(t, dur) for t in frame_times(dur, frames)]
             for i, at in enumerate(times, start=1):
                 _frame(runner, ff, src, at, cell_w, cell_h, tmp / f"cell{i:03d}.jpg")
             data = _encode(
@@ -226,6 +230,55 @@ def view(
                 }
             )
     return {"text": "\n".join(head), "images": images}
+
+
+def _time(value: Any, marks: dict[str, float], what: str, asset: dict[str, Any] | None) -> float | None:
+    try:
+        return render.resolve_time(value, marks, what)
+    except render.RenderError as e:
+        parent = (asset or {}).get("parent_id")
+        hint = (
+            f" — marks are timed on the recorded take (asset #{parent}); view that, or give seconds in this file"
+            if parent and not marks
+            else ""
+        )
+        raise LookError(f"{e}{hint}") from None
+
+
+def _span_times(
+    start: Any, end: Any, every_s: float, frames: int, marks: dict[str, float], dur: float, asset
+) -> tuple[list[float], str]:
+    """The frame times to pull, and a caption line for a span/page ('' when it's the whole clip).
+
+    ``every_s``: a frame at ``start``, ``start + every_s``, … up to ``end`` — the first
+    :data:`MAX_FRAMES` of them; when more remain the caption names the next page's ``start``.
+    Otherwise ``frames`` evenly spaced over ``start``..``end`` (the whole clip by default)."""
+    t0 = _time(start, marks, "start", asset)
+    t1 = _time(end, marks, "end", asset)
+    lo = 0.0 if t0 is None else t0
+    hi = dur if t1 is None else min(t1, dur)
+    if lo >= dur:
+        raise LookError(f"start={start!r} ({lo:.2f}s) is past the end of this {dur:.2f}s file")
+    if hi <= lo:
+        raise LookError(f"end ({hi:.2f}s) must be after start ({lo:.2f}s)")
+    spanned = t0 is not None or t1 is not None
+    if not every_s:
+        times = [_clamp(lo + t, dur) for t in frame_times(hi - lo, frames)] if frames else []
+        return times, (f"span {lo:.2f}s–{hi:.2f}s" if spanned else "")
+    every: list[float] = []
+    while lo + len(every) * every_s < hi - 1e-6:
+        every.append(round(lo + len(every) * every_s, 3))
+    page = every[:MAX_FRAMES]
+    times = [_clamp(t, dur) for t in page]
+    note = f"every {every_s:g}s from {lo:.2f}s to {hi:.2f}s: frames 1–{len(page)} of {len(every)}"
+    if len(every) > len(page):
+        nxt = every[len(page)]
+        end_arg = f", end={end!r}" if t1 is not None else ""
+        note += (
+            f" — NEXT PAGE: campaign_view(..., every_s={every_s:g}, start={nxt:g}{end_arg}) "
+            f"({len(every) - len(page)} more frame(s))"
+        )
+    return times, note
 
 
 def caption(result: dict[str, Any]) -> str:
