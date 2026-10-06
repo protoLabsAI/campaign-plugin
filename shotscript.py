@@ -28,7 +28,7 @@ Example::
       - screenshot: dialog
       - mark: end
 
-Targets (click/hover/fill/type/press/wait_for/scroll/screenshot) are either a string
+Targets (click/focus/hover/drag/fill/type/press/wait_for/scroll/screenshot) are either a string
 (a Playwright selector: CSS, ``text=…``, ``role=button[name="Save"]``) or a mapping with
 ONE of ``selector`` / ``role`` (+ ``name``) / ``text`` / ``label`` / ``placeholder`` /
 ``test_id``, plus optional ``exact`` (whole-string, case-sensitive text/name match instead of
@@ -37,9 +37,19 @@ survive restyles; CSS classes don't.
 
 Several matches: a WAIT (``wait_for`` on a target) is satisfied when ANY match reaches the
 state — "3 passed" in a bold summary AND a code span is fine to wait on. An ACTION (click,
-hover, fill, type, press, scroll, screenshot of a target) needs exactly ONE element: an
+focus, hover, drag, fill, type, press, scroll, screenshot of a target) needs exactly ONE element: an
 ambiguous target fails the step with the first few matches listed — pick one with ``nth``,
-tighten it with ``exact: true``, or use a narrower role/selector.
+tighten it with ``exact: true``, or use a narrower role/selector — or scope it to a container
+with ``within:`` (click / focus / hover / wait_for): the target is looked for inside that
+container only, e.g. the "Save" button of ONE dialog::
+
+    - click: {role: button, name: Save, within: {role: dialog, name: Settings}}
+
+Pointer and keyboard: ``focus: <target>`` focuses an element without clicking it;
+``mouse_move: {x, y}`` parks the visible pointer at viewport coordinates (``smooth: false`` to
+jump) so it doesn't sit on what the viewer must read; ``drag: {target, to: {dx, dy}}`` presses on
+the target's centre, moves by that offset and releases (a resizable divider, a slider);
+``press: {key, repeat: N, delay_ms: 80}`` presses a key N times (``delay_ms`` between presses).
 
 Frames: a target inside an ``<iframe>`` (a protoAgent console plugin view is one — e.g. the
 Terminal rail view at ``/plugins/terminal/view``) adds ``frame:`` — the step's mapping or the
@@ -53,13 +63,14 @@ bare string is a ``url``. The frame is waited for within the step's timeout::
 
 ``wait_for: {frame: …}`` with no target waits for the frame itself; ``screenshot`` with only a
 ``frame`` shoots the iframe element; ``scroll`` with only a ``frame`` scrolls inside it. Masks
-and redaction reach into every frame (including ones that load later) — but CSS can't touch
-text drawn on a ``<canvas>`` (xterm.js), so keep secrets off a canvas terminal in the shot itself.
+and redaction reach into every frame (including ones that load later). CSS can't touch text drawn
+on a ``<canvas>``, so for an xterm.js terminal ``redact`` filters what its ``write()`` is given
+(and blurs an xterm canvas it can't hook) — still keep secrets off a terminal in the shot itself.
 
-Waits: every step that waits on the page (goto, click, hover, fill, type, press, wait_for,
+Waits: every step that waits on the page (goto, click, focus, hover, drag, fill, type, press, wait_for,
 scroll, screenshot) gives up after ``step_timeout_ms`` (script-wide, default 15000). A step
 that waits on something slow — an agent run, a build — sets its own ``timeout_ms`` (up to
-180000 = 3 min; more is a validation error, not a silent clamp), and every step is also
+600000 = 10 min; more is a validation error, not a silent clamp), and every step is also
 bounded by what is left of ``total_timeout_s`` (default 300, max 900). Don't use
 ``wait_for: {network_idle: true}`` on an app that holds a stream open (SSE / websockets — the
 protoAgent console does): it never settles. Wait for the element you need instead.
@@ -116,10 +127,13 @@ TOP_KEYS = {
 STEP_OPS = (
     "goto",
     "click",
+    "focus",
     "fill",
     "type",
     "press",
     "hover",
+    "mouse_move",
+    "drag",
     "wait_for",
     "hold",
     "scroll",
@@ -139,10 +153,12 @@ REDACT_PRESETS = ("home_paths", "emails", "secrets")
 
 MAX_HOLD_MS = 60_000
 # The ceiling for ONE step's wait (script-wide ``step_timeout_ms`` or a step's own
-# ``timeout_ms``). 180s covers a slow real run on screen (an agent turn, a build, an install)
-# while still failing a stuck step inside one shoot. A larger ask is a validation ERROR — never
-# silently clamped — and every step is also bounded by what is left of ``total_timeout_s``.
-MAX_STEP_TIMEOUT_MS = 180_000
+# ``timeout_ms``). 10 min covers a slow real run on screen (a long agent turn, a build, an
+# install) — 3 min proved too short for real agent turns. A stuck step still fails inside one
+# shoot: a larger ask is a validation ERROR (never silently clamped), and every step is also
+# bounded by what is left of ``total_timeout_s`` (max 900s), so a long wait needs a raised
+# total_timeout_s too.
+MAX_STEP_TIMEOUT_MS = 600_000
 MIN_STEP_TIMEOUT_MS = 100
 MAX_TOTAL_S = 900
 # Browser storage seeded before the app boots, and the init_script escape hatch. Both are
@@ -155,6 +171,11 @@ MAX_INIT_SCRIPT_BYTES = 64 * 1024
 # The upload step: how many files one step may hand to a file input (paths are checked against
 # the operator's upload_dirs allowlist by the host at shoot time — see shoot.check_uploads).
 MAX_UPLOAD_FILES = 20
+# press: how many times one step may press its key, and the pause between presses.
+MAX_PRESS_REPEAT = 200
+DEFAULT_PRESS_GAP_MS = 80
+# drag: how far (CSS px) one drag may move the pointer from the target's centre, per axis.
+MAX_DRAG_PX = 4000
 DEFAULTS = {
     "viewport": {"width": 1280, "height": 800},
     "device_scale_factor": 2,
@@ -170,12 +191,15 @@ _TGT = ("target", "selector", "role", "text", "label", "placeholder", "test_id",
 # or unsupported option (``timout_ms``, ``timeout``) must never be dropped on the floor.
 STEP_KEYS: dict[str, tuple[str, ...]] = {
     "goto": ("url", "wait_until", "timeout_ms"),
-    "click": (*_TGT, "timeout_ms"),
-    "hover": (*_TGT, "timeout_ms"),
+    "click": (*_TGT, "within", "timeout_ms"),
+    "focus": (*_TGT, "within", "timeout_ms"),
+    "hover": (*_TGT, "within", "timeout_ms"),
+    "mouse_move": ("x", "y", "smooth"),
+    "drag": (*_TGT, "to", "timeout_ms"),
     "fill": (*_TGT, "value", "timeout_ms"),
     "type": (*_TGT, "delay_ms", "timeout_ms"),
-    "press": (*_TGT, "key", "timeout_ms"),
-    "wait_for": (*_TGT, "state", "network_idle", "ms", "timeout_ms"),
+    "press": (*_TGT, "key", "repeat", "delay_ms", "timeout_ms"),
+    "wait_for": (*_TGT, "within", "state", "network_idle", "ms", "timeout_ms"),
     "hold": ("ms",),
     "scroll": (*_TGT, "x", "y", "smooth", "timeout_ms"),
     "mark": ("name",),
@@ -604,7 +628,7 @@ def _step(i: int, raw: Any, problems: list[str], has_base: bool) -> dict[str, An
             if wu not in ("load", "domcontentloaded", "networkidle", "commit"):
                 problems.append(f"{where}: wait_until must be load|domcontentloaded|networkidle|commit")
             step["wait_until"] = wu
-    elif op in ("click", "hover"):
+    elif op in ("click", "hover", "focus"):
         t = (
             _target(body, where, problems)
             if not isinstance(body, dict)
@@ -613,6 +637,32 @@ def _step(i: int, raw: Any, problems: list[str], has_base: bool) -> dict[str, An
         if t is None:
             return None
         step["target"] = t
+    elif op == "mouse_move":
+        if not isinstance(body, dict) or "x" not in body or "y" not in body:
+            problems.append(f"{where}: needs {{x, y}} — viewport CSS pixels to park the pointer at")
+            return None
+        x = _int(body["x"], f"{where} x", problems, 0, 3840)
+        y = _int(body["y"], f"{where} y", problems, 0, 2160)
+        if x is None or y is None:
+            return None
+        step.update(x=x, y=y, smooth=bool(body.get("smooth", True)))
+    elif op == "drag":
+        if not isinstance(body, dict) or "to" not in body:
+            problems.append(f"{where}: needs a target to grab and `to: {{dx, dy}}` — how far to drag it (px)")
+            return None
+        t = _target_from_mapping(body, where, problems, required=True)
+        to = body["to"]
+        if not isinstance(to, dict) or not to or any(k not in ("dx", "dy") for k in to):
+            problems.append(f"{where}: `to` must be {{dx: px, dy: px}} — an offset from the target's centre")
+            return None
+        dx = _int(to.get("dx", 0), f"{where} to.dx", problems, -MAX_DRAG_PX, MAX_DRAG_PX)
+        dy = _int(to.get("dy", 0), f"{where} to.dy", problems, -MAX_DRAG_PX, MAX_DRAG_PX)
+        if t is None or dx is None or dy is None:
+            return None
+        if not dx and not dy:
+            problems.append(f"{where}: `to` moves nowhere — give a non-zero dx and/or dy")
+            return None
+        step.update(target=t, dx=dx, dy=dy)
     elif op == "fill":
         if not isinstance(body, dict) or "value" not in body:
             problems.append(f"{where}: needs a target and a `value`")
@@ -640,6 +690,10 @@ def _step(i: int, raw: Any, problems: list[str], has_base: bool) -> dict[str, An
             return None
         step["key"] = str(body["key"])
         step["target"] = _target_from_mapping(body, where, problems, required=False)
+        rp = _int(body.get("repeat", 1), f"{where} repeat", problems, 1, MAX_PRESS_REPEAT)
+        step["repeat"] = rp or 1
+        gap = _int(body.get("delay_ms", DEFAULT_PRESS_GAP_MS), f"{where} delay_ms", problems, 0, 5000)
+        step["delay_ms"] = DEFAULT_PRESS_GAP_MS if gap is None else gap
     elif op == "wait_for":
         if isinstance(body, (int, float)) and not isinstance(body, bool):
             body = {"ms": body}
@@ -718,7 +772,27 @@ def _step(i: int, raw: Any, problems: list[str], has_base: bool) -> dict[str, An
             return None
         step.update(target=t, files=files)
     _step_frame(body, step, where, problems)
+    _within(body, step, where, problems)
     return step
+
+
+def _within(body: Any, step: dict[str, Any], where: str, problems: list[str]) -> None:
+    """``within: <target>`` — scope a click / hover / focus / wait_for target to a container
+    (a panel, a dialog, a list row): the target is looked for INSIDE the container only. The
+    container is a target like any other (string or mapping, ``nth``/``exact`` allowed); its
+    frame comes from the step or the target, never from ``within`` itself."""
+    if not isinstance(body, dict) or body.get("within") in (None, ""):
+        return
+    if not step.get("target"):
+        problems.append(f"{where}: `within` scopes a target — this step has none to scope")
+        return
+    w = _target(body["within"], f"{where} within", problems)
+    if w is None:
+        return
+    if "frame" in w:
+        problems.append(f"{where} within: put `frame` on the step or its target — the container is looked for in it")
+        return
+    step["within"] = w
 
 
 def validate(text_or_obj: Any) -> dict[str, Any]:
@@ -843,6 +917,12 @@ def validate(text_or_obj: Any) -> dict[str, Any]:
             f"step_timeout_ms={out['step_timeout_ms']} is longer than the whole shoot "
             f"(total_timeout_s={out['total_timeout_s']}) — raise total_timeout_s (max {MAX_TOTAL_S})"
         )
+    vw, vh = out["viewport"]["width"], out["viewport"]["height"]
+    for st_ in norm:
+        if st_["op"] == "mouse_move" and (st_["x"] >= vw or st_["y"] >= vh):
+            problems.append(
+                f"step {st_['index']} (mouse_move): ({st_['x']}, {st_['y']}) is outside the {vw}×{vh} viewport"
+            )
     for st_ in norm:
         if st_.get("timeout_ms", 0) > budget_ms:
             problems.append(
@@ -850,6 +930,7 @@ def validate(text_or_obj: Any) -> dict[str, Any]:
                 f"(total_timeout_s={out['total_timeout_s']}) — raise total_timeout_s (max {MAX_TOTAL_S})"
             )
     hold_total = sum(s.get("ms", 0) for s in norm if s["op"] in ("hold", "wait_for"))
+    hold_total += sum((s["repeat"] - 1) * s["delay_ms"] for s in norm if s["op"] == "press")
     if hold_total / 1000 > out["total_timeout_s"]:
         problems.append(
             f"holds/waits add up to {hold_total / 1000:.0f}s, over total_timeout_s={out['total_timeout_s']}"
@@ -900,18 +981,27 @@ def describe_step(step: dict[str, Any]) -> str:
     return desc
 
 
+def _describe_within(step: dict[str, Any]) -> str:
+    return f" within {describe_target(step['within'])}" if step.get("within") else ""
+
+
 def _describe_step(step: dict[str, Any]) -> str:
     op = step["op"]
     if op == "goto":
         return f"goto {step['url']}"
-    if op in ("click", "hover"):
-        return f"{op} {describe_target(step['target'])}"
+    if op in ("click", "hover", "focus"):
+        return f"{op} {describe_target(step['target'])}" + _describe_within(step)
+    if op == "mouse_move":
+        return f"move the pointer to ({step['x']}, {step['y']})"
+    if op == "drag":
+        return f"drag {describe_target(step['target'])} by ({step['dx']:+d}, {step['dy']:+d})"
     if op == "fill":
         return f"fill {describe_target(step['target'])}"
     if op == "type":
         return f"type {len(step['text'])} chars into {describe_target(step.get('target'))}"
     if op == "press":
-        return f"press {step['key']}"
+        times = f" ×{step['repeat']}" if step.get("repeat", 1) > 1 else ""
+        return f"press {step['key']}{times}"
     if op == "wait_for":
         if step.get("network_idle"):
             return "wait for network idle"
@@ -919,7 +1009,7 @@ def _describe_step(step: dict[str, Any]) -> str:
             return f"wait {step['ms']}ms"
         if step.get("frame") and not step.get("target"):
             return f"wait for {describe_frame(step['frame'])}"
-        return f"wait for {describe_target(step['target'])} ({step.get('state')})"
+        return f"wait for {describe_target(step['target'])}{_describe_within(step)} ({step.get('state')})"
     if op in ("hold",):
         return f"hold {step['ms']}ms"
     if op == "screenshot" and step.get("target"):
@@ -939,4 +1029,5 @@ def example() -> str:
     import textwrap
 
     block = (__doc__ or "").split("Example::", 1)[1].split("Targets (", 1)[0]
-    return textwrap.dedent(block).strip("\n")
+    ops = textwrap.fill(", ".join(STEP_OPS), 92, initial_indent="# ", subsequent_indent="#   ")
+    return textwrap.dedent(block).strip("\n") + "\n# Every step op (the shot-scripting skill has the details):\n" + ops

@@ -183,12 +183,14 @@ def test_a_step_can_ask_for_its_own_timeout_up_to_the_max():
     s = validate(
         _with(
             {"wait_for": {"text": "Done", "timeout_ms": 30_000}},
-            {"click": {"role": "button", "name": "Go", "timeout_ms": 180_000}},
+            {"click": {"role": "button", "name": "Go", "timeout_ms": 600_000}},
+            total_timeout_s=900,
         )
     )
     wf, click = s["steps"][1], s["steps"][2]
     assert wf["timeout_ms"] == 30_000 and wf["target"] == {"text": "Done"}
-    assert click["timeout_ms"] == shotscript.MAX_STEP_TIMEOUT_MS == 180_000
+    # 10 min: a real agent turn on screen ran past the old 3-min cap (brandLaunch, 10-01).
+    assert click["timeout_ms"] == shotscript.MAX_STEP_TIMEOUT_MS == 600_000
     assert "(timeout 30000ms)" in shotscript.describe_step(wf)
     # Every waiting op takes it.
     for op, body in (
@@ -205,10 +207,10 @@ def test_a_step_can_ask_for_its_own_timeout_up_to_the_max():
 
 
 def test_a_timeout_over_the_max_fails_validation_loudly_never_clamps():
-    p = _problems(_with({"wait_for": {"text": "Done", "timeout_ms": 300_000}}))
-    assert "step 2 (wait_for) timeout_ms: 300000ms is over the 180000ms (180s) per-step max" in p
-    p = _problems(_with(step_timeout_ms=200_000))
-    assert "step_timeout_ms: 200000ms is over the 180000ms (180s) per-step max" in p
+    p = _problems(_with({"wait_for": {"text": "Done", "timeout_ms": 700_000}}, total_timeout_s=900))
+    assert "step 2 (wait_for) timeout_ms: 700000ms is over the 600000ms (600s) per-step max" in p
+    p = _problems(_with(step_timeout_ms=650_000, total_timeout_s=900))
+    assert "step_timeout_ms: 650000ms is over the 600000ms (600s) per-step max" in p
     assert "must be an integer" in _problems(_with({"click": {"text": "x", "timeout_ms": "soon"}}))
     assert "under the 100ms minimum" in _problems(_with({"click": {"text": "x", "timeout_ms": 5}}))
 
@@ -217,6 +219,93 @@ def test_a_step_timeout_longer_than_the_whole_shoot_is_an_error():
     p = _problems(_with({"wait_for": {"text": "Done", "timeout_ms": 60_000}}, total_timeout_s=30))
     assert "longer than the whole shoot (total_timeout_s=30)" in p
     assert "longer than the whole shoot" in _problems(_with(step_timeout_ms=60_000, total_timeout_s=30))
+    # A long per-step wait is still bounded by the whole shoot: 10 min needs total_timeout_s ≥ 600.
+    p = _problems(_with({"wait_for": {"text": "Done", "timeout_ms": 600_000}}))
+    assert "longer than the whole shoot (total_timeout_s=300)" in p and "max 900" in p
+
+
+# ── pointer + keyboard steps: focus, mouse_move, drag, press repeat, within ───
+def test_focus_mouse_move_and_drag_validate_and_describe():
+    s = validate(
+        _with(
+            {"focus": {"role": "textbox", "name": "Message"}},
+            {"focus": "#search"},
+            {"mouse_move": {"x": 1200, "y": 780}},
+            {"mouse_move": {"x": 0, "y": 0, "smooth": False}},
+            {"drag": {"role": "separator", "name": "Resize dock", "to": {"dx": -320}}},
+            {
+                "drag": {
+                    "target": {"selector": ".divider", "frame": TERM},
+                    "to": {"dx": 10, "dy": -5},
+                    "timeout_ms": 5000,
+                }
+            },
+        )
+    )
+    f1, f2, m1, m2, d1, d2 = s["steps"][1:]
+    assert f1["target"] == {"role": "textbox", "name": "Message"} and f2["target"] == {"selector": "#search"}
+    assert (m1["x"], m1["y"], m1["smooth"]) == (1200, 780, True) and m2["smooth"] is False
+    assert (d1["dx"], d1["dy"]) == (-320, 0) and d1["target"] == {"role": "separator", "name": "Resize dock"}
+    assert d2["target"]["frame"] == {"url": TERM} and d2["timeout_ms"] == 5000
+    assert shotscript.describe_step(f1) == "focus role='textbox' name='Message'"
+    assert shotscript.describe_step(m1) == "move the pointer to (1200, 780)"
+    assert shotscript.describe_step(d1) == "drag role='separator' name='Resize dock' by (-320, +0)"
+
+
+def test_pointer_steps_reject_bad_shapes():
+    assert "needs {x, y}" in _problems(_with({"mouse_move": {"x": 10}}))
+    p = _problems(_with({"mouse_move": {"x": 1280, "y": 10}}))
+    assert "step 2 (mouse_move): (1280, 10) is outside the 1280×800 viewport" in p
+    assert "unknown option `steps`" in _problems(_with({"mouse_move": {"x": 1, "y": 1, "steps": 3}}))
+    assert "needs a target to grab and `to: {dx, dy}`" in _problems(_with({"drag": {"text": "x"}}))
+    assert "`to` must be {dx: px, dy: px}" in _problems(_with({"drag": {"text": "x", "to": {"x": 4}}}))
+    assert "moves nowhere" in _problems(_with({"drag": {"text": "x", "to": {"dx": 0}}}))
+    assert "is outside -4000..4000" in _problems(_with({"drag": {"text": "x", "to": {"dy": 9000}}}))
+    assert "needs a target" in _problems(_with({"drag": {"to": {"dx": 5}}}))
+    assert "needs a target" in _problems(_with({"focus": {}}))
+
+
+def test_press_repeat_and_its_gap():
+    s = validate(_with({"press": {"key": "ArrowDown", "repeat": 5}}, {"press": "Enter"},
+                       {"press": {"key": "Tab", "repeat": 3, "delay_ms": 0, "role": "textbox", "name": "Q"}}))  # fmt: skip
+    p5, p1, p3 = s["steps"][1:]
+    assert (p5["repeat"], p5["delay_ms"]) == (5, shotscript.DEFAULT_PRESS_GAP_MS)
+    assert p1["repeat"] == 1 and p3["delay_ms"] == 0 and p3["target"] == {"role": "textbox", "name": "Q"}
+    assert shotscript.describe_step(p5) == "press ArrowDown ×5" and shotscript.describe_step(p1) == "press Enter"
+    assert "outside 1..200" in _problems(_with({"press": {"key": "a", "repeat": 0}}))
+    assert "outside 1..200" in _problems(_with({"press": {"key": "a", "repeat": 1000}}))
+    # The gaps count against the shoot's budget like holds do.
+    p = _problems(_with({"press": {"key": "a", "repeat": 200, "delay_ms": 5000}}, total_timeout_s=60))
+    assert "holds/waits add up to" in p
+
+
+def test_within_scopes_click_hover_focus_and_wait_for_to_a_container():
+    s = validate(
+        _with(
+            {"click": {"role": "button", "name": "Save", "within": {"role": "dialog", "name": "Settings"}}},
+            {"wait_for": {"text": "Saved", "within": ".toast", "frame": TERM}},
+            {"hover": {"text": "row", "within": {"test_id": "list", "nth": "last"}}},
+            {"focus": {"role": "textbox", "within": "form#login"}},
+        )
+    )
+    click, wait, hover, focus = s["steps"][1:]
+    assert click["within"] == {"role": "dialog", "name": "Settings"} and click["target"] == {
+        "role": "button",
+        "name": "Save",
+    }
+    assert wait["within"] == {"selector": ".toast"} and wait["target"]["frame"] == {"url": TERM}
+    assert hover["within"] == {"test_id": "list", "nth": "last"} and focus["within"] == {"selector": "form#login"}
+    assert shotscript.describe_step(click) == "click role='button' name='Save' within role='dialog' name='Settings'"
+    assert "within selector='.toast'" in shotscript.describe_step(wait)
+
+
+def test_within_errors_name_the_problem():
+    assert "this step has none to scope" in _problems(_with({"wait_for": {"ms": 100, "within": ".x"}}))
+    assert "put `frame` on the step or its target" in _problems(
+        _with({"click": {"text": "Go", "within": {"selector": ".x", "frame": TERM}}})
+    )
+    assert "unknown option `within`" in _problems(_with({"fill": {"label": "a", "value": "v", "within": ".x"}}))
+    assert "within: needs one of" in _problems(_with({"click": {"text": "Go", "within": {"nth": 1}}}))
 
 
 def test_unknown_step_options_are_errors_not_dropped():
@@ -295,3 +384,10 @@ def test_unknown_frame_keys_and_bad_frames_error_loudly():
 def test_top_level_mask_and_redact_reject_unknown_options():
     msg = _problems(_with(mask={"selectors": [".x"], "frame": TERM}, redact={"presets": ["emails"], "mode": "x"}))
     assert "mask: unknown option `frame`" in msg and "redact: unknown option `mode`" in msg
+
+
+def test_the_template_lists_every_step_op():
+    tpl = shotscript.example()
+    for op in shotscript.STEP_OPS:
+        assert op in tpl.split("# Every step op", 1)[1], op
+    assert validate(tpl)["name"] == "install-from-url"

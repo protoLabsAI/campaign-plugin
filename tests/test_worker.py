@@ -537,3 +537,34 @@ def test_real_chromium_fences_iframe_navigations_and_requests_from_inside_a_fram
     assert "/frame-ok" in hits and "/frame-probe-done" in hits, f"the frame never ran: {hits}"
     leaked = [p for p in hits if "plugins" in p.lower() or "ampaign" in p]
     assert leaked == [], f"the fence let these frame loads/requests through: {leaked}"
+
+
+# ── redaction rules + the terminal hook's config ─────────────────────────────
+def test_home_path_rules_match_real_paths_and_stop_at_terminal_escapes():
+    import re as _re
+
+    unix, win = (r for r, _ in pw_worker.REDACT_PRESET_RULES["home_paths"])
+    # A Windows path has ONE backslash between parts (the rule used to demand two, so it never fired).
+    assert _re.sub(win, "~", r"C:\Users\carol\stuff") == r"~\stuff"
+    assert _re.sub(unix, "~", "/Users/alice/dev and /home/bob") == "~/dev and ~"
+    # A coloured path keeps its colour reset: the name stops at ESC.
+    assert _re.sub(unix, "~", "\x1b[34m/home/bob\x1b[0m") == "\x1b[34m~\x1b[0m"
+
+
+def test_redact_cfg_carries_terminal_prefixes_only_for_presets_in_use():
+    rules = pw_worker.redact_rules({"presets": ["home_paths"], "patterns": ["acme-[0-9]+"]})
+    cfg = pw_worker.redact_cfg(rules)
+    assert cfg["rules"] == rules and cfg["prefixes"] == pw_worker.REDACT_PRESET_PREFIXES["home_paths"]
+    assert pw_worker.redact_cfg(pw_worker.redact_rules({"patterns": ["x"]}))["prefixes"] == []
+    assert '"prefixes"' in pw_worker.redact_init_js(rules)
+
+
+def test_terminal_prefixes_flag_a_line_that_may_still_become_a_match():
+    import re as _re
+
+    pre = [_re.compile(p) for ps in pw_worker.REDACT_PRESET_PREFIXES.values() for p in ps]
+    held = lambda tail: any(p.search(tail) for p in pre)  # noqa: E731
+    for tail in ("$ ls /", "$ ls /Us", "cd /Users/", "cd /home/bo", "C:\\Use", "mail bob@exa", "key sk-abc"):
+        assert held(tail), tail
+    for tail in ("$ ", "done.", "cd src", "~/dev $ "):
+        assert not held(tail), tail

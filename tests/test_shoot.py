@@ -515,3 +515,91 @@ def test_other_failures_are_not_reworded_as_ambiguity(tmp_path):
     with pytest.raises(shoot.ShootError) as e:
         shoot.run(_script({"click": {"text": "Go"}}), tmp_path, playwright_factory=pw)
     assert "Timeout 15000ms exceeded" in str(e.value) and "matches" not in str(e.value)
+
+
+# ── pointer + keyboard steps: focus, mouse_move, drag, press repeat, within ───
+def test_focus_mouse_move_and_drag_drive_the_real_pointer(tmp_path):
+    pw = FakePlaywright()
+    res = shoot.run(
+        _script(
+            {"focus": {"role": "textbox", "name": "Message"}},
+            {"mouse_move": {"x": 1200, "y": 780}},
+            {"drag": {"role": "separator", "name": "Resize", "to": {"dx": -300, "dy": 0}}},
+        ),
+        tmp_path,
+        playwright_factory=pw,
+    )
+    assert res["error"] == ""
+    focus = next(c for c in pw.calls if c[0] == "focus")
+    assert focus[1:4] == ("role", ("textbox",), {"name": "Message"})
+    assert ("mouse.move", 1200, 780) in pw.calls
+    # The fake box is x=10 y=20 100×40 → centre (60, 40): press there, move by the offset, release.
+    i = pw.calls.index(("mouse.down",))
+    assert pw.calls[i - 1] == ("mouse.move", 60.0, 40.0), "the pointer glides to the handle first"
+    assert pw.calls[i + 1 : i + 3] == [("mouse.move", -240.0, 40.0), ("mouse.up",)]
+
+
+def test_an_ambiguous_drag_or_focus_target_names_the_matches(tmp_path):
+    pw = FakePlaywright(matches={".divider": ["a", "b"]})
+    with pytest.raises(shoot.ShootError) as e:
+        shoot.run(_script({"focus": ".divider"}), tmp_path, playwright_factory=pw)
+    assert "matches 2 elements" in str(e.value) and "step 2 (focus" in str(e.value)
+
+
+def test_press_repeat_presses_n_times_with_the_gap_between(tmp_path):
+    pw = FakePlaywright()
+    shoot.run(
+        _script(
+            {"press": {"key": "ArrowDown", "repeat": 3, "delay_ms": 120}},
+            {"press": {"key": "Tab", "repeat": 2, "label": "Search"}},
+        ),
+        tmp_path,
+        playwright_factory=pw,
+    )
+    keys = [c for c in pw.calls if c[0] in ("keyboard.press", "wait_for_timeout", "press")]
+    assert keys == [
+        ("keyboard.press", "ArrowDown"),
+        ("wait_for_timeout", 120),
+        ("keyboard.press", "ArrowDown"),
+        ("wait_for_timeout", 120),
+        ("keyboard.press", "ArrowDown"),
+        ("press", "label", ("Search",), {"exact": False}, {"key": "Tab"}),
+        ("wait_for_timeout", 80),
+        ("press", "label", ("Search",), {"exact": False}, {"key": "Tab"}),
+    ]
+
+
+def test_within_looks_for_the_target_inside_the_container_only(tmp_path):
+    # "Save" matches twice on the page, but ONE inside the dialog: within scopes it, no strict error.
+    pw = FakePlaywright(matches={"button": ["Save", "Save"]})
+    res = shoot.run(
+        _script(
+            {"wait_for": {"text": "Saved", "within": ".toast"}},
+            {"click": {"selector": "#save", "within": {"role": "dialog", "name": "Settings"}}},
+        ),
+        tmp_path,
+        playwright_factory=pw,
+    )
+    assert res["error"] == ""
+    wait = next(c for c in pw.calls if c[0] == "wait_for")
+    assert wait[1:3] == ("text", ("Saved",)) and wait[3]["within"] == ("locator", (".toast",))
+    click = next(c for c in pw.calls if c[0] == "click")
+    assert click[1:3] == ("locator", ("#save",)) and click[3]["within"] == ("role", ("dialog",))
+
+
+def test_check_targets_scopes_within_too(monkeypatch):
+    pw = FakePlaywright()
+    script = _script({"click": {"text": "Save", "within": "#dlg"}})
+    seen = []
+    orig = pw_worker.describe_matches
+
+    def spy(root, target, limit=3):
+        seen.append(getattr(root, "args", None))
+        return orig(root, target, limit)
+
+    monkeypatch.setattr(pw_worker, "describe_matches", spy)
+    with pw() as p:
+        page = p.chromium.launch().new_context(record_video_dir="").new_page()
+        report = pw_worker.check_targets(page, script)
+    assert seen == [("#dlg",)], "the preflight counts matches inside the container"
+    assert report[0]["status"] == "ok"
