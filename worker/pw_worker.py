@@ -223,10 +223,23 @@ _CURSOR_VIS = "(v) => { const c = document.getElementById('__campaign_cursor'); 
 
 # Text redaction: rewrites matching text in text nodes and input values, and keeps doing so
 # as the page changes (MutationObserver), so a path that renders late is still masked.
+#
+# Terminals: xterm.js draws on a <canvas> (canvas/WebGL renderers), which no DOM rewrite can
+# reach — a username leaked through one on a real take. So the same rules also filter what a
+# terminal is GIVEN to draw: ``Terminal.prototype.write``/``writeln`` are wrapped (patched when
+# the xterm bundle assigns ``window.Terminal`` — a UMD build's global — or right away when it's
+# already there), whatever transport delivered the bytes (a WebSocket, a replay, an addon).
+# Output arrives in chunks, so a path can be split across two writes: the unterminated tail
+# of the last line is held back briefly and joined with the next write before the rules run
+# (longer while it still looks like the start of a match — ``prefixes``). A terminal whose
+# writes were NOT filtered (xterm bundled as an ES module never touches ``window.Terminal``)
+# never gets the ``data-campaign-redacted`` mark, and its canvases are blurred instead.
 REDACT_JS = r"""
 (cfg) => {
-  const rules = cfg.rules.map(r => [new RegExp(r[0], 'g'), r[1]]);
-  const fix = (s) => { let o = s; for (const [re, rep] of rules) o = o.replace(re, rep); return o; };
+  const W = window;
+  W.__campaignRedactRules = (W.__campaignRedactRules || []).concat(cfg.rules.map(r => [new RegExp(r[0], 'g'), r[1]]));
+  W.__campaignRedactPrefixes = (W.__campaignRedactPrefixes || []).concat((cfg.prefixes || []).map(p => new RegExp(p)));
+  const fix = (s) => { let o = s; for (const [re, rep] of W.__campaignRedactRules) o = o.replace(re, rep); return o; };
   const walk = (root) => {
     const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     let n; while ((n = w.nextNode())) { const v = fix(n.nodeValue); if (v !== n.nodeValue) n.nodeValue = v; }
@@ -236,20 +249,109 @@ REDACT_JS = r"""
   const start = () => {
     if (!document.body) return;
     walk(document.body);
-    if (window.__campaignRedact) return; window.__campaignRedact = true;
+    if (!document.querySelector('style[data-campaign-term-mask]')) {
+      const st = document.createElement('style'); st.setAttribute('data-campaign-term-mask', '1');
+      st.textContent = '.xterm:not([data-campaign-redacted]) canvas { filter: blur(9px) !important; }';
+      (document.head || document.documentElement).appendChild(st);
+    }
+    if (W.__campaignRedact) return; W.__campaignRedact = true;
     new MutationObserver(ms => { for (const m of ms) {
       if (m.type === 'characterData') { const v = fix(m.target.nodeValue); if (v !== m.target.nodeValue) m.target.nodeValue = v; }
       else m.addedNodes.forEach(n => n.nodeType === 3 ? (n.nodeValue = fix(n.nodeValue)) : (n.nodeType === 1 && walk(n)));
     } }).observe(document.body, { subtree: true, childList: true, characterData: true });
   };
+
+  // ── terminals: filter what xterm is given to draw ──
+  if (!W.__campaignTerm) W.__campaignTerm = (() => {
+    const HOLD = 256, QUIET_MS = 30, MAX_HOLD_MS = 1000;
+    const st = new WeakMap();
+    const state = (t) => { let s = st.get(t); if (!s) st.set(t, s = {held: '', since: 0, timer: 0, dec: null}); return s; };
+    const spans = (buf) => {
+      const out = [];
+      for (const [re] of W.__campaignRedactRules) {
+        const r = new RegExp(re.source, 'g'); let m;
+        while ((m = r.exec(buf))) { if (!m[0].length) { r.lastIndex++; continue; } out.push([m.index, m.index + m[0].length]); }
+      }
+      return out;
+    };
+    // Could more output still extend (or complete) a match at the end of `tail`?
+    const pending = (tail) => W.__campaignRedactPrefixes.some(p => p.test(tail)) || spans(tail).some(([, e]) => e === tail.length);
+    // Show everything up to the unterminated last line; never split a match across the cut.
+    const keepFrom = (buf) => {
+      const nl = Math.max(buf.lastIndexOf('\n'), buf.lastIndexOf('\r')) + 1;
+      if (nl >= buf.length) return buf.length;
+      let k = Math.max(nl, buf.length - HOLD);
+      const sp = spans(buf);
+      for (let moved = true; moved;) { moved = false; for (const [a, b] of sp) if (a < k && b > k) { k = a; moved = true; } }
+      return k;
+    };
+    const flush = (t, write) => {
+      const s = state(t); clearTimeout(s.timer); s.timer = 0;
+      const h = s.held; s.held = ''; s.since = 0;
+      if (h) write.call(t, fix(h));
+    };
+    const arm = (t, write) => {
+      const s = state(t);
+      s.timer = setTimeout(() => {
+        s.timer = 0;
+        if (s.held && pending(s.held) && Date.now() - s.since < MAX_HOLD_MS) arm(t, write); else flush(t, write);
+      }, QUIET_MS);
+    };
+    const push = (t, write, data, cb) => {
+      const s = state(t);
+      if (typeof data !== 'string') { s.dec = s.dec || new TextDecoder(); data = s.dec.decode(data, {stream: true}); }
+      clearTimeout(s.timer); s.timer = 0;
+      const buf = s.held + data;
+      if (!s.held) s.since = Date.now();
+      const k = keepFrom(buf);
+      s.held = buf.slice(k);
+      const out = fix(buf.slice(0, k));
+      const r = (out || cb) ? write.call(t, out, cb) : undefined;
+      if (s.held) arm(t, write); else s.since = 0;
+      return r;
+    };
+    const patch = (C) => {
+      try {
+        const P = C && C.prototype;
+        if (!P || P.__campaignRedacted || typeof P.write !== 'function' || typeof P.open !== 'function') return C;
+        Object.defineProperty(P, '__campaignRedacted', {value: true});
+        const write = P.write, open = P.open, reset = P.reset, clear = P.clear, dispose = P.dispose;
+        P.write = function (data, cb) { return push(this, write, data, cb); };
+        P.writeln = function (data, cb) { push(this, write, data); return push(this, write, '\r\n', cb); };
+        P.open = function (...a) {
+          const r = open.apply(this, a);
+          try { if (this.element) this.element.setAttribute('data-campaign-redacted', '1'); } catch (e) {}
+          return r;
+        };
+        // What was held belongs BEFORE a reset/clear — write it first, in order.
+        if (reset) P.reset = function (...a) { flush(this, write); return reset.apply(this, a); };
+        if (clear) P.clear = function (...a) { flush(this, write); return clear.apply(this, a); };
+        if (dispose) P.dispose = function (...a) { const s = state(this); clearTimeout(s.timer); s.held = ''; return dispose.apply(this, a); };
+      } catch (e) { console.warn('[campaign] could not hook the terminal for redaction', e); }
+      return C;
+    };
+    return {patch};
+  })();
+  const own = Object.getOwnPropertyDescriptor(W, 'Terminal');
+  if (typeof W.Terminal === 'function') W.__campaignTerm.patch(W.Terminal);
+  else if (!own || own.configurable) {
+    let cur = W.Terminal;
+    try {
+      Object.defineProperty(W, 'Terminal', {configurable: true, enumerable: true,
+        get() { return cur; }, set(v) { cur = W.__campaignTerm.patch(v); }});
+    } catch (e) {}
+  }
+
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
 }
 """
 
+# The username/path character class stops at ESC/BEL too, so a coloured path in terminal output
+# (``\x1b[34m/Users/kj\x1b[0m``) loses the name, not the colour reset after it.
 REDACT_PRESET_RULES: dict[str, list[tuple[str, str]]] = {
     "home_paths": [
-        (r"(?:/Users|/home)/[^/\s\"'<>:]+", "~"),
-        (r"[A-Za-z]:\\\\Users\\\\[^\\\\\s\"'<>]+", "~"),
+        (r"(?:/Users|/home)/[^/\s\"'<>:\x1b\x07]+", "~"),
+        (r"[A-Za-z]:\\Users\\[^\\\s\"'<>\x1b\x07]+", "~"),
     ],
     "emails": [(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "you@example.com")],
     "secrets": [
@@ -259,6 +361,16 @@ REDACT_PRESET_RULES: dict[str, list[tuple[str, str]]] = {
             "•••",
         )
     ],
+}
+# For terminal output only: a line ENDING in one of these may be the start of a preset's match
+# that the next chunk completes ("/Us" + "ers/alice"), so it is held back (≤ 1s) until it can't.
+REDACT_PRESET_PREFIXES: dict[str, list[str]] = {
+    "home_paths": [
+        r"/(?:U(?:s(?:e(?:r(?:s(?:/[^/\s\"'<>:\x1b\x07]*)?)?)?)?)?|h(?:o(?:m(?:e(?:/[^/\s\"'<>:\x1b\x07]*)?)?)?)?)?$",
+        r"[A-Za-z]:(?:\\(?:U(?:s(?:e(?:r(?:s(?:\\[^\\\s\"'<>\x1b\x07]*)?)?)?)?)?)?)?$",
+    ],
+    "emails": [r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]*$"],
+    "secrets": [r"(?:sk-|ghp_|github_pat_|xox[abprs]-|AKIA|eyJ)[A-Za-z0-9_.-]*$"],
 }
 
 
@@ -289,8 +401,17 @@ def redact_rules(redact: dict[str, Any]) -> list[list[str]]:
     return rules
 
 
+def redact_cfg(rules: list[list[str]]) -> dict[str, Any]:
+    """REDACT_JS's argument: the rules, plus the terminal-tail prefixes of any preset among them."""
+    prefixes: list[str] = []
+    for preset, preset_rules in REDACT_PRESET_RULES.items():
+        if any(list(r) in rules for r in preset_rules):
+            prefixes += REDACT_PRESET_PREFIXES.get(preset, [])
+    return {"rules": rules, "prefixes": prefixes}
+
+
 def redact_init_js(rules: list[list[str]]) -> str:
-    return f"({REDACT_JS})({json.dumps({'rules': rules})});"
+    return f"({REDACT_JS})({json.dumps(redact_cfg(rules))});"
 
 
 # Browser storage seeded BEFORE the app boots (a context init script runs before any page
@@ -516,7 +637,7 @@ def locate(page, target: dict[str, Any], *, pick: bool = True):
 
 
 # An ACTION needs exactly one element; these ops act on their target (a wait_for doesn't).
-ACTION_OPS = ("click", "hover", "fill", "type", "press", "scroll", "screenshot", "upload")
+ACTION_OPS = ("click", "focus", "hover", "drag", "fill", "type", "press", "scroll", "screenshot", "upload")
 MAX_LISTED_MATCHES = 3
 _MATCH_JS = """e => {
   const t = (e.innerText || e.textContent || '').replace(/\\s+/g, ' ').trim();
@@ -618,7 +739,7 @@ def check_targets(page, script: dict[str, Any], timeout_ms: float = 1000) -> lis
             out.append({**entry, "count": 0, "status": "frame-missing", "matches": [], "error": first_line(e)})
             continue
         try:
-            n, lines = describe_matches(root, target)
+            n, lines = describe_matches(scoped(root, step), target)
         except Exception as e:  # noqa: BLE001
             out.append({**entry, "count": 0, "status": "error", "matches": [], "error": first_line(e)})
             continue
@@ -649,6 +770,38 @@ def _park_below(page, loc, timeout: float) -> None:
         return
     if box:
         page.mouse.move(box["x"] + box["width"] * 0.85, box["y"] + box["height"] + 16, steps=8)
+
+
+def drag(page, loc, dx: float, dy: float, timeout: float) -> None:
+    """Grab ``loc`` at its centre, move the pointer by (dx, dy) and release — a resizable dock
+    divider, a slider handle. Real mouse events, so the visible pointer follows the drag."""
+    _move_to(page, loc, timeout)
+    box = loc.bounding_box(timeout=timeout)
+    if not box:
+        raise ValueError("the drag target has no box on screen (hidden or detached)")
+    x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+    page.mouse.down()
+    try:
+        page.mouse.move(x + dx, y + dy, steps=24)
+    finally:
+        page.mouse.up()
+
+
+def press(page, loc, step: dict[str, Any], timeout: float) -> None:
+    """Press ``step["key"]`` ``repeat`` times (``delay_ms`` apart) — on ``loc`` when the step has
+    a target, else on whatever has focus. The repeats share the step's timeout."""
+    deadline = time.monotonic() + timeout / 1000
+    n = int(step.get("repeat") or 1)
+    for i in range(n):
+        left = (deadline - time.monotonic()) * 1000
+        if left <= 0:
+            raise TimeoutError(f"Timeout {int(timeout)}ms exceeded after {i} of {n} presses of {step['key']}")
+        if loc is not None:
+            loc.press(step["key"], timeout=max(1.0, left))
+        else:
+            page.keyboard.press(step["key"])
+        if i < n - 1 and step.get("delay_ms"):
+            page.wait_for_timeout(step["delay_ms"])
 
 
 _IS_FILE_INPUT_JS = "e => e.tagName === 'INPUT' && (e.type || '').toLowerCase() === 'file'"
@@ -870,10 +1023,19 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
     return result, error
 
 
+def scoped(root, step: dict[str, Any]):
+    """Where a step's target is looked for: ``root`` (the page or its frame), or — for a step
+    with ``within: <container>`` — inside that container only (a chained locator: the target is
+    matched among the container's descendants)."""
+    within = step.get("within")
+    return locate(root, within) if within else root
+
+
 def _do(page, context, step, timeout, out_dir: Path, marks, stills, t0) -> None:
     target = step.get("target")
     # A frame target: find the frame first (within the step's timeout), then the element in it.
     root, timeout = _in_frame(page, (target or {}).get("frame") or step.get("frame"), timeout)
+    root = scoped(root, step)
     try:
         _act(page, root, context, step, timeout, out_dir, marks, stills, t0)
     except Exception as e:
@@ -896,6 +1058,12 @@ def _act(page, root, context, step, timeout, out_dir: Path, marks, stills, t0) -
             loc.click(timeout=timeout)
         else:
             loc.hover(timeout=timeout)
+    elif op == "focus":
+        locate(root, target).focus(timeout=timeout)
+    elif op == "mouse_move":
+        page.mouse.move(step["x"], step["y"], steps=18 if step.get("smooth", True) else 1)
+    elif op == "drag":
+        drag(page, locate(root, target), step["dx"], step["dy"], timeout)
     elif op == "fill":
         loc = locate(root, target)
         _move_to(page, loc, timeout)
@@ -908,10 +1076,7 @@ def _act(page, root, context, step, timeout, out_dir: Path, marks, stills, t0) -
             _park_below(page, loc, timeout)
         page.keyboard.type(step["text"], delay=step["delay_ms"])
     elif op == "press":
-        if target:
-            locate(root, target).press(step["key"], timeout=timeout)
-        else:
-            page.keyboard.press(step["key"])
+        press(page, locate(root, target) if target else None, step, timeout)
     elif op == "wait_for":
         if step.get("network_idle"):
             page.wait_for_load_state("networkidle", timeout=timeout)
@@ -967,8 +1132,9 @@ def _act(page, root, context, step, timeout, out_dir: Path, marks, stills, t0) -
         upload(page, root, target, step.get("_files") or [], timeout)
     elif op == "redact":
         rules = redact_rules(step)
-        page.evaluate(f"({REDACT_JS})", {"rules": rules})
-        _each_child_frame(page, lambda f: f.evaluate(f"({REDACT_JS})", {"rules": rules}))
+        cfg = redact_cfg(rules)
+        page.evaluate(f"({REDACT_JS})", cfg)
+        _each_child_frame(page, lambda f: f.evaluate(f"({REDACT_JS})", cfg))
         context.add_init_script(redact_init_js(rules))
     else:  # the host's validate() makes this unreachable
         raise ValueError(f"unknown step {op}")

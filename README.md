@@ -145,16 +145,19 @@ steps:
   - mark: end
 ```
 
-Steps: `goto`, `click`, `fill`, `type` (per-char delay), `press`, `hover`, `wait_for`
+Steps: `goto`, `click`, `focus`, `fill`, `type` (per-char delay), `press` (`repeat: N`,
+`delay_ms` between), `hover`, `mouse_move` (`{x, y}` — park the pointer), `drag`
+(`{target, to: {dx, dy}}` — e.g. widen a resizable dock), `wait_for`
 (selector/text/role/network idle/ms), `hold`, `scroll`, `mark`, `screenshot`, `mask`, `redact`,
-`upload`.
+`upload`. `click`/`focus`/`hover`/`wait_for` take `within: <target>` to look for the target
+inside one container (the Save button of ONE dialog).
 Targets prefer accessible roles and text over CSS. Every waiting step gives up after
 `step_timeout_ms` (default 15000); a step that waits on slow real work sets its own
-`timeout_ms` (max 180000 — more is a validation error, never a silent clamp), all bounded by
+`timeout_ms` (max 600000 = 10 min — more is a validation error, never a silent clamp), all bounded by
 `total_timeout_s` (default 300, max 900). Unknown step options are validation errors.
 A target can add `exact: true` (whole-string match) and `nth` (0-based, or `first`/`last`).
 Several matches: a `wait_for` is satisfied when ANY match is visible (text shown twice is fine
-to wait on); an action (click/hover/fill/type/press/scroll/element screenshot) on an ambiguous
+to wait on); an action (click/focus/hover/drag/fill/type/press/scroll/element screenshot) on an ambiguous
 target fails the step with the first matches listed and how to pick one.
 `network_idle` never settles on an app that holds SSE/websockets open — wait for an element. Tokens never go in a script: use
 `auth: {bearer_env: CAMPAIGN_APP_TOKEN}` (a `CAMPAIGN_*` env var, or one named in the
@@ -169,9 +172,13 @@ nesting one level (`frame: {…, frame: {…}}`). The frame is waited for within
   - screenshot: {name: terminal, frame: /plugins/terminal/view}   # frame only = the iframe element
 ```
 
-Masks and redaction reach into every frame, including ones that load later — but not into text
-drawn on a `<canvas>` (xterm.js): keep secrets out of a canvas terminal in the shot itself
-(`cd /tmp`, a neutral `PS1`). The request fence applies to frame loads and to requests made
+Masks and redaction reach into every frame, including ones that load later. CSS can't reach
+text drawn on a `<canvas>`, so for xterm.js terminals `redact` filters what the terminal is
+**given** to draw: `Terminal.prototype.write`/`writeln` are wrapped when the xterm bundle sets
+`window.Terminal` (its UMD build — what the protoAgent Terminal view loads), with the unfinished
+tail of a line held back briefly so a path split across two chunks is still caught. An xterm the
+hook can't reach (bundled as an ES module) has its canvases **blurred** whenever redaction is on.
+Still keep secrets out of a terminal in the shot itself (`cd /tmp`, a neutral `PS1`). The request fence applies to frame loads and to requests made
 from inside frames too. The shoot browser launches with `--force-device-scale-factor` matching
 `device_scale_factor`: under DPR emulation alone, xterm.js's WebGL renderer (the Terminal view)
 sized its canvas at 1x and drew a blank terminal at dsf 2.

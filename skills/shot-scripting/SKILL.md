@@ -38,17 +38,36 @@ Results often show up twice — "3 passed" in a bold summary AND in an inline co
 
 - **A wait is fine with that.** `wait_for: {text: "3 passed"}` is satisfied as soon as ANY
   match is visible (`state: hidden` waits until none is). Don't add `nth` just to wait.
-- **An action needs exactly one** (click, hover, fill, type, press, scroll, an element
-  screenshot). An ambiguous action target fails the step, and the error lists the first few
+- **An action needs exactly one** (click, focus, hover, drag, fill, type, press, scroll, an
+  element screenshot). An ambiguous action target fails the step, and the error lists the first few
   matches (`1) <strong> '3 passed'; 2) <code> 'pytest -q: 3 passed in 0.4s'`). Pick one:
   `exact: true` (whole-string, case-sensitive — drops the code span here), `nth: 0` / `nth: 1`
   / `nth: first` / `nth: last` (0-based, DOM order), or a narrower `role` + `name` / selector.
   Prefer `exact` or a role over `nth` — an index breaks when the page adds a match.
+- **Or scope it to a container with `within:`** (click / focus / hover / wait_for): the target
+  is looked for inside that container only — sturdier than `nth` when the same control repeats
+  per panel, dialog or row:
+
+  ```yaml
+  - click: {role: button, name: Save, within: {role: dialog, name: Settings}}
+  - wait_for: {text: "Saved", within: {test_id: toast-region}}
+  ```
 
 A failed take may already have done things (sent a prompt to an agent, started a job) — the
 app keeps going after the shoot dies. (Its recording up to the failure is kept as a `captured`
 clip — see *When a take fails* — but a clean re-take still means a clean app state.) So get targets right BEFORE the take: re-snapshot the
 page in the state the step will see it and check every action target names one element.
+
+## Pointer and keyboard
+
+- `focus: {role: textbox, name: Message}` — focus a field without clicking it (no pointer move).
+- `mouse_move: {x: 1240, y: 760}` — park the visible pointer (viewport px) somewhere harmless
+  before a beat the viewer must read, so it doesn't sit on the result. `smooth: false` jumps.
+- `drag: {role: separator, name: "Resize panel", to: {dx: -320}}` — press on the target's
+  centre, move by `dx`/`dy` px, release: widen a resizable dock, move a slider. If the width is
+  something the app persists, seeding `storage:` (below) is steadier than dragging on camera.
+- `press: {key: ArrowDown, repeat: 4, delay_ms: 120}` — one key several times (`delay_ms`
+  between presses, default 80) instead of four `press` steps.
 
 ## Inside an iframe — protoAgent plugin views
 
@@ -78,10 +97,15 @@ target — or the step searches only the top page and never finds it:
 - Use `agent_browser` on the view's own URL (`/plugins/<id>/view`) to snapshot its roles/names.
 
 **Masks and redaction reach into every frame** — current ones and ones that load later — so a
-top-level `mask`/`redact` covers plugin views too. **But CSS can't touch text drawn on a
-`<canvas>`**: the terminal (xterm.js) paints its text, so neither `mask` selectors nor
-`redact` patterns can change what it shows. Keep secrets off a canvas terminal *in the shot
-itself*: `cd /tmp` (not your home dir) before you start, set a neutral prompt
+top-level `mask`/`redact` covers plugin views too. **Terminals draw on a `<canvas>`**, which CSS
+and DOM rewriting can't touch, so `redact` filters what xterm.js is *given* to draw instead:
+it wraps the terminal's `write()` as the xterm bundle loads (the protoAgent Terminal view's
+build), holding the unfinished end of a line back for a moment so a path split across two
+chunks (`/Us` + `ers/you`) is still caught. Put `redact` at the TOP of the script — a `- redact:`
+step only filters output written after it, not what's already on screen. A terminal the hook
+can't reach (an app that bundles xterm as an ES module) has its canvas **blurred** while
+redaction is on — if you see a blurred terminal in your stills, that's why. Patterns are a
+safety net, not proof: still `cd /tmp` (not your home dir) before you start, set a neutral prompt
 (`export PS1='$ '`), never `cat` an env file or print a token, and `clear` before the beat that
 matters. Or `mask` the whole terminal element (`.xterm`) for a beat you can't keep clean.
 
@@ -151,9 +175,10 @@ storage:
   `step_timeout_ms` (script-wide, default 15000). When the screen shows something that takes
   real time — an agent run (often 17–45s), a build, an install — give THAT step its own
   ceiling: `- wait_for: {text: "Run complete", timeout_ms: 90000}`. The per-step max is
-  180000 (3 min); asking for more fails validation — wait for an intermediate sign of progress
-  first and split the wait. Every step is also bounded by what's left of `total_timeout_s`
-  (default 300, max 900), so raise that for a long take. Speed-ramp the wait in the render.
+  600000 (10 min); asking for more fails validation. Every step is also bounded by what's left
+  of `total_timeout_s` (default 300, max 900), so a wait over ~4 min needs `total_timeout_s`
+  raised too — and a long take is a long recording, so wait on an intermediate sign of progress
+  where there is one. Speed-ramp the wait in the render.
 - `hold: 1200`–`2000` on every frame a viewer must read (a dialog, a result). Too short is the
   most common reason a clip is useless.
 - `type` with `delay_ms: 35–60` for realism; `fill` when the typing isn't the point.
@@ -285,7 +310,7 @@ mask: {selectors: [".account-menu", "[data-private]"], mode: blur}
 banners and toasts that aren't part of the story). Top-level `redact`/`mask` apply from the first frame; a `- mask:` step applies from that point.
 If the app shows tokens, paths, emails, internal hostnames or customer data anywhere in frame,
 mask it — then LOOK at the stills with `campaign_view`; redaction is a safety net, not proof
-(it can't reach text drawn on a canvas, e.g. a terminal — see *Inside an iframe* above).
+(a terminal it can't hook is blurred, not rewritten — see *Inside an iframe* above).
 
 ## Auth
 

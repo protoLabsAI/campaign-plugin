@@ -72,9 +72,34 @@ class FakeLocator:
         self.idx = i
         return self
 
-    def locator(self, sel):  # a chained filter (`visible=true`) — recorded on the call's kw
-        self.kw = dict(self.kw, filter=sel)
-        return self
+    def locator(self, sel):
+        if sel == "visible=true":  # a chained filter — recorded on the call's kw
+            self.kw = dict(self.kw, filter=sel)
+            return self
+        return self._child("locator", (sel,), {})
+
+    # A target scoped `within:` a container: a locator chained off the container's. The child
+    # records its container on its kw (`within=(how, args)`).
+    def _child(self, how, args, kw):
+        return FakeLocator(self.page, how, args, dict(kw, within=(self.how, self.args)))
+
+    def get_by_role(self, role, **kw):
+        return self._child("role", (role,), kw)
+
+    def get_by_text(self, text, **kw):
+        return self._child("text", (text,), kw)
+
+    def get_by_label(self, text, **kw):
+        return self._child("label", (text,), kw)
+
+    def get_by_placeholder(self, text, **kw):
+        return self._child("placeholder", (text,), kw)
+
+    def get_by_test_id(self, text):
+        return self._child("test_id", (text,), {})
+
+    def focus(self, **kw):
+        self._log("focus", **kw)
 
     def count(self):
         return len(self.page.matches.get(self.args[0], ["x"]))
@@ -131,6 +156,12 @@ class _Mouse:
 
     def move(self, x, y, steps=1):
         self.page.calls.append(("mouse.move", x, y))
+
+    def down(self):
+        self.page.calls.append(("mouse.down",))
+
+    def up(self):
+        self.page.calls.append(("mouse.up",))
 
     def wheel(self, x, y):
         self.page.calls.append(("mouse.wheel", x, y))

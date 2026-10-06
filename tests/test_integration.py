@@ -710,3 +710,163 @@ def test_real_upload_through_a_button_a_drop_zone_and_the_hidden_input(upload_si
     with pytest.raises(shoot.ShootError) as e:
         shoot.run(leak, tmp_path / "leak")
     assert "outside the plugin's upload_dirs" in str(e.value)
+
+
+# ── redaction reaches a terminal's canvas: xterm is filtered at write() ──────
+# A stand-in for xterm.js's UMD bundle: it assigns `Terminal` onto the global (as the real one
+# does) and "draws" whatever write() is given into `drawn` — which is exactly what a canvas
+# renderer would paint. (The real xterm 5 bundle was checked by hand against this hook.)
+FAKE_XTERM = """!function(e){class Terminal{constructor(){this.drawn=''}
+open(p){this.element=document.createElement('div');this.element.className='xterm';
+this.element.appendChild(document.createElement('canvas'));p.appendChild(this.element)}
+write(d,cb){this.drawn+=typeof d==='string'?d:new TextDecoder().decode(d);cb&&cb()}
+writeln(d,cb){this.write(d);this.write('\\r\\n',cb)}
+reset(){this.drawn+='<reset>'}}
+var x={Terminal:Terminal};for(var s in x)e[s]=x[s]}(globalThis);"""
+
+TERM_PAGE = """<!doctype html><html><body><div id="host"></div>
+<div class="xterm" id="esm"><canvas id="esm-canvas"></canvas></div>
+<script>
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const s = document.createElement('script'); s.src = 'xterm.js';
+s.onload = async () => {
+  const t = new window.Terminal(); t.open(document.getElementById('host')); window.t = t;
+  // Bytes arrive in chunks; a path split across two writes, even 150ms apart, must not leak.
+  for (const [c, gap] of [['$ ls /Us', 150], ['ers/alice/dev\\r\\n', 5], ['mail bob@exam', 5],
+                          ['ple.org\\r\\n', 5], ['C:\\\\Users\\\\carol\\\\x\\r\\n', 5]]) { t.write(c); await sleep(gap); }
+  t.write(new TextEncoder().encode('bytes /home/dave/y\\r\\n'));
+  t.writeln('tail /Users/erin');
+  t.write('held /Users/fr'); t.reset(); t.write('ank\\r\\n');
+  await sleep(1300); window.done = true;
+};
+document.head.appendChild(s);
+</script></body></html>"""
+
+
+@pytest.fixture
+def term_site(site, tmp_path):
+    root = Path(tmp_path) / "site"
+    (root / "xterm.js").write_text(FAKE_XTERM, encoding="utf-8")
+    (root / "term.html").write_text(TERM_PAGE, encoding="utf-8")
+    return site
+
+
+def _terminal_page(site, install):
+    from playwright.sync_api import sync_playwright
+
+    from campaign.threads import in_thread
+
+    def check():
+        with sync_playwright() as pw:
+            b = pw.chromium.launch(headless=True)
+            ctx = b.new_context()
+            rules = pw_worker.redact_rules({"presets": ["home_paths", "emails"]})
+            if install == "init":
+                ctx.add_init_script(pw_worker.redact_init_js(rules))
+            page = ctx.new_page()
+            page.goto(site + "/term.html")
+            if install == "step":  # a `redact` step after the terminal already exists
+                page.wait_for_function("window.t")
+                page.evaluate(f"({pw_worker.REDACT_JS})", pw_worker.redact_cfg(rules))
+            page.wait_for_function("window.done", timeout=10_000)
+            out = page.evaluate(
+                """() => ({drawn: t.drawn, mark: t.element.getAttribute('data-campaign-redacted'),
+                    own: getComputedStyle(t.element.querySelector('canvas')).filter,
+                    esm: getComputedStyle(document.getElementById('esm-canvas')).filter})"""
+            )
+            b.close()
+            return out
+
+    return in_thread(check, 60)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_redaction_filters_what_a_terminal_draws_and_blurs_terminals_it_cannot_hook(term_site):
+    out = _terminal_page(term_site, "init")
+    drawn = out["drawn"]
+    for name in ("alice", "bob", "carol", "dave", "erin", "/Users/fr"):
+        assert name not in drawn, f"{name!r} reached the terminal canvas: {drawn!r}"
+    assert "$ ls ~/dev\r\n" in drawn and "mail you@example.com\r\n" in drawn and "~\\x\r\n" in drawn
+    assert "bytes ~/y\r\n" in drawn and "tail ~\r\n" in drawn
+    # What was held back is written (redacted) BEFORE a reset, in order — a reset is a boundary.
+    assert "held ~<reset>ank" in drawn
+    assert out["mark"] == "1" and out["own"] == "none", "a hooked terminal is drawn clearly"
+    assert out["esm"].startswith("blur"), "a terminal the hook can't reach is blurred, never shown raw"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_a_redact_step_hooks_a_terminal_that_already_exists(term_site):
+    out = _terminal_page(term_site, "step")
+    # Writes before the step went out raw (that's why redact belongs at the top of the script);
+    # everything after it is filtered.
+    assert "erin" not in out["drawn"] and "tail ~\r\n" in out["drawn"]
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_without_redaction_the_terminal_draws_everything(term_site):
+    out = _terminal_page(term_site, "none")
+    assert "/Users/alice/dev" in out["drawn"] and out["esm"] == "none", "the checks above are not vacuous"
+
+
+# ── pointer + keyboard steps, for real ───────────────────────────────────────
+STEPS_PAGE = """<!doctype html><html><body style="margin:0;font:16px system-ui">
+<div role="dialog" aria-label="First"><button onclick="log('saved first')">Save</button></div>
+<div role="dialog" aria-label="Second"><button onclick="log('saved second')">Save</button></div>
+<input aria-label="Count" onfocus="log('focused')"
+  onkeydown="if (event.key === 'ArrowUp') { this.dataset.n = (+this.dataset.n || 0) + 1; log('up ' + this.dataset.n); }">
+<div id="dock" style="position:relative;width:200px;height:60px;background:#333">
+  <div role="separator" aria-label="Resize dock" style="position:absolute;right:0;top:0;width:10px;height:60px;background:#888"></div>
+</div>
+<div id="log"></div><div id="pos"></div>
+<script>
+  const log = (m) => { const p = document.createElement('p'); p.textContent = m; document.getElementById('log').appendChild(p); };
+  const dock = document.getElementById('dock');
+  let drag = null;
+  document.querySelector('[role=separator]').addEventListener('mousedown', e => { drag = {x: e.clientX, w: dock.offsetWidth}; });
+  document.addEventListener('mousemove', e => {
+    if (drag) dock.style.width = (drag.w + e.clientX - drag.x) + 'px';
+    document.getElementById('pos').textContent = 'pointer ' + e.clientX + ',' + e.clientY;
+  });
+  document.addEventListener('mouseup', () => { if (drag) { drag = null; log('dock ' + dock.offsetWidth); } });
+</script></body></html>"""
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_real_focus_within_press_repeat_drag_and_mouse_move(site, tmp_path):
+    (Path(tmp_path) / "site" / "steps.html").write_text(STEPS_PAGE, encoding="utf-8")
+    script = validate(
+        {
+            "base_url": site,
+            "viewport": {"width": 640, "height": 400},
+            "device_scale_factor": 1,
+            "step_timeout_ms": 3000,
+            "steps": [
+                {"goto": "/steps.html"},
+                # "Save" is on the page twice — within scopes the click to ONE dialog.
+                {"click": {"role": "button", "name": "Save", "within": {"role": "dialog", "name": "Second"}}},
+                {"wait_for": {"text": "saved second", "exact": True, "within": "#log"}},
+                {"focus": {"label": "Count"}},
+                {"wait_for": {"text": "focused", "exact": True}},
+                {"press": {"key": "ArrowUp", "repeat": 4, "delay_ms": 20}},
+                {"wait_for": {"text": "up 4", "exact": True}},
+                {"drag": {"role": "separator", "name": "Resize dock", "to": {"dx": 150}}},
+                {"wait_for": {"text": "dock 350", "exact": True}},
+                {"mouse_move": {"x": 600, "y": 380, "smooth": False}},
+                {"wait_for": {"text": "pointer 600,380", "exact": True}},
+            ],
+        }
+    )
+    res = shoot.run(script, tmp_path / "take")
+    assert res["error"] == "", res["error"]
+    assert "saved first" not in json.dumps(res)
+
+    # Without `within`, the same click is ambiguous and the error names both matches.
+    bare = validate({**{k: script[k] for k in ("base_url", "viewport", "device_scale_factor", "step_timeout_ms")},
+                     "steps": [{"goto": "/steps.html"}, {"click": {"role": "button", "name": "Save"}}]})  # fmt: skip
+    with pytest.raises(shoot.ShootError) as e:
+        shoot.run(bare, tmp_path / "bare")
+    assert "matches 2 elements" in str(e.value)
