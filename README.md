@@ -103,10 +103,11 @@ loads nothing from the network at all.
 | `campaign_milestone` / `campaign_decision` | Dated milestones (owner agent/operator); operator decisions with options + a recommendation |
 | `campaign_status` | Progress + who each open item is waiting on; includes `show_component` payloads |
 | `campaign_script_save` | Validate + save a shot script (`script="template"` returns an annotated example) |
-| `campaign_shoot` | Record a take (Playwright, headless Chromium, `record_video`) and register the webm + stills |
+| `campaign_script_get` | Read a saved shot script back as YAML, each step commented with its number |
+| `campaign_shoot` | Record a take (Playwright, headless Chromium, `record_video`) and register the webm + stills. `overrides={N: …}` fixes one step of a saved script without resubmitting it — a whole step replaces step N, options merge into it — validated like any script and saved |
 | `campaign_render` | mp4 / gif / poster outputs via ffmpeg, under a hard limit |
 | `campaign_card` | Render a branded card template to PNG |
-| `campaign_view` | LOOK at a still/card/poster, or frames of a clip (evenly spaced, or either side of a mark/cut), as images the model sees — downscaled JPEGs, ≤ 3 per call, contained to the campaign's dir. Needs a core with `graph.sdk.multimodal_tool_result` and a vision model; otherwise it says it couldn't show them |
+| `campaign_view` | LOOK at a still/card/poster, or frames of a clip (evenly spaced, `every_s` apart from `start` to `end` — paged 12 per contact sheet, the reply naming the next page's `start` — or either side of a mark/cut), as images the model sees — downscaled JPEGs, ≤ 3 per call, contained to the campaign's dir. Needs a core with `graph.sdk.multimodal_tool_result` and a vision model; otherwise it says it couldn't show them |
 | `campaign_montage` | Cut an ordered `sequence` of clips + cards into one mp4 (see **Montages**) and register it as a `montage` asset with its poster (+ GIF) |
 | `campaign_storyboard` | The montage's contact sheet — one frame per item, a swatch per transition — returned as an image, plus the cut sheet |
 | `campaign_limits` | The hard-limit table, each row with its source URL and as-of date |

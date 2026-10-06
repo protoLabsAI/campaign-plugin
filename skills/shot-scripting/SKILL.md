@@ -7,7 +7,7 @@ description: >-
   the app's own view (not just its chat/command surface), marks, redaction of secrets, fixed
   timezone/locale, pre-seeded browser storage, and file uploads. Triggers: "record a demo of", "capture a clip of", "shoot the flow",
   "the take failed", "re-record", "make a GIF of the app doing X".
-tools: [campaign_script_save, campaign_shoot, campaign_view, campaign_get, browser_open, browser_snapshot, browser_screenshot]
+tools: [campaign_script_save, campaign_script_get, campaign_shoot, campaign_view, campaign_get, browser_open, browser_snapshot, browser_screenshot]
 ---
 
 # Shot scripts
@@ -334,6 +334,24 @@ The error names the step, the cause, and a `failure.png`. Look at the screenshot
   file into the allowed folder, or ask the operator; never work around it.
 Fix that ONE step and re-shoot. Same step failing three times → report to the operator with
 the screenshot rather than flailing.
+
+You don't have to resubmit the whole script to fix one step. `campaign_script_get(script_id)`
+shows the saved YAML with every step numbered (`# step 5`), and `campaign_shoot` takes
+`overrides` keyed by those numbers:
+
+```python
+campaign_shoot(
+    campaign_id=1,
+    script_id=3,
+    overrides={
+        5: {"wait_for": {"text": "Run complete", "timeout_ms": 120000}},  # a whole step: replaces step 5
+        7: {"exact": True},  # options: merged into step 7
+    },
+)
+```
+
+The patched script is validated like any other (a bad override records nothing) and saved
+under the same name, so the next re-shoot uses the fix too.
 
 **The recording is never thrown away.** A take that fails after it started recording keeps its
 `.webm`, `timing.json` and `failure.png`, and is registered as a NEW `captured` clip whose note

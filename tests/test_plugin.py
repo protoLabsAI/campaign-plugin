@@ -34,6 +34,7 @@ TOOLS = {
     "campaign_limits",
     "campaign_setup",
     "campaign_script_save",
+    "campaign_script_get",
     "campaign_shoot",
     "campaign_render",
     "campaign_card",

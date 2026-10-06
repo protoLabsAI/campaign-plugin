@@ -941,6 +941,49 @@ def validate(text_or_obj: Any) -> dict[str, Any]:
     return out
 
 
+def apply_overrides(data: dict[str, Any], overrides: Any) -> tuple[dict[str, Any], list[int]]:
+    """A one-step fix without resubmitting the script: ``{N: <change>}`` per step number (1-based,
+    as validation errors and failed takes number them). ``<change>`` is either a whole step —
+    ``{click: {role: button, name: Save}}``, replacing step N — or options merged into step N's
+    mapping — ``{timeout_ms: 90000}``. Returns a NEW raw script (validate it next) and the step
+    numbers changed; raises :class:`ScriptError` naming every bad entry."""
+    import copy
+
+    if not isinstance(overrides, dict) or not overrides:
+        raise ScriptError(["overrides must be a mapping of step number → {op: {...}} or {option: value}"])
+    out = copy.deepcopy(data)
+    steps = out.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise ScriptError(["the script has no `steps:` list to override"])
+    problems: list[str] = []
+    changed: list[int] = []
+    for key, change in overrides.items():
+        n = int(key) if isinstance(key, int) or (isinstance(key, str) and key.strip().isdigit()) else None
+        if n is None or not 1 <= n <= len(steps):
+            problems.append(f"overrides: {key!r} is not a step number 1..{len(steps)}")
+            continue
+        if not isinstance(change, dict) or not change:
+            problems.append(f"overrides step {n}: give {{op: {{...}}}} to replace it or {{option: value}} to change it")
+            continue
+        if len(change) == 1 and next(iter(change)) in STEP_OPS:
+            steps[n - 1] = change
+        else:
+            cur = steps[n - 1]
+            op, body = next(iter(cur.items())) if isinstance(cur, dict) and len(cur) == 1 else (None, None)
+            if not isinstance(body, dict):
+                label = op if op else repr(cur)
+                problems.append(
+                    f"overrides step {n}: the step is `{label}` written in short form — "
+                    f"replace it whole ({{{op or 'op'}: {{...}}}}) instead of merging options"
+                )
+                continue
+            steps[n - 1] = {op: {**body, **change}}
+        changed.append(n)
+    if problems:
+        raise ScriptError(problems)
+    return out, sorted(changed)
+
+
 def resolve_url(script: dict[str, Any], url: str) -> str:
     if re.match(r"^https?://", url):
         return url

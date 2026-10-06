@@ -178,6 +178,32 @@ def test_garbage_input():
     assert "not valid YAML" in _problems("steps: [unclosed")
 
 
+# ── overrides: a one-step fix without resubmitting the script ────────────────
+def test_overrides_replace_a_step_or_merge_options_and_never_touch_the_original():
+    raw = _with({"click": {"role": "button", "name": "Go"}}, {"wait_for": {"text": "Done"}}, {"hold": 500})
+    out, changed = shotscript.apply_overrides(
+        raw, {"2": {"click": {"text": "Start", "exact": True}}, 3: {"timeout_ms": 90_000}, 4: {"hold": 900}}
+    )
+    assert changed == [2, 3, 4]
+    assert out["steps"][1] == {"click": {"text": "Start", "exact": True}}
+    assert out["steps"][2] == {"wait_for": {"text": "Done", "timeout_ms": 90_000}}
+    assert out["steps"][3] == {"hold": 900}
+    assert raw["steps"][1] == {"click": {"role": "button", "name": "Go"}}, "the input is not mutated"
+    assert validate(out)["steps"][2]["timeout_ms"] == 90_000
+
+
+def test_bad_overrides_name_every_problem():
+    raw = _with({"hold": 500})
+    with pytest.raises(ScriptError) as e:
+        shotscript.apply_overrides(raw, {0: {"hold": 1}, "x": {"hold": 1}, 2: {"ms": 900}, 1: "goto /"})
+    msg = "\n".join(e.value.problems)
+    assert "0 is not a step number 1..2" in msg and "'x' is not a step number" in msg
+    assert "step 2: the step is `hold` written in short form" in msg
+    assert "overrides step 1: give {op: {...}}" in msg
+    with pytest.raises(ScriptError, match="must be a mapping"):
+        shotscript.apply_overrides(raw, [])
+
+
 # ── per-step timeout_ms (the 15s cap that silently ate a 17–44s agent run) ────
 def test_a_step_can_ask_for_its_own_timeout_up_to_the_max():
     s = validate(
