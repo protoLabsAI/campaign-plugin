@@ -60,12 +60,14 @@ config:
   producer_model: ""        # model override for the campaign_producer subagent; blank = host routing
   bearer_envs: ""           # extra env-var NAMES a shot script may use as auth.bearer_env (CAMPAIGN_* always may)
   upload_dirs: ""           # dirs an `upload` step may read files from (comma/newline separated); blank = uploads refused
+  outro: ""                 # YAML: the brand outro a montage appends with {outro: true} — beat, bumper, CTA card
 # `spawns: true` marks a setting that names a program this plugin RUNS, so the agent's own
 # set_config tool refuses to write it (protoAgent ADR 0019 §3b) — the operator sets it from
 # Settings. `interpreter` is also fenced by name; `ffmpeg_path` is fenced only by the marker.
 # `upload_dirs` carries the same marker for the same reason in a different shape: it decides
 # which local files an agent-written script may hand to a web page (an exfiltration path), so
-# the agent must never widen it itself. The marker is core's only per-key operator-only fence.
+# the agent must never widen it itself; `outro` likewise, because its bumper names a local file the
+# montage reads. The marker is core's only per-key operator-only fence.
 # Older cores ignore the field.
 settings:
   - { key: data_dir, label: "Data directory", type: string, group: "Campaign Studio", description: "Where the campaign database and every take, render and card live. Blank uses the host's per-instance plugin store." }
@@ -77,6 +79,7 @@ settings:
   - { key: brand_fonts, label: "Brand fonts", type: string, group: "Brand look", description: "Fallback font families installed on this machine, e.g. heading=Inter, body=Inter." }
   - { key: brand_logo, label: "Brand logo", type: string, group: "Brand look", description: "Fallback logo image path (png, svg or jpg) for cards." }
   - { key: limit_overrides, label: "Hard-limit overrides", type: string, group: "Campaign Studio", description: "YAML mapping of limit id → fields to override or add, e.g. github_attachment_video_free: {max_bytes: 100000000, source: <url>, as_of: 2026-10-01} on a paid plan. Each row should carry its source and date." }
+  - { key: outro, label: "Brand outro", type: string, spawns: true, group: "Brand look", description: "YAML for the outro a montage appends with a last item {outro: true}: caption_hold_s, min_caption_s, caption_fade_s, beat_s, transition, bumper: {path, in, out} (a recorded bumper clip — a file path, so operator-only), cta: {template: cta-slide, eyebrow, title, subtitle, cta, url, duration}. See the README's Outro section." }
   - { key: bearer_envs, label: "Shot-script bearer env vars", type: string, group: "Campaign Studio", description: "Comma-separated environment variable NAMES a shot script may send as its bearer token (auth.bearer_env), besides any CAMPAIGN_* variable. The token goes only to the script's base_url origin. The host's own operator/fleet tokens are always refused." }
   - { key: upload_dirs, label: "Upload folders", type: string, spawns: true, group: "Campaign Studio", description: "Comma- or newline-separated absolute folders a shot script's upload step may hand files from (symlinks resolved, regular files only, 50 MB each). Blank refuses every upload. Key/credential files, credential dirs (.ssh, .aws, …) and the agent's home (~/.protoagent) are refused even inside these; the filesystem root, your home dir or a parent of it, and the agent's home are ignored as too broad. Point it at a folder of demo files the agent can't write into. Operator-only: marked so the agent can't widen it itself." }
   - { key: producer_model, label: "Producer model", type: string, group: "Crew models", description: "Model override for the campaign_producer subagent. Blank rides the host's aux-model routing." }

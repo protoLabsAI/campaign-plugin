@@ -26,7 +26,7 @@ from .worker import pw_worker
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 DEFAULT_LIMITS = {"og-1280x640": "github_social_preview"}
-TEXT_KEYS = ("title", "subtitle", "eyebrow", "url", "footer", "brand")
+TEXT_KEYS = ("title", "subtitle", "eyebrow", "url", "footer", "brand", "cta")
 CARD_TIMEOUT_S = 120.0
 _SIZE_RE = re.compile(r"^(\d{2,4})x(\d{2,4})$")
 
@@ -96,6 +96,13 @@ h1{font-family:var(--font-heading);font-weight:750;letter-spacing:-.025em;line-h
   border:1px solid color-mix(in srgb,var(--fg) 22%,transparent);background:color-mix(in srgb,var(--fg) 6%,transparent)}
 .slide .bottom{position:absolute;bottom:calc(var(--u)*5);left:0;right:0;justify-content:center}
 .slide .footer{margin:0}
+
+/* cta-slide: the end card's call to action — a big accent button above the URL */
+.cta .button{margin-top:calc(var(--u)*4.4);padding:calc(var(--u)*1.7) calc(var(--u)*4.2);border-radius:999px;
+  background:var(--accent);color:var(--bg);font-family:var(--font-heading);font-weight:700;
+  font-size:calc(var(--u)*3);letter-spacing:-.01em;
+  box-shadow:0 calc(var(--u)*1.2) calc(var(--u)*5) color-mix(in srgb,var(--accent) 45%,transparent)}
+.cta .url{margin-top:calc(var(--u)*2.6)}
 """
 
 FONT_STACK = (
@@ -170,9 +177,9 @@ def build_html(template: str, data: dict[str, Any], size: tuple[int, int], look:
 
     body = re.sub(r"\{\{\s*([a-z_]+)\s*\}\}", sub, body)
     # Hide empty text slots rather than leaving gaps.
-    for key in ("eyebrow", "subtitle", "url", "footer"):
+    for key in ("eyebrow", "subtitle", "url", "footer", "cta"):
         if not values[key]:
-            cls = {"subtitle": "sub"}.get(key, key)
+            cls = {"subtitle": "sub", "cta": "button"}.get(key, key)
             body = re.sub(rf'class="({cls}[^"]*)"', r'class="\1 empty"', body, count=1)
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"

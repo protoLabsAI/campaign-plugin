@@ -12,6 +12,7 @@ from conftest import PNG_1x1, FakePlaywright, have_chromium
 
 def test_bundled_templates_and_their_sizes():
     assert cards.templates() == {
+        "cta-slide-1920x1080": (1920, 1080),
         "og-1280x640": (1280, 640),
         "square-1080": (1080, 1080),
         "title-slide-1920x1080": (1920, 1080),

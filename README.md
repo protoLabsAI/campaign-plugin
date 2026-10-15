@@ -334,6 +334,34 @@ The montage registers as a `montage` asset (the gallery plays it and filters by 
 `meta.sequence`, the cut sheet (`meta.timeline`), the encode attempts and the engines used;
 its poster and GIF are child assets.
 
+### The brand outro
+
+One ending, set up once and appended to any montage with a last item `{outro: true}`:
+**the beat** (the last shot's final frame frozen — its last caption held, faded, then the clean
+shot held), **a bumper** (a recorded clip — e.g. the product's real boot splash, shot with
+`capture: device`) and **a CTA card** (the `cta-slide` template: logo, eyebrow, title, a big
+accent button, the URL — rendered at the canvas size, so `size: 2560x1440` gives a 2K card).
+The operator sets it in the **Brand outro** setting (YAML; operator-only, since the bumper
+names a local file):
+
+```yaml
+caption_hold_s: 2.5       # the last caption stays up this much longer (frozen frame)
+min_caption_s: 4.0        # REFUSE a cut that shows the final caption for less than this
+caption_fade_s: 0.5       # then the caption fades (the clip's `caption.region` is painted over)…
+beat_s: 2.0               # …and the clean shot holds before the bumper
+transition: {style: fade, duration: 0.6}
+bumper: {path: ~/media/protoagent-splash.mp4, in: 0.1, out: 2.7}
+cta: {template: cta-slide, eyebrow: "Open source · MIT", title: "Star protoAgent on GitHub",
+      cta: "★  Star on GitHub", url: github.com/protoLabsAI/protoAgent, duration: 4.5}
+```
+
+The clip before the outro says where its final caption is — `caption: {at: <source s when the
+last caption is fully up>, region: {x, y, w, h}, color: "#0a0a0c"}` (source pixels). With `at`,
+the montage checks `(out − at) / speed + caption_hold_s ≥ min_caption_s` and refuses a cut that
+trims into the last caption's reading time (the cut sheet reports `caption_visible_s`). Footage
+is never cut to make room for the beat — the frame is frozen instead. `{outro: {…}}` overrides
+any key for one cut (its bumper may name a campaign `clip`, never a file `path`).
+
 ## Hard limits, not folklore
 
 `limits.py` is the only table of platform constraints, and it holds only *documented* limits —
@@ -356,7 +384,8 @@ named so core's agent self-config fence refuses agent writes to it), `brand_kit_
 (a Social Studio kit to read; blank auto-detects), `brand_name` / `brand_colors` /
 `brand_fonts` / `brand_logo` (fallbacks), `limit_overrides`, `bearer_envs` (extra env-var
 names a shot script may use as its bearer), `upload_dirs` (folders an `upload` step may read
-files from; blank refuses uploads; operator-only), `producer_model`.
+files from; blank refuses uploads; operator-only), `outro` (the brand outro — see **The brand
+outro**; operator-only), `producer_model`.
 
 ## Development
 

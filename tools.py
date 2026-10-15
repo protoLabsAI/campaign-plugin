@@ -1080,9 +1080,12 @@ def build_tools(registry):
         transitions, and register it as a 'montage' asset (+ its poster, + a GIF if asked and it
         fits). sequence is an ordered list of items:
         {clip: asset_id, in?: s, out?: s, speed?: 0.25-4, label?: 'lower third', theme_color?: '#hex',
-        focus?: {x,y,w,h} source px, transition?: style | {style, duration}} or
-        {card: {title, subtitle?, eyebrow?, url?, cta?, bg?, fg?, accent?, logo?: bool}, duration: s,
-        zoom?: bool, theme_color?, transition?}. A clip is ONE continuous stretch: in/out trim only
+        focus?: {x,y,w,h} source px, hold?: s (freeze the last frame), caption?: {at, region, color},
+        transition?: style | {style, duration}} or
+        {card: {title, subtitle?, eyebrow?, url?, cta?, bg?, fg?, accent?, logo?: bool,
+        template?: title-slide|cta-slide}, duration: s, zoom?: bool, theme_color?, transition?} — and,
+        LAST, {outro: true} to append the operator's brand outro (beat on the last clip, bumper,
+        CTA card; it refuses a cut that trims into the last clip's final caption). A clip is ONE continuous stretch: in/out trim only
         its ends, speed is one uniform factor (no ramps, no interior cuts). Transitions (into an
         item): colorwipe (default — a full-frame bar in the NEXT item's theme_color sweeps across
         and reveals it; also colorwipe_left/_up/_down), cut, or an xfade style (fade, wipeleft,

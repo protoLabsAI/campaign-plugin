@@ -71,9 +71,10 @@ def test_settings_that_name_a_program_to_run_are_marked_spawns():
     then runs (protoAgent ADR 0019 §3b). `ffmpeg_path` has no name the core fence can see,
     so the marker is the only thing fencing it; data paths must stay unmarked — except
     `upload_dirs`, a TRUST boundary (which local files a script may hand to a web page): an
-    agent that could widen it could upload anything it can read."""
+    agent that could widen it could upload anything it can read — and `outro`, whose bumper names
+    a local video file the montage reads (only the operator may point it at one)."""
     spawns = {s["key"] for s in MANIFEST["settings"] if s.get("spawns") is True}
-    assert spawns == {"ffmpeg_path", "interpreter", "upload_dirs"}
+    assert spawns == {"ffmpeg_path", "interpreter", "upload_dirs", "outro"}
 
 
 def test_playwright_is_declared_runtime_scoped_and_optional():

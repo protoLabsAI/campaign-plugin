@@ -55,6 +55,10 @@ def register(registry) -> None:
             return fn() if callable(fn) else None
 
         brand.configure(cfg, _host_config)
+        from . import outro
+
+        for w in outro.configure(cfg.get("outro", "")):
+            log.warning("[campaign] %s", w)
     except Exception:
         log.exception("[campaign] configuring failed")
 
