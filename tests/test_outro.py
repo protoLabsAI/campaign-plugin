@@ -99,6 +99,20 @@ def test_a_cut_that_trims_into_the_final_caption_is_refused(bumper, take):
     assert items[0]["caption_visible_s"] == pytest.approx(7.4 + 2.5)
 
 
+def test_a_caption_the_footage_fades_itself_counts_only_until_its_fade(bumper, take):
+    c, a = take
+    # Atlas's record mode: final caption up at 100 s, fades at 103 s, clean beat to tour-done 106 s.
+    outro.configure(_preset(bumper, caption_hold_s=0, caption_fade_s=0, beat_s=0))
+    seq = [{"clip": a["id"], "in": 3.9, "out": 106.0, "caption": {"at": 100.0, "until": 103.0}}, {"outro": True}]
+    with pytest.raises(montage.MontageError, match=r"on screen 3.00s — under the outro's min_caption_s 4s"):
+        montage.resolve_items(c["id"], montage.parse_sequence(seq), _probe)
+    seq[0]["caption"]["until"] = 104.6
+    items, _ = montage.resolve_items(c["id"], montage.parse_sequence(seq), _probe)
+    assert items[0]["caption_visible_s"] == pytest.approx(4.6)
+    assert items[0]["hold"] == 0.6, "no edit-side beat: only the transition's share is frozen"
+    assert outro.caption_visible_s(0, 10, 1, 4, 2.5, until=12) == 8.5, "still up at the cut → the hold counts"
+
+
 def test_without_caption_at_the_guard_says_it_could_not_check(bumper, take):
     c, a = take
     outro.configure(_preset(bumper))
@@ -172,3 +186,12 @@ def test_real_outro_freezes_fades_the_caption_then_bumper_then_card(tmp_path):
     assert _near(_rgb(mp4, 135, 300, 318), "#404040")[0], "4.5 s: the caption has faded — the clean beat"
     assert _near(_rgb(mp4, 195, 300, 180), "#0000ff")[0], "6.5 s: the bumper"
     assert _near(_rgb(mp4, 234, 300, 180), "#00ff00")[0], "7.8 s: the CTA card"
+
+
+def test_no_edit_side_fade_paints_nothing_over_the_footage(bumper, take):
+    c, a = take
+    outro.configure(_preset(bumper, caption_hold_s=0, caption_fade_s=0, beat_s=0))
+    region = {"x": 140, "y": 1140, "w": 2260, "h": 140}
+    seq = [{"clip": a["id"], "out": 106.0, "caption": {"at": 100.0, "until": 105.0, "region": region}}, {"outro": True}]
+    items, _ = montage.resolve_items(c["id"], montage.parse_sequence(seq), _probe)
+    assert "clear" not in items[0], "the app faded its caption itself — no box over the footage"

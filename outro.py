@@ -30,7 +30,10 @@ so footage is never cut short to make room. A clip item can carry::
 
 ``at`` — when (source seconds) the final caption became fully visible; with it the cut is
 CHECKED: ``(out − at) / speed + caption_hold_s ≥ min_caption_s`` or the montage is refused (a
-cut must never trim into the last caption's reading time). ``region`` (source pixels) — where
+cut must never trim into the last caption's reading time). ``until`` — when the footage's own
+caption starts fading (an app that ends on a native hold + fade + beat, like Atlas's record
+mode): then the caption counts only ``(until − at) / speed`` — set ``caption_hold_s``,
+``caption_fade_s`` and ``beat_s`` to 0 and let the footage carry the beat. ``region`` (source pixels) — where
 the caption sits; on the frozen frame it fades to ``color`` (default: the brand background)
 after the hold, leaving the clean shot for the beat. Without ``region`` there is no fade: the
 caption stays through the beat. Without ``at`` the check can't run, and the montage says so.
@@ -186,6 +189,12 @@ def beat_hold(o: dict[str, Any], has_region: bool, transition_share: float) -> f
     return round(hold + transition_share, 4)
 
 
-def caption_visible_s(clip_in: float, clip_out: float, speed: float, caption_at: float, hold_s: float) -> float:
-    """How long the final caption is on screen in the cut: its share of the footage + the hold."""
-    return max(0.0, (clip_out - max(caption_at, clip_in)) / speed) + hold_s
+def caption_visible_s(
+    clip_in: float, clip_out: float, speed: float, caption_at: float, hold_s: float, until: float | None = None
+) -> float:
+    """How long the final caption is on screen in the cut: from ``caption_at`` until it starts
+    fading in the footage (``until`` — an app that fades its own caption, e.g. Atlas's record
+    mode) or the cut; plus the frozen hold when it is still up at the cut."""
+    end = clip_out if until is None or until >= clip_out else until
+    extra = hold_s if until is None or until >= clip_out else 0.0
+    return max(0.0, (end - max(caption_at, clip_in)) / speed) + extra

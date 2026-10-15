@@ -94,7 +94,7 @@ CLIP_KEYS = {"clip", "in", "out", "speed", "label", "theme_color", "transition",
 CARD_ITEM_KEYS = {"card", "duration", "theme_color", "transition", "zoom"}
 CARD_KEYS = {"title", "subtitle", "eyebrow", "url", "cta", "bg", "fg", "accent", "logo", "template"}
 CARD_TEMPLATES = {"title-slide": "title-slide-1920x1080", "cta-slide": "cta-slide-1920x1080"}
-CAPTION_KEYS = {"at", "region", "color"}
+CAPTION_KEYS = {"at", "until", "region", "color"}
 MAX_HOLD_S = 15.0
 TRANSITION_KEYS = {"style", "duration"}
 OUTPUT_DEFAULTS: dict[str, Any] = {
@@ -500,9 +500,12 @@ def _caption(value: Any, what: str, problems: list[str]) -> dict[str, Any] | Non
         problems.append(f"{what}.caption must be {{at, region: {{x, y, w, h}}, color}}")
         return None
     _unknown(value, CAPTION_KEYS, f"{what}.caption", problems)
-    out: dict[str, Any] = {"at": None, "region": None, "color": None}
-    if value.get("at") not in (None, ""):
-        out["at"] = _num(value["at"], f"{what}.caption.at", problems, 0, 36_000)
+    out: dict[str, Any] = {"at": None, "until": None, "region": None, "color": None}
+    for key in ("at", "until"):
+        if value.get(key) not in (None, ""):
+            out[key] = _num(value[key], f"{what}.caption.{key}", problems, 0, 36_000)
+    if out["at"] is not None and out["until"] is not None and out["until"] <= out["at"]:
+        problems.append(f"{what}.caption: until must be after at")
     r = value.get("region")
     if r is not None:
         if not isinstance(r, dict):
@@ -655,7 +658,9 @@ def resolve_items(
                     "caption: {at: <seconds the last caption is fully up>}"
                 )
             else:
-                seen = outromod.caption_visible_s(it["in"], t_out, it["speed"], cap["at"], o["caption_hold_s"])
+                seen = outromod.caption_visible_s(
+                    it["in"], t_out, it["speed"], cap["at"], o["caption_hold_s"], cap.get("until")
+                )
                 it["caption_visible_s"] = round(seen, 3)
                 if seen + 1e-6 < o["min_caption_s"]:
                     problems.append(
@@ -663,7 +668,7 @@ def resolve_items(
                         f"min_caption_s {o['min_caption_s']:g}s. Don't trim into it: move `out` later "
                         f"(it's {t_out:g}s; the caption is up from {cap['at']:g}s) or raise caption_hold_s"
                     )
-            if cap.get("region"):
+            if cap.get("region") and o["caption_fade_s"] > 0:  # 0: the footage fades its own caption
                 r = cap["region"]
                 sw, sh = int(info.get("width") or 0), int(info.get("height") or 0)
                 if sw and sh and (r["x"] + r["w"] > sw or r["y"] + r["h"] > sh):

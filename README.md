@@ -359,6 +359,9 @@ The clip before the outro says where its final caption is — `caption: {at: <so
 last caption is fully up>, region: {x, y, w, h}, color: "#0a0a0c"}` (source pixels). With `at`,
 the montage checks `(out − at) / speed + caption_hold_s ≥ min_caption_s` and refuses a cut that
 trims into the last caption's reading time (the cut sheet reports `caption_visible_s`). Footage
+that ends on its OWN hold + caption fade + beat (Atlas's record mode does, before `tour-done`)
+sets `caption.until` (when the caption starts fading) and the preset's `caption_hold_s`,
+`caption_fade_s` and `beat_s` to 0: the cut is at the end mark and only the guard remains. Footage
 is never cut to make room for the beat — the frame is frozen instead. `{outro: {…}}` overrides
 any key for one cut (its bumper may name a campaign `clip`, never a file `path`).
 
