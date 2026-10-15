@@ -91,6 +91,19 @@ about:blank/srcdoc ones included), inside a function (assign
 ``window.x`` for a global), ≤ 64 KB. It is operator/agent-authored code, trusted like the rest
 of the script, and runs only in the recording browser (which is fenced off this plugin's API).
 
+Video capture — ``capture:``. By default (``capture: css``) the take is Playwright's own
+recording: a ``.webm`` at the viewport's CSS pixels, VP8 at Playwright's fixed ~1 Mbit/s realtime
+settings — small text in it is soft. ``capture: device`` records DEVICE pixels instead — a
+1280×800 viewport at ``device_scale_factor: 2`` becomes a 2560×1600 take (1280×720 → 2560×1440),
+so the UI keeps its normal size on screen and its text is drawn at twice the resolution — as an
+H.264 ``.mp4`` (yuv420p, constant ``fps``, ``crf`` 16 by default)::
+
+    device_scale_factor: 2
+    capture: device                     # or {scale: device, fps: 30, quality: 92, crf: 16}
+
+``fps`` (10–60) is the take's constant frame rate; ``quality`` (50–100) the JPEG quality of each
+captured frame; ``crf`` (10–28) the H.264 quality of the assembled take. Needs ffmpeg at shoot time.
+
 Uploads — ``upload: {target, files: [/abs/path, …]}``: an ``<input type=file>`` target (hidden
 is fine) gets the files directly; any other target (a button, a drop zone) is clicked and the
 file chooser it opens gets them. Files must sit under the operator's ``upload_dirs`` setting
@@ -116,6 +129,7 @@ TOP_KEYS = {
     "locale",
     "auth",
     "cursor",
+    "capture",
     "step_timeout_ms",
     "total_timeout_s",
     "mask",
@@ -168,6 +182,14 @@ MAX_STORAGE_ENTRIES = 200
 MAX_STORAGE_BYTES = 256 * 1024
 MAX_STORAGE_KEY_LEN = 512
 MAX_INIT_SCRIPT_BYTES = 64 * 1024
+# capture: how the VIDEO is recorded (see the module docstring, "Video capture").
+CAPTURE_SCALES = ("css", "device")
+CAPTURE_KEYS = ("scale", "fps", "quality", "crf")
+CAPTURE_DEVICE_DEFAULTS = {"fps": 30, "quality": 92, "crf": 16}
+# A device-pixel take is H.264 (yuv420p); level 5.1/5.2 tops out at 36864 macroblocks a frame
+# (~9.4 Mpx) and every side ≤ 4096 keeps it inside what browsers and the montage canvas handle.
+MAX_CAPTURE_SIDE = 4096
+MAX_CAPTURE_PIXELS = 36_864 * 256
 # The upload step: how many files one step may hand to a file input (paths are checked against
 # the operator's upload_dirs allowlist by the host at shoot time — see shoot.check_uploads).
 MAX_UPLOAD_FILES = 20
@@ -386,6 +408,56 @@ def _int(value: Any, where: str, problems: list[str], lo: int, hi: int) -> int |
         problems.append(f"{where}: {v} is outside {lo}..{hi}")
         return None
     return v
+
+
+def capture_size(script: dict[str, Any]) -> tuple[int, int]:
+    """The device-pixel frame size of a ``capture: device`` take: viewport × scale, even."""
+    vp, dsf = script["viewport"], float(script.get("device_scale_factor") or 1)
+    return int(round(vp["width"] * dsf)) // 2 * 2, int(round(vp["height"] * dsf)) // 2 * 2
+
+
+def _capture(value: Any, out: dict[str, Any], problems: list[str]) -> dict[str, Any]:
+    """``capture: css`` (the default — Playwright's own recording) or ``capture: device`` /
+    ``{scale: device, fps, quality, crf}`` — device-pixel frames assembled into H.264."""
+    if value in (None, ""):
+        return {"scale": "css"}
+    if isinstance(value, str):
+        value = {"scale": value}
+    if not isinstance(value, dict):
+        problems.append("capture must be `css`, `device`, or {scale: device, fps, quality, crf}")
+        return {"scale": "css"}
+    for k in value:
+        if k not in CAPTURE_KEYS:
+            problems.append(f"capture: unknown option `{k}`{_suggest(str(k), CAPTURE_KEYS)}")
+    scale = str(value.get("scale", "css")).strip().lower()
+    if scale not in CAPTURE_SCALES:
+        problems.append(f"capture.scale must be one of {', '.join(CAPTURE_SCALES)}, got {value.get('scale')!r}")
+        return {"scale": "css"}
+    if scale == "css":
+        extra = [k for k in ("fps", "quality", "crf") if k in value]
+        if extra:
+            problems.append(
+                f"capture: {', '.join(extra)} only apply to `scale: device` — Playwright's own recording "
+                "(scale: css) has a fixed frame rate and encoder"
+            )
+        return {"scale": "css"}
+    cap: dict[str, Any] = {"scale": "device"}
+    for key, lo, hi in (("fps", 10, 60), ("quality", 50, 100), ("crf", 10, 28)):
+        v = _int(value.get(key, CAPTURE_DEVICE_DEFAULTS[key]), f"capture.{key}", problems, lo, hi)
+        cap[key] = CAPTURE_DEVICE_DEFAULTS[key] if v is None else v
+    if "device_scale_factor" in out:
+        w, h = capture_size(out)
+        if w > MAX_CAPTURE_SIDE or h > MAX_CAPTURE_SIDE or w * h > MAX_CAPTURE_PIXELS:
+            problems.append(
+                f"capture: device — viewport × device_scale_factor is {w}×{h}, over the {MAX_CAPTURE_SIDE}px side / "
+                f"{MAX_CAPTURE_PIXELS / 1e6:.1f} Mpx cap; lower the scale (1280×800 at 2 → 2560×1600) or the viewport"
+            )
+        elif float(out["device_scale_factor"]) == 1:
+            problems.append(
+                "capture: device at device_scale_factor 1 records the same pixels as the default — set "
+                "device_scale_factor: 2 (a 1280×720 viewport → 2560×1440; 1280×800 → 2560×1600)"
+            )
+    return cap
 
 
 def _timeout_ms(value: Any, where: str, problems: list[str]) -> int | None:
@@ -846,6 +918,7 @@ def validate(text_or_obj: Any) -> dict[str, Any]:
     out["timezone_id"] = tz
     out["locale"] = str(data.get("locale", DEFAULTS["locale"]))
     out["cursor"] = bool(data.get("cursor", True))
+    out["capture"] = _capture(data.get("capture"), out, problems)
 
     st = _timeout_ms(data.get("step_timeout_ms", DEFAULTS["step_timeout_ms"]), "step_timeout_ms", problems)
     out["step_timeout_ms"] = st or DEFAULTS["step_timeout_ms"]

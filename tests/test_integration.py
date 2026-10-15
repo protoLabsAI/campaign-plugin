@@ -870,3 +870,31 @@ def test_real_focus_within_press_repeat_drag_and_mouse_move(site, tmp_path):
     with pytest.raises(shoot.ShootError) as e:
         shoot.run(bare, tmp_path / "bare")
     assert "matches 2 elements" in str(e.value)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not (have_chromium() and have_ffmpeg()), reason="needs playwright Chromium + ffmpeg")
+def test_real_device_pixel_take_is_twice_the_viewport_and_as_long_as_the_take(site, tmp_path):
+    script = validate(
+        {
+            "name": "tiny-hidpi",
+            "base_url": site,
+            "viewport": {"width": 640, "height": 400},
+            "device_scale_factor": 2,
+            "capture": "device",
+            "steps": [
+                {"goto": "/index.html"},
+                {"wait_for": {"role": "button", "name": "Install"}},
+                {"mark": "start"},
+                {"type": {"placeholder": "https://github.com/…", "text": "https://github.com/acme/x", "delay_ms": 10}},
+                {"hold": 1500},
+                {"mark": "end"},
+            ],
+        }
+    )
+    res = shoot.run(script, tmp_path / "take")
+    assert Path(res["video"]).suffix == ".mp4"
+    info = render.probe(res["video"])
+    assert (info["width"], info["height"]) == (1280, 800), "device pixels: viewport × device_scale_factor"
+    assert info["duration_s"] >= res["marks"]["end"] - 0.1, "idle stretches are held, not dropped"
+    assert not (tmp_path / "take" / ".frames").exists()

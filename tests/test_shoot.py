@@ -42,7 +42,7 @@ def test_records_video_marks_stills_and_a_timing_log(tmp_path):
     launch = next(c for c in pw.calls if c[0] == "launch")
     assert launch[1]["headless"] is True
     ctx = pw.browser.contexts[0].kw
-    # The screencast is CSS pixels; a bigger video size would only pad it with grey.
+    # capture: css (the default) — Playwright's own recording, at the viewport's CSS pixels.
     assert ctx["record_video_size"] == {"width": 1280, "height": 800}
     assert ctx["device_scale_factor"] == 2.0, "dsf still sharpens the stills"
     assert ctx["timezone_id"] == "UTC" and ctx["locale"] == "en-US" and ctx["color_scheme"] == "dark"

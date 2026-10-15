@@ -294,10 +294,15 @@ the moment the clip exists to show. (As a montage beat the same script works —
 
 - Always set `timezone_id` and `locale` — clocks and dates otherwise leak the machine's.
 - Set `color_scheme` explicitly (dark/light) to match the plan.
-- The VIDEO is recorded at the viewport's CSS pixels — `device_scale_factor` sharpens the
-  `screenshot` stills only (Playwright's screencast doesn't upscale). So pick the viewport for
-  the clip: 1280×800 is a sensible default; for a sharper clip of one region, record a larger
-  viewport and `crop` to the region in `campaign_render`. Mobile takes: e.g. 390×844.
+- **Crisp video: `capture: device`.** By default the VIDEO is Playwright's own recording at the
+  viewport's CSS pixels (VP8, ~1 Mbit/s) — small text in it is soft, and `device_scale_factor`
+  sharpens only the `screenshot` stills. With `capture: device` the take is recorded in DEVICE
+  pixels and assembled into H.264: a 1280×800 viewport at `device_scale_factor: 2` gives a
+  2560×1600 take (1280×720 → 2560×1440, 16:9) — the UI stays its normal size, its text drawn at
+  twice the resolution. Use it for anything with small text (diagrams, code, tables). Options:
+  `capture: {scale: device, fps: 30, quality: 92, crf: 16}`. Needs ffmpeg at shoot time; a
+  minute of take is a few MB (≈6 MB for a mostly-still UI tour). Don't make the viewport 2560
+  CSS px wide instead — the app's chrome shrinks to unreadable. Mobile takes: e.g. 390×844.
 
 ## Redaction — before the first frame
 

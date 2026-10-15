@@ -6,7 +6,8 @@ half: which bearer a script may carry (and reading it from the environment), res
 URLs, the fence the worker must enforce, and turning the worker's report back into a result
 (or a :class:`ShootError`). The worker writes into the take directory:
 
-* ``<name>.webm`` — the raw recording (video t=0 is page creation);
+* ``<name>.webm`` — the raw recording (video t=0 is page creation) — or, for ``capture: device``,
+  ``<name>.mp4``: device-pixel frames the worker captured, assembled HERE by ``capture.py``;
 * ``<shot>.png`` — one still per ``screenshot`` step;
 * ``timing.json`` — every step's start/end and every ``mark`` in seconds on the video's
   clock, which is what ``campaign_render`` trims and speed-ramps by;
@@ -406,6 +407,7 @@ def run(
     *,
     playwright_factory: Callable | None = None,
     env: dict[str, str] | None = None,
+    runner: Callable | None = None,
 ) -> dict[str, Any]:
     """Record one take of a VALIDATED script into ``out_dir`` through the worker.
 
@@ -413,9 +415,41 @@ def run(
     :class:`WorkerError` when the worker can't run or is killed on overrun.
     """
     bearer = read_bearer(script, env)
+    cap = script.get("capture") or {}
+    device = cap.get("scale") == "device"
+    if device:
+        from . import deps
+
+        if not deps.ffmpeg():
+            raise ShootError(
+                "capture: device assembles the take with ffmpeg, which isn't available — " + deps.ffmpeg_hint(),
+                {"steps": [], "error": "no ffmpeg"},
+            )
     job = build_job(script, out_dir, bearer)
     report = run_worker(job, float(script["total_timeout_s"]) + KILL_GRACE_S, playwright_factory)
     result = report.get("result") or {}
-    if not report.get("ok"):
-        raise ShootError(report.get("error") or "the take failed", {"steps": [], **result})
+    error = report.get("error") or ("" if report.get("ok") else "the take failed")
+    if device and result.get("frames"):
+        error = _assemble(script, result, error, runner)
+    if error:
+        raise ShootError(error, {"steps": [], **result})
     return result
+
+
+def _assemble(script: dict[str, Any], result: dict[str, Any], error: str, runner: Callable | None) -> str:
+    """Encode a device-pixel take's frames into ``<name>.mp4`` (a failed take's too: it keeps its
+    footage). Returns the take's error — the worker's, or why assembly failed."""
+    from . import capture
+
+    cap = script.get("capture") or {}
+    dst = Path(result.get("dir") or ".") / f"{script['name']}.mp4"
+    try:
+        info = capture.assemble(
+            result["frames"], dst, fps=int(cap.get("fps", 30)), crf=int(cap.get("crf", 16)), runner=runner
+        )
+    except capture.CaptureError as e:
+        result["video"] = ""
+        return error or f"the recording couldn't be assembled: {e}"
+    result["video"] = info["video"]
+    result["capture_info"] = info
+    return error
