@@ -169,8 +169,8 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         d = job.get("delivery") or {}
         return {
             "id": job["id"],
-            "title": job["inputs"]["title"],
-            "status": job["status"],
+            "title": (job.get("inputs") or {}).get("title", ""),
+            "status": job.get("status", "unknown"),
             "stage": job.get("stage"),
             "progress": produce.progress(job),
             "attempt": job.get("attempt", 0),

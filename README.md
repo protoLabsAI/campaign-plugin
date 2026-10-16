@@ -437,6 +437,12 @@ campaign_produce_video(script=<atlas_record_script's reply, unchanged>, title="p
 campaign_video_status(job_id="vid-3f9c…", wait_s=300)   # stage, %, gates, files, links
 ```
 
+**Preflight** (before any browser starts): the script's `base_url` must be THIS agent's console
+(compared with core's `sdk.console_url()` when present, else `A2A_PUBLIC_URL` / the bound port
+— loopback spellings equal), its first page must answer 200, and its `bearer_env` /
+`storage_state` token must pass one authenticated GET. Otherwise it refuses at once, saying
+what to fix. `allow_other_console=true` is the explicit opt-in for recording another console.
+
 It runs as a **background job** (a worker thread in the plugin; one at a time): **record** the
 take (`quality: 2k` → `device_scale_factor` = 2560 ÷ viewport width + `capture: device`; an
 Atlas script also gets a `last-slide` mark) → **measure** the first settled frame after `start`
@@ -469,15 +475,16 @@ good take; `force=True` re-records.
 
 - **Campaign gallery** — the review mp4 + GitHub mp4 as `montage` assets (`ready_for_review`
   when every gate passed) with the sheet and the text crop as stills; the operator approves.
-- **Console chat** — when the job ends, the requesting chat gets a follow-up turn
-  (`graph.sdk.run_in_session`) telling the agent to `save_file_artifact` the mp4 and the sheet
-  (the Artifact panel's versioned download) and post the gate table.
-- **Links** — each file goes through the host's media store (`registry.save_media`), so
-  `campaign_video_status` carries a signed `/media/…?sig=` link; any client — A2A, `/v1` —
-  gets it in the reply text. `GET /api/plugins/campaign/videos/{job_id}` (bearer) returns the
-  job's status, gates and `downloads` (`/api/plugins/campaign/file/{asset_id}`).
-- **Not yet**: A2A replies carry no *file part* and `/media` links are server-relative — the
-  caller must resolve them against the agent's base URL. Tracked in core (see the PR).
+- **Console chat** — on a core with the `artifact.save_file` service (protoAgent#4254) the job
+  saves the mp4 and the sheet into the requesting chat's Artifact panel itself. On older cores,
+  the follow-up turn (`graph.sdk.run_in_session`) tells the agent to `save_file_artifact` them.
+- **A2A / `/v1`** — on a core with `sdk.attach_file` (protoAgent#4255), `campaign_video_status`
+  attaches the finished files to the answer: A2A FileParts, `/v1` absolute links and
+  attachments. On older cores the reply carries the signed `/media/…?sig=` links (made absolute
+  when the agent's base URL is known), and the agent is told the caller has no Artifact panel.
+- **Links** — every file goes through the host media store (`registry.save_media`).
+  `GET /api/plugins/campaign/videos/{job_id}` (bearer) returns the job's status, gates and
+  `downloads` (`/api/plugins/campaign/file/{asset_id}`).
 
 ## Hard limits, not folklore
 

@@ -6,6 +6,7 @@ nudge are all faked at the produce.Hooks seam, so the whole pipeline (record →
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -47,6 +48,21 @@ class World:
         self.notified: list[tuple] = []
         self.media: list[tuple] = []
         self.refuse_render = ""
+        self.codes = {"/app/": 200, "/api/campaign-preflight": 404}  # 404 behind the auth gate = authed
+        self.need_token = ""  # when set, the auth probe needs exactly this bearer
+        self.gets: list[tuple[str, dict]] = []
+        self.mine = ["http://127.0.0.1:7870"]
+        self.artifact_svc = None
+
+    def http_get(self, url, headers):
+        self.gets.append((url, headers))
+        path = "/" + url.split("/", 3)[3] if url.count("/") >= 3 else "/"
+        if path == "/api/campaign-preflight" and self.need_token:
+            if headers.get("Authorization") != f"Bearer {self.need_token}":
+                return 401
+        if path not in self.codes:
+            raise OSError("connection refused")
+        return self.codes[path]
 
     # shoot
     def shoot(self, norm, out_dir):
@@ -123,6 +139,8 @@ class World:
         return produce.Hooks(
             shoot=self.shoot, render_montage=self.render_montage, ff=self.ff, page_renderer=self.page,
             save_media=self.save_media, notify=lambda s, j, t: self.notified.append((s, j, t)),
+            http_get=self.http_get, console_urls=lambda: self.mine,
+            save_artifact=lambda: self.artifact_svc,
         )  # fmt: skip
 
 
@@ -295,3 +313,150 @@ def test_status_tool_and_route_report_the_job(world, registry, client):
     r = client.get(f"/api/plugins/campaign/videos/{job['id']}").json()
     assert r["status"] == "done" and r["downloads"]["final"].startswith("/api/plugins/campaign/file/")
     assert client.get("/api/plugins/campaign/videos/vid-nope").status_code == 404
+
+
+# ── preflight (#22): never start a browser against an unverified console ─────
+def test_same_console_treats_loopback_spellings_alike():
+    assert produce.same_console("http://localhost:7870", "http://127.0.0.1:7870/")
+    assert not produce.same_console("http://localhost:7870", "http://127.0.0.1:7953")
+    assert not produce.same_console("https://a.example", "http://a.example")
+
+
+def test_another_agents_console_is_refused_before_any_recording(world):
+    world.mine = ["http://127.0.0.1:7953"]
+    with pytest.raises(
+        produce.ProduceError, match=r"records http://localhost:7870, but this agent's console is http://127.0.0.1:7953"
+    ):
+        _start(world)
+    assert world.shots == 0 and world.gets == [] and produce.list_jobs() == [], "nothing queued, nothing fetched"
+    assert _start(world, allow_other_console=True)["status"] == "done", "an explicit opt-in records it"
+
+
+def test_an_unknown_own_console_needs_the_opt_in(world):
+    world.mine = []
+    with pytest.raises(produce.ProduceError, match="can't tell which console"):
+        _start(world)
+    assert world.shots == 0
+
+
+def test_an_unreachable_or_broken_console_fails_fast(world):
+    world.codes.pop("/app/")
+    with pytest.raises(produce.ProduceError, match="unreachable .* Nothing was recorded"):
+        _start(world)
+    world.codes["/app/"] = 502
+    with pytest.raises(produce.ProduceError, match="answered HTTP 502"):
+        _start(world)
+    assert world.shots == 0
+
+
+def test_a_token_protected_console_needs_a_working_token(world, tmp_path, monkeypatch):
+    world.need_token = "tok-1"
+    with pytest.raises(produce.ProduceError, match="needs a token and the script's has none: set a CAMPAIGN_"):
+        _start(world)
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"origins": [{"origin": "http://localhost:7870",
+                                              "localStorage": [{"name": "protoagent.authToken", "value": "tok-1"}]}]}))  # fmt: skip
+    reply = ATLAS_REPLY.replace("steps:\n", f"auth: {{storage_state: {state}}}\nsteps:\n", 1)
+    job = produce.start(reply, title="t", hooks=world.hooks(), background=False)
+    assert job["status"] == "done" and world.gets[-1][1] == {"Authorization": "Bearer tok-1"}
+    monkeypatch.setenv("CAMPAIGN_CONSOLE_TOKEN", "wrong")
+    bad = ATLAS_REPLY.replace("steps:\n", "auth: {bearer_env: CAMPAIGN_CONSOLE_TOKEN}\nsteps:\n", 1)
+    with pytest.raises(produce.ProduceError, match="token was refused"):
+        produce.start(bad, title="t2", hooks=world.hooks(), background=False)
+
+
+# ── delivery through core seams (#4254 artifact.save_file, #4255 attach_file) ─
+def test_artifact_save_file_service_puts_the_files_in_the_panel(world):
+    calls = []
+
+    def svc(**kw):
+        calls.append(kw)
+        return {"ok": True, "id": f"art-{len(calls)}", "version": 1, "message": "saved", "ref": ""}
+
+    world.artifact_svc = svc
+    job = _start(world)
+    assert [Path(c["path"]).name for c in calls] == ["protoagent-in-85-seconds.mp4", "contact-sheet.png"]
+    assert calls[0]["session_id"] == "sess-1" and calls[0]["roots"]
+    assert job["delivery"]["artifacts_saved"] is True
+    text = world.notified[0][2]
+    assert "already in this chat's Artifact panel" in text and "save_file_artifact" not in text
+
+
+def test_without_the_service_or_on_refusal_the_follow_up_turn_saves_them(world):
+    world.artifact_svc = lambda **kw: {"ok": False, "message": "File too large — raise max_blob_kb"}
+    job = _start(world)
+    assert job["delivery"]["artifacts_saved"] is False
+    assert "save_file_artifact(path=" in world.notified[0][2]
+    assert any("max_blob_kb" in line for line in job["log"])
+
+
+def test_status_attaches_the_files_and_speaks_to_remote_callers(world, registry, monkeypatch):
+    import sys
+    import types
+
+    import campaign
+
+    attached = []
+    fake = types.ModuleType("graph.sdk")
+    fake.attach_file = lambda ref, name="": attached.append((ref, name)) or True
+    fake.console_url = lambda: "https://agent.example"
+    pkg = types.ModuleType("graph")
+    pkg.sdk = fake
+    monkeypatch.setitem(sys.modules, "graph", pkg)
+    monkeypatch.setitem(sys.modules, "graph.sdk", fake)
+    job = _start(world, allow_other_console=True)
+    campaign.register(registry)
+    out = registry.tool("campaign_video_status").invoke({"job_id": job["id"]})
+    assert [n for _u, n in attached] == ["protoagent-in-85-seconds.mp4", "protoagent-in-85-seconds-gh.mp4",
+                                         "protoagent-in-85-seconds-sheet.png"]  # fmt: skip
+    assert "3 file(s) attached" in out and "link: https://agent.example/media/" in out
+    assert "no Artifact panel or Download button on their side" in out
+    again = registry.tool("campaign_produce_video")
+    assert again  # the tool exists; reuse wording is covered below
+
+
+def test_a_repeat_request_says_it_reused_the_job(world):
+    first = _start(world)
+    again = _start(world)
+    assert again["reused"] and "REUSED" in produce.summary(again)
+    assert "reused this job" in produce.load(first["id"])["log"][-1]
+    assert "reused" not in produce.load(first["id"]), "the flag is per reply, never persisted"
+
+
+def test_the_preflight_probe_runs_in_the_worker_fenced_and_bearer_scoped():
+    import contextlib
+
+    from campaign import shoot
+    from campaign.worker import pw_worker
+
+    seen = []
+
+    class Resp:
+        def __init__(self, status):
+            self.status = status
+
+    class Ctx:
+        def get(self, url, headers=None, **kw):
+            seen.append((url, headers))
+            if "down" in url:
+                raise RuntimeError("connect ECONNREFUSED")
+            return Resp(200)
+
+        def dispose(self):
+            pass
+
+    class PW:
+        class request:  # noqa: N801 — mirrors playwright's attribute
+            @staticmethod
+            def new_context():
+                return Ctx()
+
+    job = {"v": pw_worker.JOB_VERSION, "kind": "probe", "base_url": "http://127.0.0.1:7953", "bearer": "sekret",
+           "fence": shoot.fence(), "urls": ["http://127.0.0.1:7953/app/", "http://127.0.0.1:7953/api/plugins/campaign/x",
+                                             "https://cdn.example/x", "http://down.example/"]}  # fmt: skip
+    rep = pw_worker.run_job(job, lambda: contextlib.nullcontext(PW()))
+    r = rep["result"]["responses"]
+    assert r[0] == {"url": "http://127.0.0.1:7953/app/", "status": 200}
+    assert r[1]["error"] == "blocked by the fence", "never this plugin's own data API"
+    assert seen[0][1] == {"Authorization": "Bearer sekret"} and seen[1][1] == {}, "the bearer goes home only"
+    assert "ECONNREFUSED" in r[3]["error"] and "sekret" not in json.dumps(rep)

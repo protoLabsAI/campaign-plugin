@@ -48,7 +48,6 @@ log = logging.getLogger("protoagent.plugins.campaign")
 QUALITIES = {"2k": 2560, "1080p": 1920}
 GH_LIMIT = "github_attachment_video_free"
 TERMINAL = ("done", "needs_review", "failed")
-STAGES = ("queued", "recording", "measuring", "rendering", "reviewing", "delivering")
 # Stage → (progress at its start, at its end). Recording dominates the wall clock.
 _SPAN = {
     "queued": (0.0, 0.02),
@@ -90,6 +89,11 @@ class Hooks:
     notify: Callable[[str, str, str], Any] | None = None  # (session_id, job_id, text)
     emit: Callable[[str, dict], Any] | None = None
     playwright_factory: Callable | None = None
+    # core's `artifact.save_file` service (#4254), resolved at call time; None → follow-up turn
+    save_artifact: Callable[[], Callable[..., dict] | None] | None = None
+    # the preflight's network + "which console am I" seams
+    http_get: Callable[[str, dict[str, str]], int] | None = None
+    console_urls: Callable[[], list[str]] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -176,6 +180,155 @@ def caption_region(norm: dict[str, Any]) -> dict[str, int] | None:
     if not (w and h):
         return None
     return {"x": int(70 * s), "y": int((h - 150) * s), "w": int((w - 150) * s), "h": int(70 * s)}
+
+
+# ── preflight: never start a browser against an unverified console ───────────
+LOOPBACK = {"127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"}
+# Any path behind the host's auth gate: 401 without a valid bearer, 404 past it (= authed). Not
+# this plugin's own API — the worker's fence keeps every request off that.
+AUTH_PROBE = "/api/campaign-preflight"
+
+
+def own_console_urls() -> list[str]:
+    """The URL(s) THIS agent's console serves on, from the host — ``graph.sdk.console_url()``
+    when the core has it (protoAgent#4256), else what core advertises in its A2A card:
+    ``A2A_PUBLIC_URL`` and the actually-bound loopback port. ``[]`` with no host."""
+    import os
+
+    out: list[str] = []
+    try:
+        from graph import sdk  # host import — lazy
+
+        fn = getattr(sdk, "console_url", None)
+        if callable(fn) and fn():
+            out.append(str(fn()))
+    except Exception:  # noqa: BLE001
+        pass
+    pub = (os.environ.get("A2A_PUBLIC_URL") or "").strip().rstrip("/")
+    if pub:
+        out.append(pub)
+    try:
+        from runtime.state import STATE  # host import — the same port core's card advertises
+
+        port = int(getattr(STATE, "active_port", 0) or 0)
+        if port:
+            out.append(f"http://127.0.0.1:{port}")
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _origin_key(url: str) -> tuple[str, str, int] | None:
+    from urllib.parse import urlsplit
+
+    try:
+        u = urlsplit((url or "").strip())
+        port = u.port or (443 if u.scheme == "https" else 80)
+    except ValueError:
+        return None
+    if u.scheme not in ("http", "https") or not u.hostname:
+        return None
+    host = u.hostname.lower()
+    return (u.scheme, "loopback" if host in LOOPBACK else host, port)
+
+
+def same_console(a: str, b: str) -> bool:
+    """Same scheme + host + port, every loopback spelling equal (127.0.0.1 ≡ localhost)."""
+    ka, kb = _origin_key(a), _origin_key(b)
+    return ka is not None and ka == kb
+
+
+def _worker_get(norm: dict[str, Any], hooks: "Hooks") -> Callable[[str, dict[str, str]], int]:
+    """The real preflight GET: through the browser worker's request context (no browser), so
+    the plugin's own Python never opens a connection. An unreachable URL raises OSError."""
+
+    def get(url: str, headers: dict[str, str]) -> int:
+        bearer = headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        (r,) = shoot.probe(str(norm.get("base_url") or ""), [url], bearer, hooks.playwright_factory)
+        if "status" not in r:
+            raise OSError(r.get("error") or "no response")
+        return int(r["status"])
+
+    return get
+
+
+def _stored_token(norm: dict[str, Any], origin: str) -> str:
+    """A storage_state file's ``protoagent.authToken`` for ``origin`` (the console's own token)."""
+    sp = (norm.get("auth") or {}).get("storage_state")
+    if not sp:
+        return ""
+    try:
+        data = json.loads(Path(str(sp)).expanduser().read_text())
+    except (OSError, ValueError):
+        return ""
+    for o in data.get("origins") or []:
+        if same_console(str(o.get("origin") or ""), origin):
+            for kv in o.get("localStorage") or []:
+                if kv.get("name") == "protoagent.authToken":
+                    return str(kv.get("value") or "")
+    return ""
+
+
+def preflight(norm: dict[str, Any], hooks: Hooks, *, allow_other_console: bool = False) -> list[str]:
+    """Check the recording target BEFORE any browser starts. Raises ProduceError with an
+    actionable message; returns notes on success.
+
+    1. the script's ``base_url`` is THIS agent's console (unless ``allow_other_console``);
+    2. its first page answers 200;
+    3. the script's credentials (``auth.bearer_env`` / a ``storage_state`` token) get past the
+       console's auth gate — one cheap authenticated GET."""
+    base = str(norm.get("base_url") or "").rstrip("/")
+    if not base:
+        raise ProduceError("the shot script has no base_url — set it to THIS console's URL")
+    origin = shotscript.browser_origin(base)
+    notes: list[str] = []
+    mine = (hooks.console_urls or own_console_urls)()
+    if not allow_other_console:
+        if not mine:
+            raise ProduceError(
+                f"can't tell which console this agent serves on, so {origin} can't be verified as ours — pass "
+                "allow_other_console=true only if recording that console is intended"
+            )
+        if not any(same_console(origin, m) for m in mine):
+            raise ProduceError(
+                f"the script records {origin}, but this agent's console is {mine[0]} — re-run "
+                f"atlas_record_script with base_url={mine[0]!r} (a blank base_url falls back to another "
+                "agent's :7870). Recording someone else's console needs allow_other_console=true"
+            )
+        notes.append(f"base_url {origin} is this agent's console")
+    else:
+        notes.append(f"recording {origin} (allow_other_console)")
+    get = hooks.http_get or _worker_get(norm, hooks)
+    first = next((st.get("url") for st in norm.get("steps") or [] if st.get("op") == "goto"), "/")
+    page = shotscript.resolve_url(norm, str(first))
+    try:
+        code = get(page, {})
+    except Exception as e:  # noqa: BLE001 — refused / DNS / timeout
+        raise ProduceError(f"{page} is unreachable ({e}) — is that console running? Nothing was recorded") from None
+    if code != 200:
+        raise ProduceError(
+            f"{page} answered HTTP {code}, not 200 — fix base_url / the first goto. Nothing was recorded"
+        )
+    token = ""
+    if (norm.get("auth") or {}).get("bearer_env"):
+        try:
+            token = shoot.read_bearer(norm)
+        except shoot.ShootError as e:
+            raise ProduceError(f"the script's bearer: {e}") from None
+    token = token or _stored_token(norm, origin)
+    try:
+        code = get(origin + AUTH_PROBE, {"Authorization": f"Bearer {token}"} if token else {})
+    except Exception as e:  # noqa: BLE001
+        raise ProduceError(f"{origin} is unreachable ({e})") from None
+    if code in (401, 403):
+        raise ProduceError(
+            f"{origin} needs a token and the script's "
+            + ("token was refused" if token else "has none")
+            + ": set a CAMPAIGN_* env var to this console's token and pass bearer_env=<its name> to "
+            "atlas_record_script (never the token itself). Nothing was recorded"
+        )
+    notes.append(f"{page} → 200, auth ok" if token else f"{page} → 200 (no auth needed)")
+    return notes
 
 
 # ── jobs ─────────────────────────────────────────────────────────────────────
@@ -269,6 +422,7 @@ def start(
     session_id: str = "",
     deliver_dir: str = "",
     force: bool = False,
+    allow_other_console: bool = False,
     hooks: Hooks | None = None,
     background: bool = True,
 ) -> dict[str, Any]:
@@ -295,10 +449,13 @@ def start(
     job = load(job_id)
     if job and not force:
         if job["status"] in ("done", "needs_review") or (job["status"] == "running" and _alive(job_id)):
-            job["reused"] = True
-            return job
+            _log(job, "re-requested with the same inputs — reused this job, nothing re-recorded")
+            save(job)
+            return {**job, "reused": True}
     if job and _alive(job_id):
         raise ProduceError(f"job {job_id} is running — wait for it (campaign_video_status) before forcing a re-run")
+    hooks = hooks or Hooks()
+    notes = notes + preflight(norm, hooks, allow_other_console=allow_other_console)
     prior_take = (job or {}).get("take") if not force else None
     job = {
         "id": job_id,
@@ -323,10 +480,11 @@ def start(
     }
     _log(job, f"queued — {title!r} at {quality}" + (f"; {'; '.join(notes)}" if notes else ""))
     save(job)
-    hooks = hooks or Hooks()
     if not background:
         run(job, hooks)
         return load(job_id) or job
+    for jid in [k for k, th in _THREADS.items() if not th.is_alive()]:
+        _THREADS.pop(jid, None)
     t = threading.Thread(target=run, args=(job, hooks), name=f"campaign-{job_id}", daemon=True)
     _THREADS[job_id] = t
     t.start()
@@ -869,6 +1027,7 @@ def _deliver(job: dict[str, Any], c: dict[str, Any], out: dict[str, Any], hooks:
                     delivery["links"][key] = url
             except Exception as e:  # noqa: BLE001 — the file path is still the answer
                 _log(job, f"media store refused {key}: {e}")
+    delivery["artifacts_saved"] = _save_artifacts(job, delivery, hooks)
     dd = job.get("deliver_dir")
     if dd:
         dst = Path(dd).expanduser()
@@ -886,6 +1045,30 @@ def _deliver(job: dict[str, Any], c: dict[str, Any], out: dict[str, Any], hooks:
                 delivery.setdefault("copied", {})[key] = str(dst / f"{stem}{suffix}")
     job["delivery"] = delivery
     save(job)
+
+
+def _save_artifacts(job: dict[str, Any], delivery: dict[str, Any], hooks: Hooks) -> bool:
+    """Put the review mp4 + sheet in the requesting chat's Artifact panel through core's
+    ``artifact.save_file`` service (protoAgent#4254). False when the host lacks it (older core,
+    artifact plugin off) — the completion turn then asks the agent to save_file_artifact."""
+    svc = hooks.save_artifact() if hooks.save_artifact else None
+    if svc is None or job["status"] == "failed":
+        return False
+    ok = True
+    for key, title in (("final", job["inputs"]["title"]), ("sheet", f"{job['inputs']['title']} — review sheet")):
+        p = delivery["files"].get(key)
+        if not p:
+            continue
+        try:
+            r = svc(path=p, title=title, session_id=job.get("session_id") or "", plugin_id="campaign",
+                    roots=[str(paths.data_dir())])  # fmt: skip
+        except Exception as e:  # noqa: BLE001 — a provider bug must not fail the job
+            r = {"ok": False, "message": str(e)}
+        delivery.setdefault("artifacts", {})[key] = r.get("id", "")
+        if not r.get("ok"):
+            ok = False
+            _log(job, f"artifact panel refused {key}: {r.get('message')}")
+    return ok
 
 
 def _finish(job: dict[str, Any], hooks: Hooks) -> None:
@@ -906,26 +1089,48 @@ def completion_prompt(job: dict[str, Any]) -> str:
     """The follow-up turn the requesting chat gets when the job ends: hand the files over."""
     d = job.get("delivery") or {}
     files = d.get("files") or {}
+    status_call = f"campaign_video_status(job_id={job['id']!r})"
     if job["status"] == "done":
+        if d.get("artifacts_saved"):
+            how = (
+                "The review mp4 and its sheet are already in this chat's Artifact panel. "
+                f"Reply with {status_call} — its gate table and links (it also attaches the file to the reply)."
+            )
+        else:
+            how = (
+                "Deliver it now, following the produce-walkthrough-video skill: "
+                f"save_file_artifact(path={files.get('final')!r}, title={job['inputs']['title']!r}) and "
+                f"save_file_artifact(path={files.get('sheet')!r}, title='review sheet'), then reply with "
+                f"{status_call} — its gate table and links."
+            )
         return (
-            f"[campaign] Video job {job['id']} ({job['inputs']['title']!r}) finished and passed every self-review gate. "
-            "Deliver it now, following the produce-walkthrough-video skill: "
-            f"save_file_artifact(path={files.get('final')!r}, title={job['inputs']['title']!r}) and "
-            f"save_file_artifact(path={files.get('sheet')!r}, title='review sheet'), then reply with "
-            f"campaign_video_status(job_id={job['id']!r}) — its gate table and links."
+            f"[campaign] Video job {job['id']} ({job['inputs']['title']!r}) finished and passed every "
+            f"self-review gate. {how}"
         )
     return (
         f"[campaign] Video job {job['id']} ({job['inputs']['title']!r}) ended {job['status'].upper()}: "
         + "; ".join(job.get("reasons") or ["no reason recorded"])
-        + f". Read campaign_video_status(job_id={job['id']!r}), LOOK at the review sheet, and tell the operator "
+        + f". Read {status_call}, LOOK at the review sheet, and tell the operator "
         "what failed and what you propose — do not present it as finished."
     )
+
+
+def absolute(url: str, bases: list[str]) -> str:
+    """A server-relative ``/media/…`` link made absolute against this agent's public base."""
+    if not url or not url.startswith("/") or not bases:
+        return url
+    return bases[0].rstrip("/") + url
 
 
 def summary(job: dict[str, Any]) -> str:
     """The status text a tool / route returns."""
     inp = job["inputs"]
     lines = [
+        *(
+            ["(This request matched an existing job — it was REUSED, not re-recorded; force=True re-records.)"]
+            if job.get("reused")
+            else []
+        ),
         f"Video job {job['id']} — {inp['title']!r} ({inp['quality']}, intro {inp['intro']}, outro {inp['outro']})",
         f"status: {job['status']} · stage: {job.get('stage')} · progress {round(progress(job) * 100)}% · attempt {job.get('attempt', 0)}",
     ]
@@ -936,12 +1141,19 @@ def summary(job: dict[str, Any]) -> str:
         lines.append("\nWhy it isn't done:")
         lines += [f"- {r}" for r in job["reasons"]]
     d = job.get("delivery") or {}
+    bases = own_console_urls()
     if d.get("files"):
         lines.append("\nFiles:")
         for k, p in d["files"].items():
-            link = (d.get("links") or {}).get(k)
+            link = absolute((d.get("links") or {}).get(k) or "", bases)
             aid = (d.get("assets") or {}).get(k)
             lines.append(f"- {k}: {p}" + (f" (asset #{aid})" if aid else "") + (f"\n  link: {link}" if link else ""))
+    if d.get("links"):
+        lines.append(
+            "\nTo a remote caller (A2A, /v1) give the links above — they download the file directly; "
+            "there is no Artifact panel or Download button on their side."
+            + ("" if bases else " The links are relative to this agent's base URL — prefix it.")
+        )
     lines.append("\nRecent:")
     lines += [f"  {x}" for x in (job.get("log") or [])[-6:]]
     return "\n".join(lines)

@@ -1291,13 +1291,47 @@ def build_tools(registry):
         if callable(fn):
             fn(session_id, text, job_id=f"campaign-{job_id}")
 
+    def _sdk_fn(name: str):
+        try:
+            from graph import sdk  # host import — lazy
+        except Exception:  # noqa: BLE001 — no host (tests, an in-process driver)
+            return None
+        fn = getattr(sdk, name, None)
+        return fn if callable(fn) else None
+
+    def _artifact_save_file():
+        """core's `artifact.save_file` service (protoAgent#4254), resolved at CALL time — None on
+        an older core or with the artifact plugin off (the follow-up turn then saves the files)."""
+        svc = _sdk_fn("service")
+        return svc("artifact.save_file") if svc else None
+
     def _hooks() -> produce.Hooks:
         save = getattr(registry, "save_media", None)
         return produce.Hooks(
             save_media=save if callable(save) else None,
             notify=_notify,
             emit=_emit,
+            save_artifact=_artifact_save_file,
         )
+
+    def _attach(job: dict) -> int:
+        """Attach the finished files to THIS turn's answer (core `sdk.attach_file`, #4255): an
+        A2A caller gets FileParts, a /v1 caller absolute links + attachments. 0 on older cores."""
+        attach = _sdk_fn("attach_file")
+        d = job.get("delivery") or {}
+        if attach is None or job["status"] != "done":
+            return 0
+        n = 0
+        stem = paths.slug(job["inputs"]["title"], "video")[:40]
+        for key, name in (("final", f"{stem}.mp4"), ("gh", f"{stem}-gh.mp4"), ("sheet", f"{stem}-sheet.png")):
+            url = (d.get("links") or {}).get(key)
+            if not url:
+                continue
+            try:
+                n += 1 if attach(url, name=name) else 0
+            except Exception:  # noqa: BLE001 — the links in the text are still the answer
+                pass
+        return n
 
     @tool
     def campaign_produce_video(
@@ -1311,6 +1345,7 @@ def build_tools(registry):
         campaign_id: int = 0,
         caption_region: dict | str = "",
         force: bool = False,
+        allow_other_console: bool = False,
         state: Annotated[Any, InjectedState] = None,
     ) -> str:
         """Produce a FINISHED video from one shot script, end to end, as a background job:
@@ -1323,6 +1358,10 @@ def build_tools(registry):
         first SETTLED frame; final caption ≥ 4 s, bumper, Star-on-GitHub card) or 'none'.
         subtitle / eyebrow: the intro card's other lines. caption_region {x,y,w,h} (device px)
         overrides where the final caption is measured (Atlas footage is detected).
+        PREFLIGHT, before any browser starts: the script's base_url must be THIS agent's console
+        (allow_other_console=True only when recording another console is intended), its page must
+        answer 200, and its bearer_env / storage_state token must pass the console's auth — else
+        it refuses at once with what to fix.
         Self-review gates before delivery: resolution, final caption ≥ 4 s, intro ≤ 6 s, no
         blank frames in the walkthrough, the GitHub variant ≤ 10 MB, plus a contact sheet and a
         100 % crop of the smallest text. One automatic retry where it helps; otherwise the job
@@ -1342,14 +1381,15 @@ def build_tools(registry):
             job = produce.start(
                 script, title=title, quality=quality, intro=intro, outro=outro, subtitle=subtitle,
                 eyebrow=eyebrow, campaign_id=campaign_id, region=region, session_id=_session(state),
-                force=force, hooks=_hooks(),
+                force=force, allow_other_console=allow_other_console, hooks=_hooks(),
             )  # fmt: skip
         except (produce.ProduceError, ValueError) as e:
             return f"Not started — {e}"
         if job.get("reused"):
             return (
-                f"That video was already requested: job {job['id']} is {job['status']} — nothing new started "
-                "(force=True re-records it).\n\n" + produce.summary(job)
+                f"REUSED an existing job: this exact request was already made — job {job['id']} is "
+                f"{job['status']}; nothing was re-recorded (force=True re-records it). Say so when you reply."
+                "\n\n" + produce.summary(job)
             )
         pred = job.get("predicted_s")
         return (
@@ -1388,6 +1428,8 @@ def build_tools(registry):
         if job is None:
             return f"No video job {job_id!r} — campaign_video_status() lists recent ones."
         out = produce.summary(job)
+        if (n := _attach(job)) > 0:
+            out += f"\n\n{n} file(s) attached to this reply (a remote caller receives them as files)."
         sheet = (job.get("delivery") or {}).get("files", {}).get("sheet")
         if job["status"] in produce.TERMINAL and sheet:
             out += _embed(sheet, "image/png", f"{job['inputs']['title']} — review sheet")

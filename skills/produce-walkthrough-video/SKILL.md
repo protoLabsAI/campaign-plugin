@@ -83,10 +83,17 @@ The title is ON SCREEN in the intro card: write it for THIS video. Don't put a l
 unless it's the finished length (the tour's footage + ~10 s of intro and outro), and never copy
 an example title from this skill.
 
+It PREFLIGHTS first and refuses at once, with the fix, when the script's `base_url` isn't this
+agent's console, the page doesn't answer, or the token doesn't pass the console's auth. Fix the
+script (re-run `atlas_record_script` with the URL it names, or set a `CAMPAIGN_*` token var and
+pass `bearer_env`). Pass `allow_other_console=true` only when the operator explicitly wants a
+DIFFERENT console recorded. Never work around a refusal.
+
 It returns a job id at once. The job records in real time (≈ the predicted length + ~20 s),
 measures the first settled frame and the final caption, renders a review cut (crf 18) and a
 GitHub-sized variant (≤ 10 MB), then runs the gates. Same inputs again returns the same job —
-don't start a second one; `force=True` only when the operator wants a re-record.
+don't start a second one; `force=True` only when the operator wants a re-record. When the reply
+says **REUSED**, tell the requester you delivered an existing video, not a new recording.
 
 ## 5. Report progress
 
@@ -98,11 +105,18 @@ wait: when the job ends, this chat gets a follow-up turn telling you to deliver.
 ## 6. Check, then deliver
 
 - **`done`** — every gate passed. Still LOOK: `campaign_view` the review sheet (intro tiles,
-  crossfade, walkthrough, final caption, outro) and the 100 % text crop. Then deliver:
-  `save_file_artifact(path=<review mp4>, title=<title>)` and
-  `save_file_artifact(path=<sheet>, title="review sheet")` (they appear in the Artifact panel
-  with a Download button), and reply with the gate table and the signed links from
-  `campaign_video_status` — the GitHub-sized mp4's link is the one for a README or PR.
+  crossfade, walkthrough, final caption, outro) and the 100 % text crop. Then deliver for the
+  channel you're on:
+  - **Console chat.** On a current core the job already put the review mp4 and the sheet in this
+    chat's Artifact panel (the follow-up turn says so). Otherwise call
+    `save_file_artifact(path=<review mp4>, title=<title>)` and
+    `save_file_artifact(path=<sheet>, title="review sheet")`. Reply with the gate table.
+  - **A2A / `/v1`.** The caller has NO Artifact panel and no Download button, so never mention
+    them. Reply with `campaign_video_status(job_id)`'s output. On a current core it attaches the
+    files to your answer (A2A FileParts; `/v1` absolute links). In every case, give the links as
+    ABSOLUTE URLs: if a link starts with `/media/`, prefix this agent's base URL (the console URL
+    you recorded from). The signed links download without a token.
+  - For a README or PR, use the GitHub-sized mp4's link.
 - **`needs_review`** — a gate failed after the one automatic retry (or the cut was refused).
   Say exactly which gate and why, show the sheet, and propose the fix (a longer final-slide
   hold, a shorter bumper, a re-record). **Never present it as finished.**

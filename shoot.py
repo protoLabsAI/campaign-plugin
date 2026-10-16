@@ -352,6 +352,23 @@ def run_worker(job: dict[str, Any], timeout: float, playwright_factory: Callable
         return json.loads(report_path.read_text(encoding="utf-8"))
 
 
+PROBE_TIMEOUT_S = 40
+
+
+def probe(
+    base_url: str, urls: list[str], bearer: str = "", playwright_factory: Callable | None = None
+) -> list[dict[str, Any]]:
+    """GET ``urls`` from the out-of-process worker (no browser; the plugin's own Python makes
+    no network calls) — ``[{url, status} | {url, error}]``. ``bearer`` goes to ``base_url``'s
+    origin only, and is scrubbed from the report."""
+    job = {"v": pw_worker.JOB_VERSION, "kind": "probe", "base_url": base_url, "urls": list(urls),
+           "bearer": bearer, "fence": fence()}  # fmt: skip
+    report = run_worker(job, PROBE_TIMEOUT_S, playwright_factory)
+    if not report.get("ok"):
+        raise WorkerError(f"the preflight couldn't run: {report.get('error') or 'unknown error'}")
+    return list((report.get("result") or {}).get("responses") or [])
+
+
 def read_bearer(script: dict[str, Any], env: dict[str, str] | None = None) -> str:
     """The script's bearer, read from the HOST environment under the allowlist — or ''."""
     import os
