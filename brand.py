@@ -314,6 +314,36 @@ def resolve(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     return out
 
 
+def kit_bookends() -> dict[str, Any]:
+    """The brand kit's default bookends — ``{"recipe", "intro", "outro"}`` with bumper paths
+    resolved against the KIT's directory — or ``{}``. The protoLabs kit ships
+    "protoLabs bookends v1"; the operator's own ``intro``/``outro`` settings win over it."""
+    kit_path = social_kit_path()
+    if not kit_path:
+        return {}
+    try:
+        import yaml
+
+        kit = yaml.safe_load(kit_path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 — a broken kit has no bookends (cards say why)
+        return {}
+    b = kit.get("bookends") if isinstance(kit, dict) else None
+    if not isinstance(b, dict):
+        return {}
+    out: dict[str, Any] = {"recipe": _str(b.get("recipe"))}
+    for part in ("intro", "outro"):
+        sec = b.get(part)
+        if not isinstance(sec, dict):
+            continue
+        sec = {k: (dict(v) if isinstance(v, dict) else v) for k, v in sec.items()}
+        bump = sec.get("bumper")
+        if isinstance(bump, dict) and _str(bump.get("path")):
+            bp = Path(_str(bump["path"])).expanduser()
+            bump["path"] = str(bp if bp.is_absolute() else kit_path.parent / bp)
+        out[part] = sec
+    return out
+
+
 def data_uri(path: str, max_bytes: int = 3_000_000) -> str:
     """A file → data: URI (for the card page, which has no file access). '' if unusable."""
     if not path:

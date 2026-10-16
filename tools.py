@@ -19,6 +19,8 @@ from typing import Annotated, Any
 from langchain_core.tools import tool
 
 from . import cards, deps, limits, look, montage, paths, produce, render, shoot, shotscript, store
+from . import intro as intromod
+from . import outro as outromod
 
 try:  # the host's graph state, injected into a tool body (the chat session id lives there)
     from langgraph.prebuilt import InjectedState
@@ -904,7 +906,9 @@ def build_tools(registry):
         above 4x is flagged as a jump cut unless continuous: false, an un-eased one of 2x+ as
         abrupt), optional crop {x,y,width,height} (source
         px), width, fps, and limit (a hard-limit id such as github_attachment_video_free) and/or
-        max_bytes. mp4 is H.264/yuv420p/faststart; when a size ceiling is set, mp4 steps CRF then
+        max_bytes, and bookends (mp4 only: brand — the default, protoLabs bookends v1: splash bumper →
+        fade → title card → edge sweep → the clip → edge sweep → bumper → fade → Star CTA, titled by
+        the output's title — or none for a bare clip). mp4 is H.264/yuv420p/faststart; when a size ceiling is set, mp4 steps CRF then
         width and gif steps fps then width until it fits. Reports final size, dimensions and
         duration, and anything still over a hard limit (which then can't be marked ready)."""
         if (reason := deps.need_ffmpeg()) is not None:
@@ -968,6 +972,13 @@ def build_tools(registry):
                 notes=notes,
             )
             made.append(a["id"])
+            booked = _bookend_render(c, a, spec, r, out_dir) if spec["bookends"] == "brand" else ""
+            if booked.startswith("/"):
+                a = store.get_asset(a["id"])
+                r = {**r, "path": a["path"], "size_bytes": a["size_bytes"], "width": a["width"],
+                     "height": a["height"], "duration_s": a["duration_s"]}  # fmt: skip
+            elif booked:
+                r = {**r, "warnings": [*r["warnings"], booked]}
             flag = f"  ⚠ {'; '.join(r['violations'])}" if r["violations"] else ""
             flag += f"  ⚠ continuity: {'; '.join(r['warnings'])}" if r["warnings"] else ""
             lines.append(
@@ -1106,7 +1117,8 @@ def build_tools(registry):
         slideleft, smoothleft, circleopen, …); output reduced_motion: true makes moving ones cuts. output (mapping, or just a preset name): name,
         preset landscape 1920x1080 (canonical — 1920x1080 clips pass through untouched) |
         vertical 1080x1920 | square 1080x1080, fit auto|letterbox|crop, fps, transition,
-        transition_duration (0.45), limit (a hard-limit id — duration and size are enforced),
+        transition_duration (0.45), bookends (auto — the default: protoLabs bookends v1 wrap the cut, title
+        = output.title; false for README loop tiles / GIF-style loops), limit (a hard-limit id — duration and size are enforced),
         max_bytes, gif, poster_at. Unknown keys and missing/foreign/rejected/superseded clips are refused;
         clips not yet approved are allowed but the montage is marked DRAFT INPUTS. Run
         campaign_storyboard first to review the cut. Follow the montage-editing skill."""
@@ -1505,6 +1517,27 @@ def _multimodal_fn():
         return None
     fn = getattr(sdk, "multimodal_tool_result", None)
     return fn if callable(fn) else None
+
+
+def _bookend_render(
+    c: dict[str, Any], a: dict[str, Any], spec: dict[str, Any], r: dict[str, Any], out_dir: Path
+) -> str:
+    """Wrap a freshly rendered mp4 in the brand's bookends (protoLabs bookends v1) — a montage of
+    [intro, the clip, outro] at the clip's own size — and point the asset at it. Returns the new
+    path, '' when the brand has no bookends, or why it couldn't (the plain render is kept)."""
+    if not (intromod.preset() and outromod.preset()):
+        return ""
+    title = spec["title"] or a["title"]
+    opts = {"name": f"{spec['name']}-bookends", "title": title, "size": f"{r['width'] // 2 * 2}x{r['height'] // 2 * 2}",
+            "fps": spec["fps"] or 30, "poster": False, "limit": spec["limit"] or "", "max_bytes": spec["max_bytes"]}  # fmt: skip
+    try:
+        m = montage.render_montage(c["id"], [{"clip": a["id"]}], opts, out_dir / "bookends")
+    except (montage.MontageError, render.RenderError) as e:
+        return f"bookends skipped — {e}"
+    store.update_asset(a["id"], path=m["path"], size_bytes=m["size_bytes"], width=m["width"], height=m["height"],
+                       duration_s=m["duration_s"], meta={**(a.get("meta") or {}), "bookends": montage.BOOKENDS_RECIPE,
+                       "unbookended": r["path"]})  # fmt: skip
+    return m["path"]
 
 
 def _video_problem(path: str) -> str | None:

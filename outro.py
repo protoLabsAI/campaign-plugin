@@ -91,7 +91,15 @@ def configure(setting: Any) -> list[str]:
 
 
 def preset() -> dict[str, Any]:
-    return dict(_PRESET)
+    """The effective preset: the operator's ``outro`` setting, else the brand kit's bookends
+    (protoLabs bookends v1 in the protoLabs kit), else ``{}``."""
+    return dict(_PRESET) if _PRESET else _kit_preset()
+
+
+def _kit_preset() -> dict[str, Any]:
+    from . import brand
+
+    return dict(brand.kit_bookends().get("outro") or {})
 
 
 def _num(v: Any, what: str, problems: list[str], lo: float, hi: float) -> float | None:
@@ -175,15 +183,15 @@ def normalize(raw: dict[str, Any], problems: list[str], *, trusted: bool) -> dic
 def resolve(value: Any, problems: list[str]) -> dict[str, Any]:
     """A montage item's ``outro`` value (``true`` or overrides) → the effective outro."""
     if value is True:
-        if not _PRESET:
+        if not preset():
             problems.append(
                 "outro: true — but no outro preset is configured (the plugin's `outro` setting); "
                 "give the outro inline: {outro: {beat_s, bumper: {clip}, cta: {…}}}"
             )
             return {}
-        return normalize(_PRESET, problems, trusted=True)
+        return normalize(preset(), problems, trusted=True)
     if isinstance(value, dict):
-        merged = {**_PRESET, **value}
+        merged = {**preset(), **value}
         # Only the operator's setting may name a file path; an override may not swap one in.
         if isinstance(value.get("bumper"), dict) and "path" in value["bumper"]:
             problems.append("outro.bumper.path can only come from the operator's outro setting — name a `clip` instead")

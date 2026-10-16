@@ -21,6 +21,10 @@ anything you'd write into their repo).
 
 ## The clip rules (Josh's, non-negotiable)
 
+- **protoLabs bookends v1, always** (`intro: brand`, `outro: brand` — the defaults; never pass
+  `none` unless the requester explicitly wants a bare clip): splash bumper → 300 ms fade → title
+  card → edge sweep → the walkthrough → edge sweep → bumper → 300 ms fade → Star CTA.
+
 - **Continuous, no jump cuts.** One take, one stretch. Speed ramps only, never cutting action
   out. The intro reveals the first settled frame with the signature edge sweep (bumper → title is a short 300 ms fade); the outro sweeps off the main clip into the bumper and fades to the CTA; the outro begins after the final
   caption has been read.

@@ -352,6 +352,31 @@ The montage registers as a `montage` asset (the gallery plays it and filters by 
 `meta.sequence`, the cut sheet (`meta.timeline`), the encode attempts and the engines used;
 its poster and GIF are child assets.
 
+### protoLabs bookends v1 — the default intro + outro
+
+Every clip Campaign produces is bookended by default, the way Josh approved it (vfr-edge-fade,
+2026-10-16):
+
+**intro** — the console's real boot-splash bumper → a 300 ms fade (brand easing) → the title card →
+an **edge sweep** into the content; **outro** — the content (its final caption held ≥ 4 s, guarded)
+→ an **edge sweep** into the bumper → a 300 ms fade → the "Star protoAgent on GitHub" end card.
+
+The recipe lives in the protoLabs brand kit (`brands/protolabs/brand-kit.yaml` → `bookends:`,
+generated with the DS snapshot; the bumper is `brands/protolabs/protoagent-splash.mp4`), so with
+**Brand kit file** pointed at it, it applies with nothing else configured. The operator's own
+**Brand intro** / **Brand outro** settings win over it. Where it applies:
+
+- **campaign_produce_video** — `intro: brand`, `outro: brand` are the defaults.
+- **campaign_montage / campaign_storyboard** — `output.bookends` (default `auto`: whenever the brand
+  has bookends) wraps the sequence: the intro's title is `output.title` (required while bookends
+  apply), the outro follows the last clip. A sequence that already starts with `{intro: …}` /
+  ends with `{outro: …}` is left alone. **`bookends: false`** for README loop tiles, short
+  GIF-style loops and other cuts that must not have them; `true` makes them required.
+- **campaign_render** — each mp4 output takes `bookends: brand` (the default for a full clip) or
+  `none`; the plain render is wrapped in the bookends at its own size (title = the output's
+  `title`, else the asset's) and the asset points at the bookended file. GIFs and posters never
+  get them.
+
 ### The video end-card recipe (brand outro)
 
 Not a new component — a **recipe** composed from what's already here: the last shot's beat, a

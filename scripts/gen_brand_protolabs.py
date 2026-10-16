@@ -35,6 +35,39 @@ def _family(stack: str) -> str:
     return stack.split(",")[0].strip().strip("\"'")
 
 
+# protoLabs bookends v1 — the default intro + outro for every clip Campaign produces (Josh,
+# 2026-10-16, on vfr-edge-fade.mp4: "that's the one"). The bumper is the console's REAL boot
+# splash (DS <Splash>, recorded live at 2560×1440 with capture: device — protoagent-splash.mp4).
+BOOKENDS = {
+    "recipe": "protoLabs bookends v1",
+    "intro": {
+        "bumper": {"path": "protoagent-splash.mp4", "in": 0.1, "out": 2.3},
+        "bumper_fade_ms": 300,  # splash → title card
+        "card": {"template": "title-slide", "title": "", "subtitle": "", "duration": 3.0},
+        "into_content": "edge_sweep",  # title card → the content
+        "max_s": 6.0,
+    },
+    "outro": {
+        "caption_hold_s": 0,  # the content keeps its final caption ≥ min_caption_s (guarded)
+        "min_caption_s": 4.0,
+        "caption_fade_s": 0,
+        "beat_s": 0,
+        "transition": "edge_sweep",  # content → bumper
+        "bumper": {"path": "protoagent-splash.mp4", "in": 0.1, "out": 2.7},
+        "bumper_fade_ms": 300,  # bumper → the Star CTA
+        "cta": {
+            "template": "cta-slide",
+            "eyebrow": "Open source · MIT",
+            "title": "Star protoAgent on GitHub",
+            "subtitle": "A LangGraph agent runtime with an operator console, drop-in plugins and A2A.",
+            "cta": "★  Star on GitHub",
+            "url": "github.com/protoLabsAI/protoAgent",
+            "duration": 4.5,
+        },
+    },
+}
+
+
 def build_kit(tokens: dict, version: str, tokens_sha256: str) -> dict:
     """``@protolabsai/design`` tokens → a Campaign Studio brand kit (the explicit mapping)."""
     c, f = tokens["color"], tokens["font"]
@@ -42,6 +75,7 @@ def build_kit(tokens: dict, version: str, tokens_sha256: str) -> dict:
     sans, mono = _family(f["sans"]), _family(f["mono"])
     return {
         "name": "protoLabs",
+        "bookends": BOOKENDS,
         "source": {
             "package": "@protolabsai/design",
             "version": version,

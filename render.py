@@ -319,7 +319,22 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
         "limit": limit_id,
         "at": resolve_time(spec.get("at"), marks, f"{name}.at"),
         "title": str(spec.get("title") or ""),
+        # protoLabs bookends v1 around a FULL clip (mp4): brand (the default) | none. A GIF or a
+        # poster never gets them (loops and stills).
+        "bookends": _bookends(spec.get("bookends"), fmt, name),
     }
+
+
+def _bookends(value: Any, fmt: str, name: str) -> str:
+    if fmt != "mp4":
+        if value in ("brand", True):
+            raise RenderError(f"output {name}: bookends only wrap an mp4 (a {fmt} is a loop / still)")
+        return "none"
+    if value in (None, "", "brand", True):
+        return "brand"
+    if value in ("none", False):
+        return "none"
+    raise RenderError(f"output {name}: bookends must be brand or none, got {value!r}")
 
 
 Segment = tuple  # (a, b, speed) or, for an eased ramp, (a, b, speed, ease)

@@ -92,3 +92,12 @@ When they answer in chat, record it: `campaign_decision(campaign_id, decision_id
 `campaign_status(campaign_id)` → render its payloads with `show_component("keyvalue", …)` and
 `show_component("table", …)`. For a narrative plan document, render `campaign_get` as an
 artifact (`show_artifact`). Then ask for the open decisions — one message, numbered.
+
+## Video bookends — protoLabs bookends v1 (default)
+
+Every video asset in the plan ships with **protoLabs bookends v1** unless the shot list says
+otherwise: the real boot-splash bumper → 300 ms fade → title card → edge sweep → the content →
+edge sweep → bumper → 300 ms fade → "Star protoAgent on GitHub" end card. `campaign_produce_video`,
+`campaign_montage` and `campaign_render` (mp4) apply it by default — plan a **title** for each
+video, not a separate intro/end card. Mark README loop tiles and GIF-style loops "no bookends"
+(`bookends: false` / `none` when rendering them).

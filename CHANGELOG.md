@@ -2,6 +2,12 @@
 
 ## 0.4.2
 
+- **protoLabs bookends v1 are the default everywhere.** The protoLabs brand kit carries them
+  (`bookends:` in `brands/protolabs/brand-kit.yaml`, with the real splash bumper
+  `protoagent-splash.mp4`): splash → 300 ms fade → title card → edge sweep → content → edge sweep →
+  bumper → 300 ms fade → Star CTA. `campaign_produce_video` defaults to them; montages and
+  storyboards add them (`output.bookends`: auto | true | false — false for loop tiles); every
+  `campaign_render` mp4 gets them (`bookends: brand | none`). Operator intro/outro settings win.
 - **Edge sweep only.** The Boot Seam transition is removed (Josh's call): `transition: boot_seam`
   is now a validation error that points at `edge_sweep`, `cut` or `fade`, and it is gone from
   `transitions.json` (profile 2.0.0).

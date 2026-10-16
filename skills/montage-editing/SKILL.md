@@ -68,6 +68,10 @@ recording — the montage only trims the ends, sets one speed, and joins beats w
   `output: {reduced_motion: true}` (the signatures become in-place hard cuts; timing is unchanged). A transition can't eat a beat — the tool refuses ones longer
   than the beat allows.
 
+- **protoLabs bookends v1 is the default** for every cut: splash bumper → 300 ms fade → title
+  card → edge sweep → your beats → edge sweep → bumper → 300 ms fade → Star CTA. You only give
+  `output.title`; don't hand-build intro/outro/end cards. Use `output: {bookends: false}` ONLY for a
+  README loop tile or a short GIF-style loop.
 - **The video end-card recipe**: the end card is the brand's `cta-slide` drawn by its kit's
   `visual.card` recipe (protoLabs: `brands/protolabs/brand-kit.yaml`, generated from the DS —
   bordered rectangular button, Geist bundled, restrained background). Don't hand-pick colours or

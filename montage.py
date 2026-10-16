@@ -130,6 +130,9 @@ OUTPUT_DEFAULTS: dict[str, Any] = {
     "label_font": "",  # a font FILE for labels; blank = the brand heading font, resolved
     "card_engine": "auto",  # auto | html | ffmpeg
     "label_engine": "auto",  # auto | drawtext | html | none
+    # protoLabs bookends v1 (the brand's default intro + outro) around the cut: auto = whenever the
+    # brand has bookends; false for README loop tiles / GIF-style loops; true = required.
+    "bookends": "auto",
 }
 CARD_ENGINES = ("auto", "html", "ffmpeg")
 LABEL_ENGINES = ("auto", "drawtext", "html", "none")
@@ -324,6 +327,7 @@ def normalize_output(output: Any) -> dict[str, Any]:
     for key in ("poster", "gif"):
         if not isinstance(o[key], bool):
             problems.append(f"output.{key} must be true or false")
+    bookends = _bookends_opt(o.get("bookends"), problems)
     if problems:
         raise MontageError(problems)
     return {
@@ -350,7 +354,55 @@ def normalize_output(output: Any) -> dict[str, Any]:
         "label_font": str(Path(label_font).expanduser()) if label_font else "",
         "card_engine": str(o["card_engine"]).lower(),
         "label_engine": str(o["label_engine"]).lower(),
+        "bookends": bookends,
     }
+
+
+BOOKENDS_RECIPE = "protoLabs bookends v1"
+
+
+def _bookends_opt(value: Any, problems: list[str]) -> str:
+    if value in (None, "", "auto"):
+        return "auto"
+    if value in (True, "brand", "true", "on"):
+        return "brand"
+    if value in (False, "none", "false", "off"):
+        return "none"
+    problems.append(f"output.bookends must be auto, true/brand or false/none, got {value!r}")
+    return "auto"
+
+
+def with_bookends(sequence: Any, opts: dict[str, Any]) -> tuple[Any, list[str]]:
+    """Wrap a cut in the brand's default bookends (protoLabs bookends v1: splash bumper → 300 ms
+    fade → title card → edge sweep → CONTENT → edge sweep → bumper → 300 ms fade → Star CTA) —
+    unless ``output.bookends`` is false, the sequence already opens with an intro / ends with an
+    outro, or (``auto``) the brand has no bookends. Returns (sequence, notes)."""
+    if opts.get("bookends") == "none" or not isinstance(sequence, list) or not sequence:
+        return sequence, []
+    have_intro, have_outro = bool(intromod.preset()), bool(outromod.preset())
+    if opts.get("bookends") == "brand" and not (have_intro and have_outro):
+        raise MontageError(
+            "output.bookends: true — but the brand has no bookends (the brand kit's `bookends:` or the "
+            "intro/outro settings); point Brand kit file at brands/protolabs/brand-kit.yaml, or bookends: false"
+        )
+    seq, notes = list(sequence), []
+    first, last = seq[0], seq[-1]
+    if have_intro and not (isinstance(first, dict) and "intro" in first):
+        title = str(opts.get("title") or "").strip()
+        if not title:
+            raise MontageError(
+                f"{BOOKENDS_RECIPE}: the intro's title card needs output.title (the video's title) — "
+                "or output.bookends: false for a loop tile / GIF-style cut"
+            )
+        seq.insert(0, {"intro": {"card": {"title": title}}})
+        notes.append(f"{BOOKENDS_RECIPE}: intro added (bumper → 300 ms fade → title card → edge sweep)")
+    if have_outro and not (isinstance(last, dict) and "outro" in last):
+        if isinstance(last, dict) and "clip" in last:
+            seq.append({"outro": True})
+            notes.append(f"{BOOKENDS_RECIPE}: outro added (edge sweep → bumper → 300 ms fade → Star CTA)")
+        else:
+            notes.append(f"{BOOKENDS_RECIPE}: no outro — the cut ends on a card, not a clip")
+    return seq, notes
 
 
 def parse_sequence(sequence: Any) -> list[dict[str, Any]]:
@@ -1526,12 +1578,14 @@ def render_montage(
     runner = runner or _default_runner
     # Validate everything that needs no ffmpeg first: the agent's real error beats "install ffmpeg".
     opts = normalize_output(output)
+    sequence, bookend_notes = with_bookends(sequence, opts)
     items = parse_sequence(sequence)
     check_items(campaign_id, items)
     ff = deps.ffmpeg()
     if not ff:
         raise render.RenderError(deps.ffmpeg_hint())
     items, warnings = resolve_items(campaign_id, items)
+    warnings = bookend_notes + warnings
     warnings += framing(items, opts)
     look = brandmod.resolve({})
     timeline = plan(items, opts, look)
@@ -1685,12 +1739,14 @@ def storyboard(
     runner = runner or _default_runner
     # Validate everything that needs no ffmpeg first: the agent's real error beats "install ffmpeg".
     opts = normalize_output(output)
+    sequence, bookend_notes = with_bookends(sequence, opts)
     items = parse_sequence(sequence)
     check_items(campaign_id, items)
     ff = deps.ffmpeg()
     if not ff:
         raise render.RenderError(deps.ffmpeg_hint())
     items, warnings = resolve_items(campaign_id, items)
+    warnings = bookend_notes + warnings
     warnings += framing(items, opts)
     look = brandmod.resolve({})
     timeline = plan(items, opts, look)

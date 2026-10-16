@@ -86,7 +86,15 @@ def configure(setting: Any) -> list[str]:
 
 
 def preset() -> dict[str, Any]:
-    return dict(_PRESET)
+    """The effective preset: the operator's ``intro`` setting, else the brand kit's bookends
+    (protoLabs bookends v1 in the protoLabs kit), else ``{}``."""
+    return dict(_PRESET) if _PRESET else _kit_preset()
+
+
+def _kit_preset() -> dict[str, Any]:
+    from . import brand
+
+    return dict(brand.kit_bookends().get("intro") or {})
 
 
 def _num(v: Any, what: str, problems: list[str], lo: float, hi: float) -> float | None:
@@ -211,18 +219,18 @@ def _merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
 def resolve(value: Any, problems: list[str]) -> dict[str, Any]:
     """A montage item's ``intro`` value (``true`` or overrides) → the effective intro."""
     if value is True:
-        if not _PRESET:
+        if not preset():
             problems.append(
                 "intro: true — but no intro preset is configured (the plugin's `intro` setting); "
                 "give it inline: {intro: {bumper: {clip}, card: {title, duration}}}"
             )
             return {}
-        out = normalize(_PRESET, problems, trusted=True)
+        out = normalize(preset(), problems, trusted=True)
     elif isinstance(value, dict):
         if isinstance(value.get("bumper"), dict) and "path" in value["bumper"]:
             problems.append("intro.bumper.path can only come from the operator's intro setting — name a `clip` instead")
             return {}
-        out = normalize(_merge(_PRESET, value), problems, trusted=True)
+        out = normalize(_merge(preset(), value), problems, trusted=True)
     else:
         problems.append("intro must be true (the brand preset) or a mapping of overrides")
         return {}
