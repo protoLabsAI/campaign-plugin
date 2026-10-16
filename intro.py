@@ -11,7 +11,7 @@ The mirror of :mod:`outro`. The operator sets it up ONCE, as the plugin's ``intr
         title: "protoAgent"    # a montage / produce_video usually overrides title + subtitle
         subtitle: ""
         duration: 3.0
-      transition: boot_seam    # bumper → card (a brand boundary — the signature Boot Seam)
+      transition: cut          # bumper → card: a straight cut (or fade / edge_sweep)
       into_content: edge_sweep # card → the first shot (the signature Edge Sweep)
       max_s: 6.0               # REFUSE an intro longer than this (until the first shot is fully up)
 
@@ -20,7 +20,7 @@ and a montage prepends it with a FIRST item ``{intro: true}`` — or ``{intro: {
 asset; only the operator's setting may name a file ``path``).
 
 The intro never hard-cuts into the footage (Josh's no-jump-cuts rule): the transition into the
-first shot must be a signature reveal (``edge_sweep``, ``boot_seam``) or a crossfade-type xfade
+first shot must be the signature reveal (``edge_sweep``) or a crossfade-type xfade
 (``fade``, ``dissolve``, …) of at least :data:`MIN_CROSSFADE_S`. (Reduced motion — the montage's
 ``reduced_motion`` — turns the signatures into cuts on purpose.) The first shot itself should start on a SETTLED frame — trim its ``in``
 past any opening motion (produce_video measures it from the footage).
@@ -38,10 +38,14 @@ BUMPER_KEYS = {"path", "clip", "in", "out", "theme_color"}
 CARD_KEYS = {"template", "title", "subtitle", "eyebrow", "url", "duration", "zoom", "logo", "bg", "fg", "accent"}
 CARD_TEMPLATES = ("title-slide", "cta-slide")
 CROSSFADES = ("fade", "dissolve", "fadeblack", "fadewhite")
-SIGNATURES = ("edge_sweep", "boot_seam")  # transitions.py — fixed, frame-quantized
+SIGNATURES = ("edge_sweep",)  # transitions.py — fixed, frame-quantized
 INTO_CONTENT = (*SIGNATURES, *CROSSFADES)
+# bumper → card may also be a plain cut (splash → title card): only the reveal of the first SHOT
+# must never cut.
+INTO_CARD = ("cut", *INTO_CONTENT)
+REMOVED = {"boot_seam": "boot_seam was removed (Josh: edge sweep only) — use edge_sweep, cut or fade"}
 MIN_CROSSFADE_S = 0.3
-DEFAULTS: dict[str, Any] = {"transition": "boot_seam", "into_content": "edge_sweep", "max_s": 6.0}
+DEFAULTS: dict[str, Any] = {"transition": "cut", "into_content": "edge_sweep", "max_s": 6.0}
 
 _PRESET: dict[str, Any] = {}
 
@@ -107,6 +111,12 @@ def normalize(raw: dict[str, Any], problems: list[str], *, trusted: bool) -> dic
         if not isinstance(tr, dict):
             tr = {"style": str(tr)}
         style = str(tr.get("style") or DEFAULTS[key]).strip().lower()
+        if style in REMOVED:
+            problems.append(f"intro.{key}: {REMOVED[style]}")
+            continue
+        if key == "transition" and style == "cut":
+            out[key] = {"style": "cut"}
+            continue
         if style not in INTO_CONTENT:
             problems.append(
                 f"intro.{key}.style {style!r}: the intro reveals or crossfades — one of {', '.join(INTO_CONTENT)} "

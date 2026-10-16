@@ -1101,8 +1101,7 @@ def build_tools(registry):
         CTA card; it refuses a cut that trims into the last clip's final caption). A clip is ONE continuous stretch: in/out trim only
         its ends, speed is one uniform factor (no ramps, no interior cuts). Transitions (into an
         item): edge_sweep (default — the 600 ms signature: the next shot revealed left → right
-        behind a brand-accent band), boot_seam (400 ms, brand boundaries: a seam opening onto the
-        next shot) — both fixed-length, no duration — colorwipe (a bar in the NEXT item's
+        behind a brand-accent band; fixed-length, no duration) — colorwipe (a bar in the NEXT item's
         theme_color; also colorwipe_left/_up/_down), cut, or an xfade style (fade, wipeleft,
         slideleft, smoothleft, circleopen, …); output reduced_motion: true makes moving ones cuts. output (mapping, or just a preset name): name,
         preset landscape 1920x1080 (canonical — 1920x1080 clips pass through untouched) |
@@ -1364,8 +1363,8 @@ def build_tools(registry):
         script: the YAML (or the whole reply) from atlas_record_script, or any Campaign shot
         script. title: the video's title (the intro card + file names). quality: 2k (2560 px wide
         device-pixel capture — crisp small text) or 1080p. intro / outro: 'brand' (the operator's
-        Brand intro / Brand outro presets — boot-splash bumper, title card crossfading into the
-        first SETTLED frame; final caption ≥ 4 s, bumper, Star-on-GitHub card) or 'none'.
+        Brand intro / Brand outro presets — boot-splash bumper cut to a title card that edge-sweeps into
+        the first SETTLED frame; final caption ≥ 4 s, bumper, Star-on-GitHub card) or 'none'.
         subtitle / eyebrow: the intro card's other lines. caption_region {x,y,w,h} (device px)
         overrides where the final caption is measured (Atlas footage is detected).
         PREFLIGHT, before any browser starts: the script's base_url must be THIS agent's console

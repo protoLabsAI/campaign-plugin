@@ -24,7 +24,6 @@ def test_the_easing_is_exact_ease_in_out_cubic():
 
 @pytest.mark.parametrize(("style", "fps", "n"), [
     ("edge_sweep", 24, 14), ("edge_sweep", 30, 18), ("edge_sweep", 60, 36),
-    ("boot_seam", 24, 10), ("boot_seam", 30, 12), ("boot_seam", 60, 24),
 ])  # fmt: skip
 def test_frame_quantization(style, fps, n):
     assert T.frames(style, fps) == n and T.duration_s(style, fps) == n / fps
@@ -47,11 +46,7 @@ def test_reference_weights_endpoints_and_antialiased_edges():
     edge = int(g["reveal"])
     p = T.pixel("edge_sweep", 1 / 18, edge, 0, w, h)
     assert 0 < p["accent"] < 1 and p["a"] == pytest.approx(1 - (g["reveal"] - edge)), "subpixel coverage, not a step"
-    # Boot seam at u = ½: open band y 360–1080; seam lines at opacity ½.
-    s = T.boot_seam(0.5, h)
-    assert (s["y0"], s["y1"], s["opacity"]) == (360.0, 1080.0, 0.5)
-    assert T.pixel("boot_seam", 0.5, 0, 720, w, h)["b"] == 1 and T.pixel("boot_seam", 0.5, 0, 100, w, h)["a"] == 1
-    assert T.pixel("boot_seam", 0.5, 0, 360, w, h)["accent"] == pytest.approx(0.5)
+    assert list(T.SIGNATURES) == ["edge_sweep"], "Boot Seam was removed"
 
 
 def test_the_checked_in_manifest_is_the_module():
@@ -87,9 +82,6 @@ def test_the_contract_oracle_and_reduced_ownership():
         g = T.edge_sweep(u, w)
         assert g["reveal"] == smp["edgeX"]
         assert ([g["band_x0"], g["band_x1"]] if g["band"] else None) == smp["band"]
-        b = T.boot_seam(u, h)
-        assert [b["y0"], b["y1"]] == smp["bootBounds"] and b["opacity"] == smp["seamOpacity"]
-    assert T.boot_seam(0.25, h)["half_width"] * 2 == h / 240 == 6
     assert [T.reduced_owner(k, 18) for k in (8, 9)] == ["a", "b"]
     assert [T.reduced_owner(k, 7) for k in range(7)].count("a") == 4, "odd N: A has one more frame"
     assert T.reduced_owner(0, 1) == "a"
@@ -100,12 +92,13 @@ def test_the_contract_oracle_and_reduced_ownership():
         T.frames("edge_sweep", float("nan"))
 
 
-def test_overlapping_seams_union_their_coverage():
-    # Near u = 1 − ε both seams sit at the canvas edges; at u ≈ 0 they overlap at the centre.
-    g = T.boot_seam(0.02, 1440)
-    assert g["y1"] - g["y0"] < 2 * g["half_width"], "the two seam rectangles overlap here"
-    p = T.pixel("boot_seam", 0.02, 0, 720, 2560, 1440)
-    assert p["accent"] == pytest.approx(g["opacity"]), "union coverage 1, opacity applied once — not doubled"
+def test_boot_seam_is_removed_with_a_clear_error():
+    for seq in ([{"clip": 1}, {"clip": 2, "transition": "boot_seam"}],):
+        with pytest.raises(montage.MontageError, match="boot_seam was removed .* use edge_sweep, cut or fade"):
+            montage.parse_sequence(seq)
+    with pytest.raises(montage.MontageError, match="boot_seam was removed"):
+        montage.normalize_output({"transition": "boot_seam"})
+    assert "boot_seam" not in json.loads(T.MANIFEST_PATH.read_text())["transitions"]
 
 
 def _rgb(path: Path, frame: int, x: int, y: int) -> tuple[int, int, int]:
@@ -132,12 +125,12 @@ def test_real_signature_transitions_are_frame_exact(tmp_path):
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c={color}:s=1280x720:r=30:d=2",
                         "-pix_fmt", "yuv420p", "-c:v", "libx264", "-qp", "0", str(p)], check=True)  # fmt: skip
         ids.append(store.add_asset(c["id"], "clip", name, path=str(p), status="rendered")["id"])
-    seq = [{"clip": ids[0]}, {"clip": ids[1]}, {"clip": ids[2], "transition": "boot_seam"}]
+    seq = [{"clip": ids[0]}, {"clip": ids[1]}, {"clip": ids[2], "transition": "cut"}]
     r = montage.render_montage(c["id"], seq, {"size": "1280x720", "name": "sig", "poster": False, "crf": 4}, d / "m")
-    # 2 s + 2 s − 0.6 + 2 s − 0.4 = 5.0 s = 150 frames, exactly.
+    # 2 s + 2 s − 0.6 + 2 s (a cut) = 5.4 s = 162 frames, exactly.
     n = int(subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-show_entries", "stream=nb_read_frames",
                             "-of", "csv=p=0", r["path"]], capture_output=True, text=True).stdout)  # fmt: skip
-    assert n == 150
+    assert n == 162
     mp4, accent = Path(r["path"]), (124, 92, 255)  # the brand accent (defaults: #7c5cff)
     # Edge sweep: frames 42 … 59 (k = 0 … 17). k = 0 is pure red; k = 9 (u = ½) puts the edge at 640.
     assert _near(_rgb(mp4, 42, 640, 360), (255, 0, 0)) and _near(_rgb(mp4, 42, 0, 360), (255, 0, 0))
@@ -145,7 +138,5 @@ def test_real_signature_transitions_are_frame_exact(tmp_path):
     assert _near(_rgb(mp4, 51, 630, 360), accent, 24), "the 16 px band (32/2560 of 1280) is the brand accent"
     assert _near(_rgb(mp4, 51, 660, 360), (255, 0, 0)), "right of the edge: still the outgoing shot"
     assert _near(_rgb(mp4, 60, 1200, 360), (0, 0, 255)), "u = 1 belongs to the incoming shot"
-    # Boot seam into green: frames 90 … 101 (the sweep's 102 frames − 12); k = 6 (u = ½) opens y 180–540.
-    assert _near(_rgb(mp4, 90, 640, 360), (0, 0, 255)), "k = 0: no seam residue"
-    assert _near(_rgb(mp4, 96, 640, 360), (0, 255, 0)) and _near(_rgb(mp4, 96, 640, 80), (0, 0, 255))
-    assert _near(_rgb(mp4, 102, 640, 10), (0, 255, 0))
+    # The cut into green: frame 101 is the last blue frame, 102 the first green one — no blend.
+    assert _near(_rgb(mp4, 101, 640, 360), (0, 0, 255)) and _near(_rgb(mp4, 102, 640, 360), (0, 255, 0))

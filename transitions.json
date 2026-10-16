@@ -2,8 +2,8 @@
   "contractId": "protolabs.brand-video/1",
   "schemaVersion": 1,
   "profile": "protolabs-video-transitions",
-  "version": "1.0.0",
-  "source": "protoLabsAI/protoContent#606 — the posted contract (Josh picked A Edge Sweep + C Boot Seam)",
+  "version": "2.0.0",
+  "source": "protoLabsAI/protoContent#606 — the posted contract (Josh picked A Edge Sweep; C Boot Seam was removed)",
   "easing": {
     "id": "easeInOutCubic",
     "definition": "u<0.5 ? 4u^3 : 1-((-2u+2)^3)/2",
@@ -19,16 +19,11 @@
         "24": 14,
         "30": 18,
         "60": 36
-      },
-      "boot_seam": {
-        "24": 10,
-        "30": 12,
-        "60": 24
       }
     }
   },
   "compositing": "opaque; per-pixel coverage of the continuous geometry; accent = --pl-color-accent",
-  "reduced_motion": "the N-frame interval is kept: A owns k < ceil(N/2), B owns k >= ceil(N/2); no band/seam/fade",
+  "reduced_motion": "the N-frame interval is kept: A owns k < ceil(N/2), B owns k >= ceil(N/2); no band/fade",
   "blending": "Y'CbCr 4:2:0 maskedmerge (affine in encoded sRGB: non-premultiplied); exact-coverage antialiasing",
   "oracle": {
     "width": 2560,
@@ -38,12 +33,7 @@
         "u": 0,
         "e": 0,
         "edgeX": 0,
-        "band": null,
-        "bootBounds": [
-          720,
-          720
-        ],
-        "seamOpacity": 0
+        "band": null
       },
       {
         "u": 0.25,
@@ -52,12 +42,7 @@
         "band": [
           128,
           160
-        ],
-        "bootBounds": [
-          675,
-          765
-        ],
-        "seamOpacity": 0.9375
+        ]
       },
       {
         "u": 0.5,
@@ -66,12 +51,7 @@
         "band": [
           1248,
           1280
-        ],
-        "bootBounds": [
-          360,
-          1080
-        ],
-        "seamOpacity": 0.5
+        ]
       },
       {
         "u": 0.75,
@@ -80,23 +60,13 @@
         "band": [
           2368,
           2400
-        ],
-        "bootBounds": [
-          45,
-          1395
-        ],
-        "seamOpacity": 0.0625
+        ]
       },
       {
         "u": 1,
         "e": 1,
         "edgeX": 2560,
-        "band": null,
-        "bootBounds": [
-          0,
-          1440
-        ],
-        "seamOpacity": 0
+        "band": null
       }
     ]
   },
@@ -108,15 +78,6 @@
         "reveal": "x < W·E(u)",
         "band_width": 0.0125,
         "band_side": "trailing (left of the reveal edge)"
-      }
-    },
-    "boot_seam": {
-      "duration_ms": 400,
-      "role": "brand boundaries: splash → title card, content → outro",
-      "geometry": {
-        "reveal": "H·(1−E)/2 ≤ y < H·(1+E)/2",
-        "seam_width": 0.004166666666666667,
-        "seam_opacity": "1 − E(u)"
       }
     }
   }

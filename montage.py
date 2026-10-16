@@ -23,8 +23,8 @@ cut the take into two items (two beats) if it needs that.
 * a lower-third ``label`` is drawn with ``drawtext`` in the brand font (resolved to a font
   file; a well-known sans is the fallback), or — on an ffmpeg built without drawtext — as a
   transparent HTML overlay; with neither, labels are skipped and the reply says so;
-* the default transition is the signature **edge sweep** (and **boot seam** at brand boundaries)
-  — frame-exact mask composites from :mod:`transitions` (one contract with the console);
+* the default transition is the signature **edge sweep** — a frame-exact mask composite from
+  :mod:`transitions` (one contract with the console);
 * other transitions are ``xfade`` styles (fade, wipeleft, slideleft, smoothleft, circleopen, …),
   a hard ``cut``, or the signature **colour wipe**: a full-frame bar in the NEXT item's
   ``theme_color`` sweeps across, covering the outgoing shot, then sweeps on and reveals the
@@ -114,7 +114,7 @@ OUTPUT_DEFAULTS: dict[str, Any] = {
     "fps": 30,
     "background": "",  # letterbox bars; blank = the brand background
     "transition": "edge_sweep",  # the default between items (an item's own `transition` wins)
-    "transition_duration": 0.45,  # for the non-signature styles (edge_sweep / boot_seam are fixed)
+    "transition_duration": 0.45,  # for the non-signature styles (edge_sweep is fixed)
     "reduced_motion": False,  # true: every moving transition becomes a cut (dissolves stay)
     "limit": "",  # a hard-limit id (campaign_limits) the mp4 must meet
     "max_bytes": None,  # and/or an explicit ceiling
@@ -229,6 +229,9 @@ def _transition(value: Any, what: str, problems: list[str]) -> dict[str, Any] | 
         return None
     _unknown(value, TRANSITION_KEYS, what, problems)
     style = str(value.get("style") or "").strip().lower()
+    if style in intromod.REMOVED:
+        problems.append(f"{what}: {intromod.REMOVED[style]}")
+        return None
     if style not in TRANSITIONS:
         problems.append(f"{what}: unknown transition {value.get('style')!r} — use one of {', '.join(TRANSITIONS)}")
         return None
@@ -562,7 +565,7 @@ def _prepend_intro(items: list[dict[str, Any]], o: dict[str, Any], problems: lis
         problems.append("item 1: an intro needs a shot after it")
         return
     first = items[0]
-    tr = dict(o.get("transition") or {"style": "boot_seam"})
+    tr = dict(o.get("transition") or {"style": "cut"})
     into = dict(o.get("into_content") or {"style": "edge_sweep"})
     if first.get("transition") is not None and first["transition"]["style"] not in intromod.INTO_CONTENT:
         problems.append(
@@ -658,7 +661,9 @@ def _append_outro(items: list[dict[str, Any]], o: dict[str, Any], n: int, proble
                 "duration": dur,
                 "zoom": bool(c.get("zoom", False)),
                 "theme_color": None,
-                "transition": tr,
+                # after a bumper: the outro's into_cta (a straight cut by default); with no
+                # bumper the CTA follows the main clip, so it takes the clip's transition
+                "transition": _transition(o.get("into_cta", "cut"), "outro.into_cta", problems) if b else tr,
             }
         )
 

@@ -60,9 +60,10 @@ recording — the montage only trims the ends, sets one speed, and joins beats w
   way."), 1.5–2.5 s each. Cards are breaths — never two in a row except before the end card.
 - **End card last, 3–4 s**: the wordmark (`logo: true`), the repo URL (`url`), one CTA
   (`cta`). `zoom: true` gives it a slow 4 % push so it doesn't feel frozen.
-- **Transitions**: the signature `edge_sweep` (600 ms, the default) between beats and chapters;
-  `boot_seam` (400 ms) only at brand boundaries — the intro and outro already use it; `cut` for a
-  deliberate hard beat. Don't give the signatures a `duration` (they're fixed), and don't mix in
+- **Transitions**: the signature `edge_sweep` (600 ms, the default) between beats and chapters —
+  the intro/outro already sweep into and out of the main clip (and cut around the bumper); `cut`
+  for a deliberate hard beat. (`boot_seam` is gone — Josh: edge sweep only.) Don't give the sweep a
+  `duration` (it's fixed), and don't mix in
   more styles (`colorwipe`, `fade`, xfades) unless the operator asks. For a reduced-motion cut,
   `output: {reduced_motion: true}` (the signatures become in-place hard cuts; timing is unchanged). A transition can't eat a beat — the tool refuses ones longer
   than the beat allows.
