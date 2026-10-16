@@ -12,6 +12,7 @@ from conftest import PNG_1x1, FakePlaywright, have_chromium
 
 def test_bundled_templates_and_their_sizes():
     assert cards.templates() == {
+        "cta-slide-1920x1080": (1920, 1080),
         "og-1280x640": (1280, 640),
         "square-1080": (1080, 1080),
         "title-slide-1920x1080": (1920, 1080),
@@ -164,7 +165,7 @@ visual:
     )
     b = brand.resolve()
     assert b["colors"] == {"bg": "#0D1117", "fg": "#E6EDF3", "accent": "#F78166", "muted": "#9aa0ac"}
-    assert b["fonts"] == {"heading": "Inter", "body": "IBM Plex Sans"}
+    assert b["fonts"] == {"heading": "Inter", "body": "IBM Plex Sans", "mono": ""}
     assert b["name"] == "ACME", "the wordmark is the name as set in type"
     assert b["logo"] == str(d / "assets/logo-on-dark.png"), "dark card → the logo variant for dark backgrounds"
     b = brand.resolve({"colors": {"bg": "#ffffff"}})

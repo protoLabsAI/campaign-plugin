@@ -55,6 +55,7 @@ from typing import Any, Callable
 
 from . import brand as brandmod
 from . import deps, limits, render, store
+from . import outro as outromod
 
 Runner = Callable[[list[str], "str | None"], subprocess.CompletedProcess]
 
@@ -89,9 +90,12 @@ COLOR_WIPES = {
 }
 TRANSITIONS = ("cut", *COLOR_WIPES, *XFADE_STYLES)
 
-CLIP_KEYS = {"clip", "in", "out", "speed", "label", "theme_color", "transition", "fit", "focus"}
+CLIP_KEYS = {"clip", "in", "out", "speed", "label", "theme_color", "transition", "fit", "focus", "hold", "caption"}
 CARD_ITEM_KEYS = {"card", "duration", "theme_color", "transition", "zoom"}
-CARD_KEYS = {"title", "subtitle", "eyebrow", "url", "cta", "bg", "fg", "accent", "logo"}
+CARD_KEYS = {"title", "subtitle", "eyebrow", "url", "cta", "bg", "fg", "accent", "logo", "template"}
+CARD_TEMPLATES = {"title-slide": "title-slide-1920x1080", "cta-slide": "cta-slide-1920x1080"}
+CAPTION_KEYS = {"at", "until", "region", "color"}
+MAX_HOLD_S = 15.0
 TRANSITION_KEYS = {"style", "duration"}
 OUTPUT_DEFAULTS: dict[str, Any] = {
     "name": "montage",
@@ -333,10 +337,21 @@ def parse_sequence(sequence: Any) -> list[dict[str, Any]]:
     if len(sequence) > MAX_ITEMS:
         problems.append(f"{len(sequence)} items is too many for one montage — at most {MAX_ITEMS}")
     items: list[dict[str, Any]] = []
+    outro_spec: dict[str, Any] = {}
+    outro_n = 0
     for n, raw in enumerate(sequence, start=1):
         what = f"item {n}"
         if not isinstance(raw, dict):
             problems.append(f"{what}: each item is a mapping with `clip` or `card`, got {raw!r}")
+            continue
+        if "outro" in raw:
+            if n != len(sequence):
+                problems.append(f"{what}: `outro` must be the LAST item — it ends the cut")
+            elif set(raw) != {"outro"}:
+                problems.append(f"{what}: an outro item is just {{outro: true}} or {{outro: {{overrides}}}}")
+            else:
+                outro_spec = outromod.resolve(raw["outro"], problems)
+                outro_n = n
             continue
         if ("clip" in raw) == ("card" in raw):
             problems.append(f"{what}: give exactly one of `clip` (an asset id) or `card` (a mapping)")
@@ -407,6 +422,8 @@ def parse_sequence(sequence: Any) -> list[dict[str, Any]]:
                 )
             if "\n" in label:
                 problems.append(f"{what}.label must be one line")
+            hold = _num(raw.get("hold", 0) or 0, f"{what}.hold", problems, 0, MAX_HOLD_S) or 0.0
+            caption = _caption(raw.get("caption"), what, problems)
             items.append(
                 {
                     "kind": "clip",
@@ -420,6 +437,8 @@ def parse_sequence(sequence: Any) -> list[dict[str, Any]]:
                     "transition": tr,
                     "fit": fit,
                     "focus": focus,
+                    "hold": hold,
+                    "caption": caption,
                 }
             )
         else:
@@ -447,6 +466,9 @@ def parse_sequence(sequence: Any) -> list[dict[str, Any]]:
             zoom = raw.get("zoom", False)
             if not isinstance(zoom, bool):
                 problems.append(f"{what}.zoom must be true or false")
+            tpl = str(card.get("template") or "title-slide")
+            if tpl not in CARD_TEMPLATES:
+                problems.append(f"{what}.card.template must be one of {', '.join(CARD_TEMPLATES)}")
             items.append(
                 {
                     "kind": "card",
@@ -455,6 +477,7 @@ def parse_sequence(sequence: Any) -> list[dict[str, Any]]:
                         **{k: str(card.get(k) or "").strip() for k in ("title", "subtitle", "eyebrow", "url", "cta")},
                         "colors": colors,
                         "logo": bool(logo),
+                        "template": tpl,
                     },
                     "duration": dur or 0.0,
                     "zoom": bool(zoom),
@@ -462,14 +485,102 @@ def parse_sequence(sequence: Any) -> list[dict[str, Any]]:
                     "transition": tr,
                 }
             )
+    if outro_spec and not problems:
+        _append_outro(items, outro_spec, outro_n, problems)
     if problems:
         raise MontageError(problems)
     return items
 
 
+def _caption(value: Any, what: str, problems: list[str]) -> dict[str, Any] | None:
+    """A clip's final-caption facts (see outro.py): ``{at, region?, color?}``."""
+    if value in (None, ""):
+        return None
+    if not isinstance(value, dict):
+        problems.append(f"{what}.caption must be {{at, region: {{x, y, w, h}}, color}}")
+        return None
+    _unknown(value, CAPTION_KEYS, f"{what}.caption", problems)
+    out: dict[str, Any] = {"at": None, "until": None, "region": None, "color": None}
+    for key in ("at", "until"):
+        if value.get(key) not in (None, ""):
+            out[key] = _num(value[key], f"{what}.caption.{key}", problems, 0, 36_000)
+    if out["at"] is not None and out["until"] is not None and out["until"] <= out["at"]:
+        problems.append(f"{what}.caption: until must be after at")
+    r = value.get("region")
+    if r is not None:
+        if not isinstance(r, dict):
+            problems.append(f"{what}.caption.region must be {{x, y, w, h}} in source pixels")
+        else:
+            _unknown(r, FOCUS_KEYS, f"{what}.caption.region", problems)
+            vals = {k: _num(r.get(k), f"{what}.caption.region.{k}", problems, 0, 16_384) for k in ("x", "y", "w", "h")}
+            if all(v is not None for v in vals.values()):
+                out["region"] = {k: int(round(v)) // 2 * 2 for k, v in vals.items()}
+    if value.get("color") not in (None, ""):
+        try:
+            out["color"] = hex_color(value["color"], f"{what}.caption.color")
+        except MontageError as e:
+            problems += e.problems
+    return out
+
+
+def _append_outro(items: list[dict[str, Any]], o: dict[str, Any], n: int, problems: list[str]) -> None:
+    """Expand an outro (outro.py) onto the parsed items: the beat on the last clip, then the
+    bumper clip and the CTA card, each brought in by the outro's transition."""
+    if not items or items[-1]["kind"] != "clip":
+        problems.append(f"item {n}: an outro follows a CLIP (the shot whose last frame becomes the beat)")
+        return
+    tr = _transition(o["transition"], "outro.transition", problems)
+    last = items[-1]
+    cap = last.get("caption") or {}
+    share = _share({"style": "fade", "duration": 0.6, **(tr or {})}) if (o.get("bumper") or o.get("cta")) else 0.0
+    last["hold"] = round(last["hold"] + outromod.beat_hold(o, bool(cap.get("region")), share), 4)
+    last["outro"] = {
+        "caption_hold_s": o["caption_hold_s"],
+        "caption_fade_s": o["caption_fade_s"],
+        "min_caption_s": o["min_caption_s"],
+        "beat_s": o["beat_s"],
+    }
+    b = o.get("bumper")
+    if b:
+        items.append(
+            {
+                "kind": "clip", "n": n, "asset_id": int(b.get("clip") or 0),
+                "fixed_path": str(Path(str(b["path"])).expanduser().resolve()) if b.get("path") else "",
+                "in": b["in"], "out": b["out"], "speed": 1.0, "label": "",
+                "theme_color": hex_color(b["theme_color"], "outro.bumper.theme_color") if b.get("theme_color") else None,
+                "transition": tr, "fit": None, "focus": None, "hold": 0.0, "caption": None, "title": "outro bumper",
+            }
+        )  # fmt: skip
+    c = o.get("cta")
+    if c:
+        colors = {k: hex_color(c[k], f"outro.cta.{k}") for k in ("bg", "fg", "accent") if c.get(k)}
+        dur = _num(c.get("duration", 4.0), "outro.cta.duration", problems, *CARD_S) or 4.0
+        items.append(
+            {
+                "kind": "card",
+                "n": n,
+                "card": {
+                    **{k: str(c.get(k) or "").strip() for k in ("title", "subtitle", "eyebrow", "url", "cta")},
+                    "colors": colors,
+                    "logo": bool(c.get("logo", True)),
+                    "template": c.get("template") or "cta-slide",
+                },
+                "duration": dur,
+                "zoom": bool(c.get("zoom", False)),
+                "theme_color": None,
+                "transition": tr,
+            }
+        )
+
+
 def _clip_problem(campaign_id: int, it: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     """The store-side check of one clip item — no ffmpeg needed. Returns (asset, problem)."""
     what = f"item {it['n']} (clip #{it['asset_id']})"
+    if it.get("fixed_path"):  # the operator's outro bumper — a file, not a campaign asset
+        p = Path(it["fixed_path"])
+        if not p.is_file():
+            return None, f"item {it['n']} (outro bumper {p}): the file is gone — fix the outro setting"
+        return {"path": str(p), "status": "approved", "title": it.get("title") or p.name}, ""
     a = store.get_asset(it["asset_id"])
     if a is None or a["campaign_id"] != int(campaign_id):
         return None, f"{what}: no such asset in campaign {campaign_id} — campaign_assets lists them"
@@ -539,6 +650,32 @@ def resolve_items(
             continue
         t_out = min(t_out, dur) if dur else t_out
         length = (t_out - it["in"]) / it["speed"]
+        if it.get("outro"):
+            o, cap = it["outro"], it.get("caption") or {}
+            if cap.get("at") is None:
+                warnings.append(
+                    f"{what}: the outro can't check the final caption's reading time — give this clip "
+                    "caption: {at: <seconds the last caption is fully up>}"
+                )
+            else:
+                seen = outromod.caption_visible_s(
+                    it["in"], t_out, it["speed"], cap["at"], o["caption_hold_s"], cap.get("until")
+                )
+                it["caption_visible_s"] = round(seen, 3)
+                if seen + 1e-6 < o["min_caption_s"]:
+                    problems.append(
+                        f"{what}: the final caption would be on screen {seen:.2f}s — under the outro's "
+                        f"min_caption_s {o['min_caption_s']:g}s. Don't trim into it: move `out` later "
+                        f"(it's {t_out:g}s; the caption is up from {cap['at']:g}s) or raise caption_hold_s"
+                    )
+            if cap.get("region") and o["caption_fade_s"] > 0:  # 0: the footage fades its own caption
+                r = cap["region"]
+                sw, sh = int(info.get("width") or 0), int(info.get("height") or 0)
+                if sw and sh and (r["x"] + r["w"] > sw or r["y"] + r["h"] > sh):
+                    problems.append(f"{what}: caption.region runs outside the {sw}×{sh} source")
+                it["clear"] = {**r, "at": round(length + o["caption_hold_s"], 4), "fade": o["caption_fade_s"],
+                               "color": cap.get("color")}  # fmt: skip
+        length += it.get("hold", 0.0)
         if length < MIN_ITEM_S:
             problems.append(f"{what}: plays for {length:.2f}s — at least {MIN_ITEM_S:g}s (one idea needs time to land)")
             continue
@@ -550,7 +687,7 @@ def resolve_items(
             title=a["title"],
             src_width=int(info.get("width") or 0),
             src_height=int(info.get("height") or 0),
-            unapproved=a["status"] != "approved",
+            unapproved=a["status"] != "approved" and not it.get("fixed_path"),
         )
         if it["unapproved"]:
             warnings.append(
@@ -799,12 +936,29 @@ def build_graph(
             src_len = it["out"] - it["in"]
             args += ["-ss", _fmt(it["in"]), "-t", _fmt(src_len + 0.1), "-i", it["path"]]
             idx, n_in = n_in, n_in + 1
-            chain = (
-                f"[{idx}:v]setpts=(PTS-STARTPTS)/{_fmt(it['speed'])},fps={_fmt(fps)},"
-                f"{frame_chain(it.get('frame'), w, h, bg)},{norm},"
-                # A file that ends a hair early holds its last frame, so every xfade offset is exact.
-                f"tpad=stop_mode=clone:stop_duration=1,trim=duration={_fmt(L)},setpts=PTS-STARTPTS"
+            # A file that ends a hair early holds its last frame, so every xfade offset is exact;
+            # a `hold` (the outro's beat) freezes it for that long on purpose.
+            pad = (
+                f"tpad=stop_mode=clone:stop_duration={_fmt(1 + it.get('hold', 0.0))},"
+                f"trim=duration={_fmt(L)},setpts=PTS-STARTPTS"
             )
+            speed_fps = f"[{idx}:v]setpts=(PTS-STARTPTS)/{_fmt(it['speed'])},fps={_fmt(fps)}"
+            clr = it.get("clear")
+            if clr:
+                # The final caption fades out on the frozen frame: a box in the caption's
+                # background colour fades in over it (source pixels, before framing).
+                cc = ff_color(clr.get("color") or look["colors"]["bg"])
+                parts.append(f"{speed_fps},{pad}[s{k}]")
+                parts.append(
+                    f"color=c={cc}:s={clr['w']}x{clr['h']}:r={_fmt(fps)}:d={_fmt(L)},format=rgba,"
+                    f"fade=t=in:st={_fmt(clr['at'])}:d={_fmt(max(clr['fade'], 0.04))}:alpha=1[cb{k}]"
+                )
+                chain = (
+                    f"[s{k}][cb{k}]overlay={clr['x']}:{clr['y']}:eof_action=pass,"
+                    f"{frame_chain(it.get('frame'), w, h, bg)},{norm}"
+                )
+            else:
+                chain = f"{speed_fps},{frame_chain(it.get('frame'), w, h, bg)},{norm},{pad}"
             bar = it.get("theme_color") or look["colors"]["accent"]
             if m.get("label_text") and m.get("font"):
                 chain += "," + drawtext_label(m["label_text"], m["font"], w, h, look["colors"], bar, L)
@@ -990,7 +1144,10 @@ def wrap(text: str, max_chars: int) -> list[str]:
 def card_data(card: dict[str, Any]) -> dict[str, Any]:
     """A montage card → the card renderer's ``data`` (title-slide template)."""
     data: dict[str, Any] = {k: card.get(k, "") for k in ("title", "subtitle", "eyebrow", "url")}
-    data["footer"] = card.get("cta", "")
+    if (card.get("template") or "title-slide") == "cta-slide":
+        data["cta"] = card.get("cta", "")  # the big accent button
+    else:
+        data["footer"] = card.get("cta", "")
     if card.get("colors"):
         data["colors"] = dict(card["colors"])
     if not card.get("logo"):
@@ -1096,7 +1253,8 @@ def prepare_media(
         shutil.copyfile(font, workdir / font_rel)
 
     def _html_card(card: dict[str, Any], out_png: Path) -> str:
-        res = cardsmod.render("title-slide-1920x1080", card_data(card), out_png, size=f"{w}x{h}", limit="")
+        tpl = CARD_TEMPLATES.get(card.get("template") or "title-slide", CARD_TEMPLATES["title-slide"])
+        res = cardsmod.render(tpl, card_data(card), out_png, size=f"{w}x{h}", limit="")
         return res["path"]
 
     def _html_page(page: str, out_png: Path) -> str:
@@ -1263,7 +1421,8 @@ def render_montage(
             "timeline": summarize(timeline),
             "engines": engines,
             "unapproved": [it["asset_id"] for it in items if it["kind"] == "clip" and it.get("unapproved")],
-            "inputs": sorted({it["asset_id"] for it in items if it["kind"] == "clip"}),
+            "inputs": sorted({it["asset_id"] for it in items if it["kind"] == "clip" and it["asset_id"]}),
+            "caption_visible_s": next((it["caption_visible_s"] for it in items if "caption_visible_s" in it), None),
         }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

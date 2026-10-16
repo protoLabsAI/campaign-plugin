@@ -124,7 +124,7 @@ def _str(v: Any) -> str:
 def _kit_visual(kit: dict[str, Any], kit_dir: Path | None = None) -> dict[str, Any]:
     """The usable visual bits of a brand kit. Invalid values are dropped, never passed on."""
     visual = kit.get("visual") if isinstance(kit.get("visual"), dict) else {}
-    out: dict[str, Any] = {"colors": {}, "fonts": {}, "logos": {}, "name": ""}
+    out: dict[str, Any] = {"colors": {}, "fonts": {}, "logos": {}, "name": "", "font_files": [], "card": {}}
 
     colors = visual.get("colors") if visual.get("colors") is not None else kit.get("colors")
     if isinstance(colors, list):
@@ -142,9 +142,10 @@ def _kit_visual(kit: dict[str, Any], kit_dir: Path | None = None) -> dict[str, A
 
     fonts = visual.get("fonts") if visual.get("fonts") is not None else kit.get("fonts")
     if isinstance(fonts, dict):
-        for slot in ("heading", "body"):
+        for slot in ("heading", "body", "mono"):
             if _str(fonts.get(slot)):
                 out["fonts"][slot] = _str(fonts.get(slot))
+        out["font_files"] = _font_files(fonts.get("files"), kit_dir)
     elif _str(fonts):
         out["fonts"] = {"heading": _str(fonts), "body": _str(fonts)}
 
@@ -161,6 +162,8 @@ def _kit_visual(kit: dict[str, Any], kit_dir: Path | None = None) -> dict[str, A
                 lp = kit_dir / lp
             out["logos"][key] = str(lp)
 
+    out["card"] = card_recipe(visual.get("card"))
+
     b = kit.get("brand")
     name = ""
     if isinstance(b, dict):
@@ -169,6 +172,74 @@ def _kit_visual(kit: dict[str, Any], kit_dir: Path | None = None) -> dict[str, A
         name = b.strip()
     out["name"] = _str(visual.get("wordmark")) or name
     return out
+
+
+FONT_EXT = {".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf", ".otf": "font/otf"}
+MAX_FONT_BYTES = 2_000_000
+_WEIGHT = re.compile(r"^\d{3}( \d{3})?$")
+
+
+def _font_files(files: Any, kit_dir: Path | None) -> list[dict[str, str]]:
+    """``fonts.files: [{family, path, weight?}]`` — font files the card EMBEDS (kit-relative paths),
+    so the face is the same on every machine and nothing is fetched. Unusable entries are dropped."""
+    out: list[dict[str, str]] = []
+    for f in files if isinstance(files, list) else []:
+        if not isinstance(f, dict) or not _str(f.get("family")) or not _str(f.get("path")):
+            continue
+        p = Path(_str(f["path"])).expanduser()
+        if not p.is_absolute() and kit_dir is not None:
+            p = kit_dir / p
+        if p.suffix.lower() not in FONT_EXT or not p.is_file() or p.stat().st_size > MAX_FONT_BYTES:
+            continue
+        weight = _str(str(f.get("weight") or "")) or "400"
+        out.append({"family": _str(f["family"]), "path": str(p), "weight": weight if _WEIGHT.match(weight) else "400"})
+    return out
+
+
+# The card recipe — how a brand's end cards are drawn (cards.py turns it into CSS). Every key is
+# optional; the defaults are the generic Campaign look (an accent-filled pill, a radial glow).
+CARD_RECIPE = {
+    "button": ("fill", "outline"),
+    "background": ("glow", "subtle", "plain"),
+}
+CARD_WEIGHTS = ("title_weight", "eyebrow_weight", "button_weight", "body_weight")
+
+
+def card_recipe(raw: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if not isinstance(raw, dict):
+        return out
+    for key, allowed in CARD_RECIPE.items():
+        v = _str(raw.get(key)).lower()
+        if v in allowed:
+            out[key] = v
+    for key in CARD_WEIGHTS:
+        v = raw.get(key)
+        if isinstance(v, int) and not isinstance(v, bool) and 100 <= v <= 900:
+            out[key] = v
+    for key in ("radius_px", "border_px"):
+        v = raw.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 64:
+            out[key] = float(v)
+    return out
+
+
+def font_face_css(files: list[dict[str, str]]) -> str:
+    """``@font-face`` rules with the files inlined as data: URIs (the card page loads nothing)."""
+    rules = []
+    for f in files:
+        p = Path(f["path"])
+        mime = FONT_EXT.get(p.suffix.lower())
+        if not mime or not p.is_file():
+            continue
+        fam = re.sub(r"[^A-Za-z0-9 \-_]", "", f["family"])
+        fmt = {"font/woff2": "woff2", "font/woff": "woff", "font/ttf": "truetype", "font/otf": "opentype"}[mime]
+        uri = f"data:{mime};base64,{base64.b64encode(p.read_bytes()).decode()}"
+        rules.append(
+            f'@font-face{{font-family:"{fam}";src:url({uri}) format("{fmt}");'
+            f"font-weight:{f['weight']};font-style:normal;font-display:block}}"
+        )
+    return "".join(rules)
 
 
 def is_dark(hex_color: str) -> bool:
@@ -196,7 +267,7 @@ def _pick_logo(logos: dict[str, str], dark_bg: bool) -> str:
 def resolve(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     """The effective brand. ``overrides`` (a card call's own data) beat everything."""
     source = "defaults"
-    kit_vis: dict[str, Any] = {"colors": {}, "fonts": {}, "logos": {}, "name": ""}
+    kit_vis: dict[str, Any] = {"colors": {}, "fonts": {}, "logos": {}, "name": "", "font_files": [], "card": {}}
     kit_path = social_kit_path()
     if kit_path:
         try:
@@ -217,6 +288,8 @@ def resolve(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         "fonts": {},
         "logo": "",
         "source": source,
+        "font_files": list(kit_vis.get("font_files") or []),
+        "card": dict(kit_vis.get("card") or {}),
     }
     ov_colors = parse_pairs(ov.get("colors"))
     for slot in DEFAULTS["colors"]:
@@ -226,7 +299,7 @@ def resolve(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
             (c.strip() for c in candidates if isinstance(c, str) and _HEX.match(c.strip())), DEFAULTS["colors"][slot]
         )
     ov_fonts = parse_pairs(ov.get("fonts"))
-    for slot in ("heading", "body"):
+    for slot in ("heading", "body", "mono"):
         out["fonts"][slot] = ov_fonts.get(slot) or kit_vis["fonts"].get(slot) or cfg_fonts.get(slot) or ""
     # The logo: the call's own, else the kit's variant for this background (resolved against
     # the KIT's directory), else the plugin setting. Only the kit's paths are kit-relative.

@@ -64,6 +64,19 @@ recording — the montage only trims the ends, sets one speed, and joins beats w
   cards reads calmer; `cut` for a deliberate hard beat. Don't mix more than two styles in one
   reel. A transition can't eat a beat — the tool refuses ones longer than the beat allows.
 
+- **The video end-card recipe**: the end card is the brand's `cta-slide` drawn by its kit's
+  `visual.card` recipe (protoLabs: `brands/protolabs/brand-kit.yaml`, generated from the DS —
+  bordered rectangular button, Geist bundled, restrained background). Don't hand-pick colours or
+  fonts for a brand that has a kit; if a card's bundled font didn't load the render fails — fix
+  the kit, don't fall back.
+- **The brand outro**: if the operator set one up (the `outro` setting), end the sequence with
+  `{outro: true}` instead of hand-building an end card — it freezes your last shot for a beat,
+  plays the brand bumper, then the CTA card. Give that last clip `caption: {at, region}` when
+  it ends on an on-screen caption (an Atlas walkthrough does): `at` = the source second the
+  final caption is fully up, `region` = its box in source pixels. The montage then REFUSES a cut
+  that shows that caption for less than `min_caption_s` — never trim into the last caption;
+  cut at the take's end mark (Atlas's `tour-done`) and let the outro hold the frame.
+
 ## 3. Storyboard, LOOK, then render
 
 1. `campaign_storyboard(campaign_id, sequence, output)` — you get the contact sheet as a

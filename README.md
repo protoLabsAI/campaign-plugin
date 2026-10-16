@@ -334,6 +334,70 @@ The montage registers as a `montage` asset (the gallery plays it and filters by 
 `meta.sequence`, the cut sheet (`meta.timeline`), the encode attempts and the engines used;
 its poster and GIF are child assets.
 
+### The video end-card recipe (brand outro)
+
+Not a new component — a **recipe** composed from what's already here: the last shot's beat, a
+recorded bumper, and the `cta-slide` card drawn in the brand's own look. A brand kit's
+`visual.card` says how its end cards are drawn (anything unset keeps the generic Campaign look):
+
+```yaml
+visual:
+  fonts:
+    heading: Geist
+    body: Geist
+    mono: Geist Mono
+    files:                     # EMBEDDED as data: URIs — same face on every machine, nothing fetched;
+      - {family: Geist, path: fonts/Geist-Variable.woff2, weight: "100 900"}   # a card whose bundled
+      - {family: Geist Mono, path: fonts/GeistMono-Variable.woff2, weight: "100 900"}  # face didn't paint FAILS
+  card:
+    button: outline            # outline = bordered rectangle, no fill, no glow (| fill: the accent pill)
+    background: subtle         # subtle = one 8 % accent wash, no grid (| glow | plain)
+    title_weight: 600          # weight stops; sizes stay canvas-relative (video-readable)
+    eyebrow_weight: 500
+    button_weight: 500
+    body_weight: 440
+    radius_px: 4               # at 1280 px wide — scaled to the canvas (2560 → 8 px)
+    border_px: 1               # doubled for video (2560 → 4 px)
+```
+
+**protoLabs** ships as a checked-in snapshot, `brands/protolabs/brand-kit.yaml`, GENERATED from
+the `@protolabsai/design` tokens (pinned: `ds-tokens.json` + `ds-version.txt`, the mapping in
+`scripts/gen_brand_protolabs.py`; the suite fails if the kit drifts from the tokens) with Geist /
+Geist Mono bundled under their SIL OFL licence (`brands/protolabs/fonts/OFL.txt`). Point
+**Brand kit file** at it. Regenerate after a DS bump:
+`python scripts/gen_brand_protolabs.py --design <path to @protolabsai/design>`.
+
+#### The brand outro
+
+One ending, set up once and appended to any montage with a last item `{outro: true}`:
+**the beat** (the last shot's final frame frozen — its last caption held, faded, then the clean
+shot held), **a bumper** (a recorded clip — e.g. the product's real boot splash, shot with
+`capture: device`) and **a CTA card** (the `cta-slide` template: logo, eyebrow, title, a big
+accent button, the URL — rendered at the canvas size, so `size: 2560x1440` gives a 2K card).
+The operator sets it in the **Brand outro** setting (YAML; operator-only, since the bumper
+names a local file):
+
+```yaml
+caption_hold_s: 2.5       # the last caption stays up this much longer (frozen frame)
+min_caption_s: 4.0        # REFUSE a cut that shows the final caption for less than this
+caption_fade_s: 0.5       # then the caption fades (the clip's `caption.region` is painted over)…
+beat_s: 2.0               # …and the clean shot holds before the bumper
+transition: {style: fade, duration: 0.6}
+bumper: {path: ~/media/protoagent-splash.mp4, in: 0.1, out: 2.7}
+cta: {template: cta-slide, eyebrow: "Open source · MIT", title: "Star protoAgent on GitHub",
+      cta: "★  Star on GitHub", url: github.com/protoLabsAI/protoAgent, duration: 4.5}
+```
+
+The clip before the outro says where its final caption is — `caption: {at: <source s when the
+last caption is fully up>, region: {x, y, w, h}, color: "#0a0a0c"}` (source pixels). With `at`,
+the montage checks `(out − at) / speed + caption_hold_s ≥ min_caption_s` and refuses a cut that
+trims into the last caption's reading time (the cut sheet reports `caption_visible_s`). Footage
+that ends on its OWN hold + caption fade + beat (Atlas's record mode does, before `tour-done`)
+sets `caption.until` (when the caption starts fading) and the preset's `caption_hold_s`,
+`caption_fade_s` and `beat_s` to 0: the cut is at the end mark and only the guard remains. Footage
+is never cut to make room for the beat — the frame is frozen instead. `{outro: {…}}` overrides
+any key for one cut (its bumper may name a campaign `clip`, never a file `path`).
+
 ## Hard limits, not folklore
 
 `limits.py` is the only table of platform constraints, and it holds only *documented* limits —
@@ -356,7 +420,8 @@ named so core's agent self-config fence refuses agent writes to it), `brand_kit_
 (a Social Studio kit to read; blank auto-detects), `brand_name` / `brand_colors` /
 `brand_fonts` / `brand_logo` (fallbacks), `limit_overrides`, `bearer_envs` (extra env-var
 names a shot script may use as its bearer), `upload_dirs` (folders an `upload` step may read
-files from; blank refuses uploads; operator-only), `producer_model`.
+files from; blank refuses uploads; operator-only), `outro` (the brand outro — see **The brand
+outro**; operator-only), `producer_model`.
 
 ## Development
 
