@@ -109,3 +109,7 @@ It leaves the review queue and the counts, the gallery hides it, and montages/st
 refuse it (naming the replacement). An APPROVED asset can't be superseded by you — tell the
 operator the new take is ready and that they can retire the old one with the gallery's
 Supersede button.
+
+The gallery stamps every card with when its file was made (newest first), so "the 20:43 take"
+or "the one from 3 min ago" is how the operator will point at a clip — match it by asset id
+and shot/render folder stamp, not by title.

@@ -24,6 +24,7 @@ writes; additive ``ALTER TABLE`` migrations on connect.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -657,6 +658,54 @@ def list_assets(campaign_id: int = 0, *, status: str = "", lane_id: int = 0, kin
         sql += " AND kind = ?"
         args.append(kind)
     return _read(sql + " ORDER BY id", tuple(args))
+
+
+_STAMP = re.compile(r"(?<!\d)(\d{8}-\d{6})(?!\d)")
+
+
+def _stamp_iso(stamp: str) -> str:
+    """A ``YYYYMMDD-HHMMSS`` folder stamp (always written in UTC) → ISO-8601 UTC, or ''."""
+    try:
+        return datetime.strptime(stamp, "%Y%m%d-%H%M%S").replace(tzinfo=UTC).isoformat(timespec="seconds")
+    except ValueError:
+        return ""
+
+
+def asset_times(asset: dict[str, Any]) -> dict[str, str]:
+    """When an asset's row and its FILE came to be — ISO-8601 UTC strings ('' when unknown).
+
+    * ``created_at`` / ``updated_at`` — the row (a planned asset's row can predate its file
+      by hours).
+    * ``made_at`` — when the file itself was produced: the newest ``YYYYMMDD-HHMMSS`` stamp in
+      its path (shots/<name>-<stamp>/…, renders/<take>/<stamp>/…), else the file's mtime.
+      ``made_from`` says which ("stamp" | "mtime" | "").
+    * ``take_at`` — for a render, the source take's stamp (the older stamp in the path, from
+      the take folder) when it differs from ``made_at``.
+    """
+    out = {
+        "created_at": str(asset.get("created") or ""),
+        "updated_at": str(asset.get("updated") or ""),
+        "made_at": "",
+        "made_from": "",
+        "take_at": "",
+    }
+    raw = str(asset.get("path") or "")
+    if not raw:
+        return out
+    stamps = [iso for iso in (_stamp_iso(m) for m in _STAMP.findall(str(Path(raw).parent))) if iso]
+    if stamps:
+        out["made_at"], out["made_from"] = stamps[-1], "stamp"
+        earlier = [s for s in stamps[:-1] if s != stamps[-1]]
+        if earlier:
+            out["take_at"] = earlier[-1]
+        return out
+    try:
+        mtime = Path(raw).expanduser().stat().st_mtime
+    except OSError:
+        return out
+    out["made_at"] = datetime.fromtimestamp(mtime, UTC).isoformat(timespec="seconds")
+    out["made_from"] = "mtime"
+    return out
 
 
 # ── milestones ───────────────────────────────────────────────────────────────
