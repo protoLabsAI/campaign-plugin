@@ -64,7 +64,7 @@ recording — the montage only trims the ends, sets one speed, and joins beats w
   `boot_seam` (400 ms) only at brand boundaries — the intro and outro already use it; `cut` for a
   deliberate hard beat. Don't give the signatures a `duration` (they're fixed), and don't mix in
   more styles (`colorwipe`, `fade`, xfades) unless the operator asks. For a reduced-motion cut,
-  `output: {reduced_motion: true}`. A transition can't eat a beat — the tool refuses ones longer
+  `output: {reduced_motion: true}` (the signatures become in-place hard cuts; timing is unchanged). A transition can't eat a beat — the tool refuses ones longer
   than the beat allows.
 
 - **The video end-card recipe**: the end card is the brand's `cta-slide` drawn by its kit's

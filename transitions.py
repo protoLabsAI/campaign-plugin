@@ -23,7 +23,17 @@ Two transitions, chosen by Josh from the design-system prototypes (protoContent#
 * geometry is normalized to the canvas; colour is the brand accent (``--pl-color-accent`` from the
   brand snapshot), opaque; edges are antialiased by exact pixel COVERAGE of the continuous
   geometry (a pixel ``[x, x+1)`` partly revealed gets that fraction), per plane;
-* reduced motion: no spatial movement — an instantaneous cut (the surrounding holds are kept).
+* reduced motion: the N-frame interval is KEPT, as a stationary hard cut inside it — the outgoing
+  shot owns ``k < ceil(N/2)``, the incoming one ``k ≥ ceil(N/2)`` (no band, seam or fade); so the
+  timeline and every reading hold are identical with or without it.
+
+This implements the contract posted on protoContent#606 (``protolabs.brand-video/1``, schema 1):
+band ``[max(0, f − W/80), f)``; seams of thickness ``H/240`` centred on ``l``/``r``, canvas-clipped,
+their coverage UNIONED and the opacity applied once; paint order A → B → accent; the five analytic
+reference samples at 2560×1440 are :data:`ORACLE` (the suite checks them). Blending happens in
+Y′CbCr 4:2:0 — an affine map of the encoded sRGB values, i.e. non-premultiplied encoded-sRGB
+blending, with chroma at half resolution; edges are antialiased by exact coverage, so they differ
+from the pixel-centre hard-mask fixtures only within one output pixel of the analytical edge.
 
 ffmpeg renders it with masks, not per-pixel expressions: the geometry is separable (a sweep
 depends only on x, a seam only on y), so each mask is a 1-pixel-thin ``geq`` strip per frame
@@ -39,7 +49,21 @@ from pathlib import Path
 from typing import Any
 
 PROFILE = "protolabs-video-transitions"
-PROFILE_VERSION = "0.1.0"  # pre-DS-export: protoContent#606 proposal numbers
+PROFILE_VERSION = "1.0.0"
+CONTRACT_ID = "protolabs.brand-video/1"  # protoContent#606, schemaVersion 1
+CONTRACT_SCHEMA = 1
+# The contract's analytic reference frames (2560×1440).
+ORACLE = {
+    "width": 2560,
+    "height": 1440,
+    "samples": [
+        {"u": 0, "e": 0, "edgeX": 0, "band": None, "bootBounds": [720, 720], "seamOpacity": 0},
+        {"u": 0.25, "e": 0.0625, "edgeX": 160, "band": [128, 160], "bootBounds": [675, 765], "seamOpacity": 0.9375},
+        {"u": 0.5, "e": 0.5, "edgeX": 1280, "band": [1248, 1280], "bootBounds": [360, 1080], "seamOpacity": 0.5},
+        {"u": 0.75, "e": 0.9375, "edgeX": 2400, "band": [2368, 2400], "bootBounds": [45, 1395], "seamOpacity": 0.0625},
+        {"u": 1, "e": 1, "edgeX": 2560, "band": None, "bootBounds": [0, 1440], "seamOpacity": 0},
+    ],
+}
 EASING = "easeInOutCubic"
 SIGNATURES: dict[str, dict[str, Any]] = {
     "edge_sweep": {
@@ -67,7 +91,9 @@ def ease(u: float) -> float:
 
 
 def frames(style: str, fps: float) -> int:
-    """N — the transition's frame count at ``fps``."""
+    """N — the transition's frame count at ``fps`` (refuses a non-finite / non-positive rate)."""
+    if not (isinstance(fps, (int, float)) and math.isfinite(fps) and fps > 0):
+        raise ValueError(f"fps must be a positive finite number, got {fps!r}")
     ms = SIGNATURES[style]["duration_ms"]
     return max(1, math.floor(ms * fps / 1000 + 0.5))
 
@@ -106,9 +132,23 @@ def boot_seam(u: float, height: int) -> dict[str, float]:
     }
 
 
-def pixel(style: str, u: float, x: int, y: int, w: int, h: int) -> dict[str, float]:
+def reduced_owner(k: int, n: int) -> str:
+    """Reduced motion: who owns transition frame k of n — "a" for k < ceil(N/2), else "b"."""
+    return "a" if k < math.ceil(n / 2) else "b"
+
+
+def union_coverage(a: tuple[float, float], b: tuple[float, float], px: int) -> float:
+    """Coverage of pixel ``px`` by the UNION of two intervals (overlap counted once)."""
+    both = (max(a[0], b[0]), min(a[1], b[1]))
+    inter = coverage(both[0], both[1], px) if both[1] > both[0] else 0.0
+    return coverage(a[0], a[1], px) + coverage(b[0], b[1], px) - inter
+
+
+def pixel(style: str, u: float, x: int, y: int, w: int, h: int, reduced: bool = False) -> dict[str, float]:
     """The reference compositing weights for ONE pixel: ``{"a", "b", "accent"}`` summing to 1 —
     what both renderers must produce (within raster tolerance)."""
+    if reduced:
+        return {"a": 1.0, "accent": 0.0, "b": 0.0} if u < 0.5 else {"a": 0.0, "accent": 0.0, "b": 1.0}
     if style == "edge_sweep":
         g = edge_sweep(u, w)
         c_edge = coverage(-1e9, g["reveal"], x)  # left of the reveal edge: band or incoming
@@ -117,7 +157,7 @@ def pixel(style: str, u: float, x: int, y: int, w: int, h: int) -> dict[str, flo
     g = boot_seam(u, h)
     cov = coverage(g["y0"], g["y1"], y)
     hw = g["half_width"]
-    line = min(1.0, coverage(g["y0"] - hw, g["y0"] + hw, y) + coverage(g["y1"] - hw, g["y1"] + hw, y))
+    line = union_coverage((g["y0"] - hw, g["y0"] + hw), (g["y1"] - hw, g["y1"] + hw), y)
     alpha = g["opacity"] * line
     return {"a": (1 - cov) * (1 - alpha), "b": cov * (1 - alpha), "accent": alpha}
 
@@ -147,10 +187,19 @@ def _grid(fps: float) -> str:
     return f"settb=1/{fps:g},setpts=N"
 
 
-def graph(style: str, a: str, b: str, out: str, *, w: int, h: int, fps: float, accent: str, tag: str) -> list[str]:
+def graph(
+    style: str, a: str, b: str, out: str, *, w: int, h: int, fps: float, accent: str, tag: str, reduced: bool = False
+) -> list[str]:
     """filter_complex chains that composite ``N`` frames of ``a`` (outgoing) and ``b`` (incoming),
-    both exactly ``N`` frames long, into ``out``. ``accent`` is an ffmpeg colour (0xRRGGBB)."""
+    both exactly ``N`` frames long, into ``out``. ``accent`` is an ffmpeg colour (0xRRGGBB).
+    ``reduced``: the same N frames as a hard cut at ``ceil(N/2)``."""
     n = frames(style, fps)
+    if reduced:
+        half = math.ceil(n / 2)
+        return [
+            f"{_strip(w, h, fps, n, f'255*gte(N,{half})', vertical=False)}[{tag}mr]",
+            f"[{a}][{b}][{tag}mr]maskedmerge[{out}]",
+        ]
     e = _ease_expr(n)
     acc = f"color=c={accent}:s={w}x{h}:r={fps:g}:d={n / fps:.6f},format=yuv420p,setsar=1,{_grid(fps)}[{tag}c]"
     if style == "edge_sweep":
@@ -171,7 +220,9 @@ def graph(style: str, a: str, b: str, out: str, *, w: int, h: int, fps: float, a
     def line(yc: str) -> str:
         return f"max(0,min(Y+1,{yc}+{hw})-max(Y,{yc}-{hw}))"
 
-    alpha = f"255*(1-{e})*gt(N,0)*min(1,{line(y0)}+{line(y1)})"
+    # the union of the two seam rectangles (opacity applied once, overlap not double-counted)
+    both = f"max(0,min(Y+1,min({y0}+{hw},{y1}+{hw}))-max(Y,max({y0}-{hw},{y1}-{hw})))"
+    alpha = f"255*(1-{e})*gt(N,0)*({line(y0)}+{line(y1)}-{both})"
     return [
         acc,
         f"{_strip(w, h, fps, n, cov, vertical=True)}[{tag}mc]",
@@ -184,9 +235,11 @@ def graph(style: str, a: str, b: str, out: str, *, w: int, h: int, fps: float, a
 # ── the shared contract (console parity) ───────────────────────────────────────
 def manifest() -> dict[str, Any]:
     return {
+        "contractId": CONTRACT_ID,
+        "schemaVersion": CONTRACT_SCHEMA,
         "profile": PROFILE,
         "version": PROFILE_VERSION,
-        "source": "protoLabsAI/protoContent#606 (proposal; Josh picked A Edge Sweep + C Boot Seam)",
+        "source": "protoLabsAI/protoContent#606 — the posted contract (Josh picked A Edge Sweep + C Boot Seam)",
         "easing": {"id": EASING, "definition": "u<0.5 ? 4u^3 : 1-((-2u+2)^3)/2", "u": "clamp(elapsed/duration,0,1)"},
         "quantization": {
             "frames": "N = max(1, floor(duration_ms*fps/1000 + 0.5))",
@@ -196,7 +249,9 @@ def manifest() -> dict[str, Any]:
             "examples": {s: {str(f): frames(s, f) for f in (24, 30, 60)} for s in SIGNATURES},
         },
         "compositing": "opaque; per-pixel coverage of the continuous geometry; accent = --pl-color-accent",
-        "reduced_motion": "instantaneous cut; surrounding holds preserved",
+        "reduced_motion": "the N-frame interval is kept: A owns k < ceil(N/2), B owns k >= ceil(N/2); no band/seam/fade",
+        "blending": "Y'CbCr 4:2:0 maskedmerge (affine in encoded sRGB: non-premultiplied); exact-coverage antialiasing",
+        "oracle": ORACLE,
         "transitions": SIGNATURES,
     }
 

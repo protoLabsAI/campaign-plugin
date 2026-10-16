@@ -63,6 +63,8 @@ def test_the_preset_validates_and_reports_every_problem(bumper, tmp_path):
         "a crossfade needs at least"
         in intro.configure({**_preset(bumper), "transition": {"style": "fade", "duration": 0.1}})[0]
     )
+    zero = intro.configure({**_preset(bumper), "transition": {"style": "fade", "duration": 0}})
+    assert zero and "duration 0: that is a hard cut" in zero[0], "0 is a cut, not a silent 0.6 s"
     assert (
         "fixed-length signature"
         in intro.configure({**_preset(bumper), "into_content": {"style": "edge_sweep", "duration": 1}})[0]

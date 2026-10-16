@@ -111,7 +111,15 @@ def _supersede_take(old: dict[str, Any], new_take_dir: str) -> list[str]:
             + ", ".join(f"#{s['id']}" for s in kept)
             + " — the operator's call stands"
         )
-    if old_dir and not kept and Path(old_dir) != Path(new_take_dir) and paths.is_contained(old_dir):
+    if (
+        old_dir
+        and not kept
+        and Path(old_dir) != Path(new_take_dir)
+        and paths.is_contained(old_dir)
+        # never the media root itself (is_contained is true for the root): a corrupt take_dir
+        # must not take every campaign's media with it
+        and Path(old_dir).resolve() != paths.media_root().resolve()
+    ):
         still_used = any(
             a.get("path") and Path(a["path"]).parent == Path(old_dir) for a in store.list_assets(old["campaign_id"])
         )

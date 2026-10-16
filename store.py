@@ -579,10 +579,14 @@ def review_gate(asset: dict[str, Any]) -> list[str]:
     f = Path(p)
     if not f.is_file():
         return [f"its file is missing ({p})"]
+    try:
+        size = f.stat().st_size
+    except OSError:  # gone between is_file() and stat()
+        return [f"its file is missing ({p})"]
     if asset.get("limit_id"):
         problems += limits.check(
             asset["limit_id"],
-            size=f.stat().st_size,
+            size=size,
             width=asset.get("width") or None,
             height=asset.get("height") or None,
             fmt=f.suffix.lstrip("."),

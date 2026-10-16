@@ -801,10 +801,14 @@ def _share(tr: dict[str, Any]) -> float:
 
 
 def resolve_transition(tr: dict[str, Any], opts: dict[str, Any], accent: str) -> dict[str, Any]:
-    """Final style/duration/colour of one cut: reduced motion → cut; a signature transition gets its
-    frame-quantized duration (N/fps) and the BRAND accent; others fall back to transition_duration."""
+    """Final style/duration/colour of one cut. A signature transition gets its frame-quantized
+    duration (N/fps) and the BRAND accent; under reduced motion it KEEPS its N-frame interval as a
+    hard cut at ceil(N/2) (the #606 contract — the timeline doesn't move). Any other moving
+    transition becomes a plain cut under reduced motion; others fall back to transition_duration."""
     tr = dict(tr)
-    if opts.get("reduced_motion") and tr["style"] not in STILL_TRANSITIONS:
+    if opts.get("reduced_motion") and tr["style"] in SIGNATURES:
+        tr["reduced"] = True
+    elif opts.get("reduced_motion") and tr["style"] not in STILL_TRANSITIONS:
         tr["reduced_from"] = tr["style"]
         tr["style"] = "cut"
     if tr["style"] in SIGNATURES:
@@ -1145,8 +1149,9 @@ def build_graph(
             parts.append(f"[i{k}]trim=end_frame={n},{grid}[ib{k}]")
             parts.append(f"[r{k}]trim=start_frame={n},setpts=PTS-STARTPTS[rb{k}]")
             parts += trmod.graph(
-                tr["style"], f"oa{k}", f"ib{k}", f"tx{k}", w=w, h=h, fps=fps, accent=ff_color(tr["color"]), tag=f"s{k}"
-            )
+                tr["style"], f"oa{k}", f"ib{k}", f"tx{k}", w=w, h=h, fps=fps, accent=ff_color(tr["color"]), tag=f"s{k}",
+                reduced=bool(tr.get("reduced")),
+            )  # fmt: skip
             # Exactly N frames on the frame grid (an fps filter here can drop the last one at EOF).
             parts.append(f"[tx{k}]{norm},setpts=N/({_fmt(fps)}*TB)[tc{k}]")
             parts.append(f"[hh{k}][tc{k}][rb{k}]concat=n=3:v=1:a=0,{cfr}{nxt}")
@@ -1711,7 +1716,16 @@ def storyboard(
                         f"[0:v]scale={cw}:{ch},fps={_fmt(sfps)},format=yuv420p,setsar=1,trim=end_frame={n}[a]",
                         f"[1:v]scale={cw}:{ch},fps={_fmt(sfps)},format=yuv420p,setsar=1,trim=end_frame={n}[b]",
                         *trmod.graph(
-                            tr["style"], "a", "b", "t", w=cw, h=ch, fps=sfps, accent=ff_color(tr["color"]), tag="sw"
+                            tr["style"],
+                            "a",
+                            "b",
+                            "t",
+                            w=cw,
+                            h=ch,
+                            fps=sfps,
+                            accent=ff_color(tr["color"]),
+                            tag="sw",
+                            reduced=bool(tr.get("reduced")),
                         ),
                         f"[t]select=eq(n\\,{n // 2}),crop={sw}:{ch}:(iw-{sw})/2:0[o]",
                     ]

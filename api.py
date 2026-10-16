@@ -189,8 +189,9 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         try:
             return JSONResponse(_public_job(job))
         except Exception as e:  # noqa: BLE001
+            # The same record the listing skips: a client-visible 422, never a server error.
             log.warning("[campaign] video job %s is malformed: %s", job_id, e)
-            raise HTTPException(500, "this video job's record is malformed") from None
+            raise HTTPException(422, "this video job's record is malformed") from None
 
     def _public_job(job: dict[str, Any]) -> dict[str, Any]:
         from . import produce
@@ -206,7 +207,12 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
             "gates": job.get("gates") or [],
             "reasons": job.get("reasons") or [],
             "assets": d.get("assets") or {},
-            "downloads": {k: f"/api/plugins/campaign/file/{aid}" for k, aid in (d.get("assets") or {}).items()},
+            # Only integer asset ids make a /file/{id} URL (that route takes an int).
+            "downloads": {
+                k: f"/api/plugins/campaign/file/{int(aid)}"
+                for k, aid in (d.get("assets") or {}).items()
+                if (isinstance(aid, int) and not isinstance(aid, bool)) or (isinstance(aid, str) and aid.isdigit())
+            },
             "links": d.get("links") or {},
             "created": job.get("created"),
             "updated": job.get("updated"),

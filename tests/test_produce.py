@@ -496,11 +496,11 @@ def test_the_intro_gate_reads_the_presets_max_s(world, tmp_path):
     assert intro.configure({"bumper": {"path": str(splash)}, "card": {"title": "t"}, "max_s": 4.0}) == []
     job = _start(world)  # the fake render reports intro_s 4.6
     gate = next(g for g in job["gates"] if g["id"] == "intro")
-    assert not gate["ok"] and gate["label"] == "intro ≤ 4 s, crossfaded in" and job["status"] == "needs_review"
+    assert not gate["ok"] and gate["label"] == "intro ≤ 4 s, revealed in" and job["status"] == "needs_review"
     assert intro.configure({"bumper": {"path": str(splash)}, "card": {"title": "t"}, "max_s": 8.0}) == []
     job = _start(world, force=True)
     gate = next(g for g in job["gates"] if g["id"] == "intro")
-    assert gate["ok"] and gate["label"] == "intro ≤ 8 s, crossfaded in", "a valid intro under a custom max_s passes"
+    assert gate["ok"] and gate["label"] == "intro ≤ 8 s, revealed in", "a valid intro under a custom max_s passes"
 
 
 def test_mask_css_refuses_an_unknown_mode_clearly():

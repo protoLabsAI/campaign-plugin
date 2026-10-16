@@ -78,8 +78,8 @@ loads nothing from the network at all.
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.3.5`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.3.5`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.4.0`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.4.0`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —
@@ -310,13 +310,15 @@ every problem listed at once.
   wide) — for beat → beat and chapter changes; `boot_seam` — 400 ms; a horizontal seam opens
   vertically onto the incoming shot, edged by two accent lines that dissolve as it completes — for
   brand boundaries (the intro's splash → title, the outro's content → bumper → CTA). Both follow
-  one deterministic contract shared with the console (`transitions.py`, `transitions.json`;
-  protoContent#606): exact easeInOutCubic, `N = round(ms·fps/1000)` frames evaluated at
+  one deterministic contract shared with the console (`transitions.py`, `transitions.json` —
+  protoContent#606's `protolabs.brand-video/1`, checked against its analytic reference frames):
+  exact easeInOutCubic, `N = round(ms·fps/1000)` frames evaluated at
   `u = k/N`, frame `k = 0` is the outgoing shot and the incoming one owns `u = 1`, geometry
   normalized to the canvas, edges antialiased by pixel coverage, the accent from the brand
   snapshot. Their length is fixed (a `duration` is refused); every item is quantized to whole
-  frames so they land frame-exact. `reduced_motion: true` (output) turns every moving transition
-  into a cut — dissolves stay — and keeps the surrounding holds.
+  frames so they land frame-exact. `reduced_motion: true` (output) keeps each signature's N-frame
+  interval as a stationary hard cut at `ceil(N/2)` (no band, seam or fade — the timeline doesn't
+  move); any other moving transition becomes a plain cut; dissolves stay.
 - **Other transitions** (into an item): `colorwipe` — a full-frame bar in the NEXT item's
   `theme_color` (a card's `accent`; else the brand accent) sweeps across, covers the outgoing
   shot, then sweeps on and reveals the incoming one (two hard-edged `xfade` wipes through a

@@ -118,8 +118,14 @@ def normalize(raw: dict[str, Any], problems: list[str], *, trusted: bool) -> dic
                 problems.append(f"intro.{key}: {style} is a fixed-length signature transition — drop `duration`")
             out[key] = {"style": style}
             continue
-        dur = _num(tr.get("duration", 0.6), f"intro.{key}.duration", problems, 0, 2) or 0.6
-        if dur < MIN_CROSSFADE_S:
+        got = _num(tr.get("duration", 0.6), f"intro.{key}.duration", problems, 0, 2)
+        dur = 0.6 if got is None else got  # an explicit 0 stays 0 — and is refused just below
+        if dur == 0:
+            problems.append(
+                f"intro.{key}.duration 0: that is a hard cut, and the intro never cuts into the shot — "
+                f"use edge_sweep, or a crossfade of at least {MIN_CROSSFADE_S:g}s"
+            )
+        elif dur < MIN_CROSSFADE_S:
             problems.append(f"intro.{key}.duration {dur:g}s: a crossfade needs at least {MIN_CROSSFADE_S:g}s")
         out[key] = {"style": style, "duration": dur}
     out["max_s"] = _num(raw.get("max_s", DEFAULTS["max_s"]), "intro.max_s", problems, 1, 15) or DEFAULTS["max_s"]

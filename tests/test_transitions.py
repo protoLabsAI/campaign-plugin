@@ -71,8 +71,41 @@ def test_signatures_are_fixed_length_and_reduced_motion_cuts():
     assert (sweep["style"], sweep["frames"], sweep["duration"], sweep["color"]) == ("edge_sweep", 18, 0.6, "#9b87f2")
     assert tl["starts"] == [0.0, 2.4, 4.9]
     rm = montage.plan([dict(i) for i in items], montage.normalize_output({"reduced_motion": True}), look)
-    assert [t["style"] for t in rm["transitions"]] == ["cut", "fade"], "a dissolve has no movement: it stays"
-    assert rm["transitions"][0]["reduced_from"] == "edge_sweep" and rm["total"] == 3.0 + 3.0 + 3.0 - 0.5
+    assert [(t["style"], t.get("reduced")) for t in rm["transitions"]] == [("edge_sweep", True), ("fade", None)]
+    assert rm["total"] == tl["total"], "reduced motion keeps the N-frame interval: the timeline doesn't move"
+    items[2]["transition"] = {"style": "slideleft", "duration": 0.5}
+    rm2 = montage.plan([dict(i) for i in items], montage.normalize_output({"reduced_motion": True}), look)
+    assert rm2["transitions"][1]["style"] == "cut" and rm2["transitions"][1]["reduced_from"] == "slideleft"
+
+
+def test_the_contract_oracle_and_reduced_ownership():
+    """protoContent#606's analytic reference frames (2560×1440) and the reduced-motion split."""
+    w, h = T.ORACLE["width"], T.ORACLE["height"]
+    for smp in T.ORACLE["samples"]:
+        u = smp["u"]
+        assert T.ease(u) == smp["e"]
+        g = T.edge_sweep(u, w)
+        assert g["reveal"] == smp["edgeX"]
+        assert ([g["band_x0"], g["band_x1"]] if g["band"] else None) == smp["band"]
+        b = T.boot_seam(u, h)
+        assert [b["y0"], b["y1"]] == smp["bootBounds"] and b["opacity"] == smp["seamOpacity"]
+    assert T.boot_seam(0.25, h)["half_width"] * 2 == h / 240 == 6
+    assert [T.reduced_owner(k, 18) for k in (8, 9)] == ["a", "b"]
+    assert [T.reduced_owner(k, 7) for k in range(7)].count("a") == 4, "odd N: A has one more frame"
+    assert T.reduced_owner(0, 1) == "a"
+    assert T.pixel("edge_sweep", 0.4, 0, 0, w, h, reduced=True)["a"] == 1
+    m = T.manifest()
+    assert (m["contractId"], m["schemaVersion"]) == ("protolabs.brand-video/1", 1)
+    with pytest.raises(ValueError):
+        T.frames("edge_sweep", float("nan"))
+
+
+def test_overlapping_seams_union_their_coverage():
+    # Near u = 1 − ε both seams sit at the canvas edges; at u ≈ 0 they overlap at the centre.
+    g = T.boot_seam(0.02, 1440)
+    assert g["y1"] - g["y0"] < 2 * g["half_width"], "the two seam rectangles overlap here"
+    p = T.pixel("boot_seam", 0.02, 0, 720, 2560, 1440)
+    assert p["accent"] == pytest.approx(g["opacity"]), "union coverage 1, opacity applied once — not doubled"
 
 
 def _rgb(path: Path, frame: int, x: int, y: int) -> tuple[int, int, int]:
