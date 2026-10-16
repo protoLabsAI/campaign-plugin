@@ -35,11 +35,13 @@ anything you'd write into their repo).
 
 Restate what you'll make and wait for a yes:
 
-> "A ~85 s 2K walkthrough of the `overview` tour, dark theme, brand intro ('protoAgent in 85
-> seconds') and the Star-on-GitHub outro — go?"
+> "A ~95 s 2K walkthrough (85 s of the `overview` tour + intro/outro), dark theme, recorded from
+> http://127.0.0.1:7953, brand intro ('protoAgent architecture walkthrough') and the
+> Star-on-GitHub outro — go?"
 
 Pick the tour whose predicted length is closest to what was asked (atlas_record_script reports
-it). Ask only what you can't infer. On A2A / `/v1` there is no one to ask mid-turn: treat the
+it). Ask only what you can't infer. In the console chat, a request that names its subject and
+ending is NOT a confirmed brief — still send the one line and wait for the yes before step 4. On A2A / `/v1` there is no one to ask mid-turn: treat the
 request itself as the confirmed brief when it names the subject, length and ending, and say in
 your reply what you chose.
 
@@ -56,16 +58,30 @@ your reply what you chose.
 
 `atlas_record_script(tour, base_url=<this console>, color_scheme=dark, viewport="1280x720")`.
 Hand its reply to the next step **unchanged** (the pipeline reads the fenced YAML and the
-predicted length out of it). Use `1280x720` for a 16:9 2560×1440 video. If the console needs a
-token, pass `bearer_env` (an env var NAME), never the token.
+predicted length out of it). Use `1280x720` for a 16:9 2560×1440 video.
+
+- **`base_url` is THIS agent's console, and you must know it — never leave it blank.** A blank
+  `base_url` falls back to `http://localhost:7870`, which on a machine running more than one
+  agent is a DIFFERENT agent's console: the take records the wrong project (or fails to load).
+  If the operator hasn't told you the URL (host + port this agent serves on), ask in the brief
+  line; on A2A / `/v1`, say in your reply which URL you used.
+- **A token-protected console needs `bearer_env`** — the NAME of an env var holding the token,
+  never the token. Only `CAMPAIGN_*` names (or ones listed in the **Shot-script bearer env vars**
+  setting) are accepted; the host's own `A2A_AUTH_TOKEN` is always refused, by design. Without
+  one the take times out on the console's sign-in and the job fails. If no such variable is set,
+  ask the operator to set one (e.g. `CAMPAIGN_CONSOLE_TOKEN`) — don't start the job blind.
 
 ## 4. Produce
 
 ```
-campaign_produce_video(script=<the reply>, title="protoAgent in 85 seconds",
-                       subtitle="How a self-hosted agent runtime fits together",
+campaign_produce_video(script=<the reply>, title="<Product> architecture walkthrough",
+                       subtitle="<one line on what the viewer will see>",
                        quality="2k", intro="brand", outro="brand")
 ```
+
+The title is ON SCREEN in the intro card: write it for THIS video. Don't put a length in it
+unless it's the finished length (the tour's footage + ~10 s of intro and outro), and never copy
+an example title from this skill.
 
 It returns a job id at once. The job records in real time (≈ the predicted length + ~20 s),
 measures the first settled frame and the final caption, renders a review cut (crf 18) and a
