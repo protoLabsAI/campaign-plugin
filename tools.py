@@ -111,7 +111,15 @@ def _supersede_take(old: dict[str, Any], new_take_dir: str) -> list[str]:
             + ", ".join(f"#{s['id']}" for s in kept)
             + " — the operator's call stands"
         )
-    if old_dir and not kept and Path(old_dir) != Path(new_take_dir) and paths.is_contained(old_dir):
+    if (
+        old_dir
+        and not kept
+        and Path(old_dir) != Path(new_take_dir)
+        and paths.is_contained(old_dir)
+        # never the media root itself (is_contained is true for the root): a corrupt take_dir
+        # must not take every campaign's media with it
+        and Path(old_dir).resolve() != paths.media_root().resolve()
+    ):
         still_used = any(
             a.get("path") and Path(a["path"]).parent == Path(old_dir) for a in store.list_assets(old["campaign_id"])
         )
@@ -1092,9 +1100,11 @@ def build_tools(registry):
         LAST, {outro: true} to append the operator's brand outro (beat on the last clip, bumper,
         CTA card; it refuses a cut that trims into the last clip's final caption). A clip is ONE continuous stretch: in/out trim only
         its ends, speed is one uniform factor (no ramps, no interior cuts). Transitions (into an
-        item): colorwipe (default — a full-frame bar in the NEXT item's theme_color sweeps across
-        and reveals it; also colorwipe_left/_up/_down), cut, or an xfade style (fade, wipeleft,
-        slideleft, smoothleft, circleopen, …). output (mapping, or just a preset name): name,
+        item): edge_sweep (default — the 600 ms signature: the next shot revealed left → right
+        behind a brand-accent band), boot_seam (400 ms, brand boundaries: a seam opening onto the
+        next shot) — both fixed-length, no duration — colorwipe (a bar in the NEXT item's
+        theme_color; also colorwipe_left/_up/_down), cut, or an xfade style (fade, wipeleft,
+        slideleft, smoothleft, circleopen, …); output reduced_motion: true makes moving ones cuts. output (mapping, or just a preset name): name,
         preset landscape 1920x1080 (canonical — 1920x1080 clips pass through untouched) |
         vertical 1080x1920 | square 1080x1080, fit auto|letterbox|crop, fps, transition,
         transition_duration (0.45), limit (a hard-limit id — duration and size are enforced),

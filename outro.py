@@ -7,7 +7,7 @@ The operator sets it up ONCE, as the plugin's ``outro`` setting (YAML)::
       min_caption_s: 4.0       # REFUSE a cut that keeps less of the final caption than this
       caption_fade_s: 0.5      # the caption then fades out (clip `caption.region` painted over)…
       beat_s: 2.0              # …and the clean shot holds this long before the transition
-      transition: {style: fade, duration: 0.6}
+      transition: boot_seam    # content → bumper → CTA (the signature Boot Seam; or fade, edge_sweep, …)
       bumper: {path: ~/media/protoagent-splash.mp4, in: 0.15, out: 2.7}   # a recorded bumper clip
       cta:
         template: cta-slide    # cta-slide (big accent button) | title-slide
@@ -54,7 +54,7 @@ DEFAULTS: dict[str, Any] = {
     "min_caption_s": 4.0,
     "caption_fade_s": 0.5,
     "beat_s": 2.0,
-    "transition": {"style": "fade", "duration": 0.6},
+    "transition": "boot_seam",  # content → bumper → CTA: brand boundaries (the signature Boot Seam)
 }
 CTA_TEMPLATES = ("cta-slide", "title-slide")
 

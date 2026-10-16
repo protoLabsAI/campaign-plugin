@@ -39,7 +39,17 @@ def _probe(path):
 
 
 def _preset(bumper, **kw):
-    return {"bumper": {"path": str(bumper), "in": 0.1, "out": 2.7}, "cta": CTA, **kw}
+    # A 0.6 s fade keeps the beat arithmetic below readable; the brand default is boot_seam
+    # (test_the_outro_crosses_brand_boundaries_with_the_boot_seam).
+    return {"bumper": {"path": str(bumper), "in": 0.1, "out": 2.7}, "cta": CTA,
+            "transition": {"style": "fade", "duration": 0.6}, **kw}  # fmt: skip
+
+
+def test_the_outro_crosses_brand_boundaries_with_the_boot_seam(bumper):
+    outro.configure({"bumper": {"path": str(bumper), "in": 0.1, "out": 2.7}, "cta": CTA})
+    walk, bump, card = montage.parse_sequence([{"clip": 1, "out": 50}, {"outro": True}])
+    assert bump["transition"] == {"style": "boot_seam"} and card["transition"] == {"style": "boot_seam"}
+    assert walk["hold"] == 2.5 + 2.0 + 0.4, "caption hold + beat + the 400 ms seam's overlap"
 
 
 # ── the preset ────────────────────────────────────────────────────────────────
@@ -135,7 +145,7 @@ def test_the_beat_is_a_frozen_frame_and_the_caption_fades_on_it(bumper, take):
     tl = montage.plan(items, opts, LOOK)
     _args, graph = montage.build_graph(tl, opts, LOOK, {2: {"card": "/w/card.png"}})
     chains = graph.split(";")
-    assert "tpad=stop_mode=clone:stop_duration=6.6,trim=duration=109.6" in chains[0], "the footage is frozen, not cut"
+    assert "tpad=stop_mode=clone:stop_duration=6.6,trim=end_frame=3288" in chains[0], "the footage is frozen, not cut"
     # The caption box fades in at footage end (104 s) + caption_hold (2.5 s), over 0.5 s.
     assert chains[1] == ("color=c=0x0a0a0c:s=2260x140:r=30:d=109.6,format=rgba,fade=t=in:st=106.5:d=0.5:alpha=1[cb0]")
     assert chains[2].startswith("[s0][cb0]overlay=140:1140:eof_action=pass,null,")

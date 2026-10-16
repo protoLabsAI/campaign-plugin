@@ -93,7 +93,8 @@ def test_focus_shape_is_validated():
 def test_output_options_presets_and_limits():
     o = _opts()
     assert (o["width"], o["height"], o["fps"], o["fit"]) == (1920, 1080, 30, "auto")
-    assert o["transition"] == {"style": "colorwipe", "duration": 0.45}
+    assert o["transition"] == {"style": "edge_sweep"}, "the signature Edge Sweep is the default"
+    assert o["reduced_motion"] is False
     v = montage.normalize_output("vertical")
     assert (v["width"], v["height"], v["orientation"]) == (1080, 1920, "vertical")
     assert montage.normalize_output("square")["orientation"] == "square"
@@ -225,7 +226,7 @@ def test_focus_rect_math():
 def test_timeline_math_for_colour_wipes_xfades_and_cuts():
     items = [
         _clip(1, 3.0, theme_color="#111111"),
-        _clip(2, 4.0, theme_color="#22c55e"),  # colorwipe in (default): no overlap
+        _clip(2, 4.0, theme_color="#22c55e", transition={"style": "colorwipe"}),  # colorwipe: no overlap
         _card(3, 2.0, transition={"style": "fade", "duration": 0.5}),  # xfade: overlaps 0.5
         _clip(4, 3.0, transition={"style": "cut"}),
     ]
@@ -240,7 +241,9 @@ def test_timeline_math_for_colour_wipes_xfades_and_cuts():
 
 def test_a_card_wipes_in_with_its_accent():
     tl = montage.plan(
-        [_clip(1, 3), _card(2, 2, card={"title": "t", "colors": {"accent": "#ff00aa"}, "logo": False})], _opts(), LOOK
+        [_clip(1, 3), _card(2, 2, card={"title": "t", "colors": {"accent": "#ff00aa"}, "logo": False})],
+        _opts(transition="colorwipe"),
+        LOOK,
     )
     assert tl["transitions"][0]["color"] == "#ff00aa"
 
@@ -255,7 +258,7 @@ def test_transitions_that_eat_an_item_are_refused():
 def test_a_hard_limit_is_enforced_on_the_planned_cut():
     items = [_clip(1, 100), _clip(2, 60)]
     with pytest.raises(montage.MontageError) as e:
-        montage.plan(items, _opts(limit="x_video"), LOOK)
+        montage.plan(items, _opts(limit="x_video", transition="cut"), LOOK)
     assert "output.limit x_video: 160.0s is over the 140s maximum" in str(e.value)
     with pytest.raises(montage.MontageError, match="landscape 1920×1080 video isn't accepted"):
         montage.plan([_clip(1, 5)], _opts(limit="youtube_shorts"), LOOK)
@@ -266,7 +269,7 @@ def test_a_hard_limit_is_enforced_on_the_planned_cut():
 def test_filter_graph_normalises_every_item_and_chains_the_transitions():
     items = [
         _clip(1, 3.0, theme_color="#111111", **{"in": 1.0, "out": 5.5}, speed=1.5),
-        _clip(2, 4.0, theme_color="#22c55e", src_width=1280, src_height=800),
+        _clip(2, 4.0, theme_color="#22c55e", src_width=1280, src_height=800, transition={"style": "colorwipe"}),
         _card(3, 2.0, transition={"style": "slideleft", "duration": 0.5}, zoom=True),
         _clip(4, 3.0, transition={"style": "cut"}),
     ]
@@ -278,7 +281,9 @@ def test_filter_graph_normalises_every_item_and_chains_the_transitions():
     assert ["-loop", "1", "-framerate", "30", "-t", "2", "-i", "/w/card02.png"] == args[12:20]
     chains = graph.split(";")
     assert chains[0].startswith("[0:v]setpts=(PTS-STARTPTS)/1.5,fps=30,null,setsar=1,format=yuv420p,settb=AVTB")
-    assert "tpad=stop_mode=clone:stop_duration=1,trim=duration=3,setpts=PTS-STARTPTS,fps=30,settb=AVTB[v0]" in chains[0]
+    assert (
+        "tpad=stop_mode=clone:stop_duration=1,trim=end_frame=90,setpts=PTS-STARTPTS,fps=30,settb=AVTB[v0]" in chains[0]
+    )
     assert "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=0x0d0f14" in chains[1], "the 1280×800 clip is letterboxed"
     assert "zoompan=z='1+0.04*on/60'" in chains[2] and "s=1920x1080" in chains[2]
     # The colour wipe: a colour source in the NEXT clip's theme colour, then two hard-edged wipes.
@@ -526,7 +531,9 @@ def test_real_montage_of_three_clips_and_a_card_with_colour_wipes(tmp_path):
         {"clip": ids[2], "theme_color": "#ffcc00"},
     ]
     out = d / "montages" / "t"
-    r = montage.render_montage(c["id"], seq, {"size": "640x360", "name": "launch", "gif": True}, out)
+    r = montage.render_montage(
+        c["id"], seq, {"size": "640x360", "name": "launch", "gif": True, "transition": "colorwipe"}, out
+    )
 
     assert r["expected_duration_s"] == 7.5, "colour wipes don't shorten the cut: 2 + 2 + 1.5 + 2"
     assert abs(r["duration_s"] - 7.5) < 0.1, r["duration_s"]

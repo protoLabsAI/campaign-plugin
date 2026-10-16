@@ -23,7 +23,9 @@ cut the take into two items (two beats) if it needs that.
 * a lower-third ``label`` is drawn with ``drawtext`` in the brand font (resolved to a font
   file; a well-known sans is the fallback), or — on an ffmpeg built without drawtext — as a
   transparent HTML overlay; with neither, labels are skipped and the reply says so;
-* transitions are ``xfade`` styles (fade, wipeleft, slideleft, smoothleft, circleopen, …),
+* the default transition is the signature **edge sweep** (and **boot seam** at brand boundaries)
+  — frame-exact mask composites from :mod:`transitions` (one contract with the console);
+* other transitions are ``xfade`` styles (fade, wipeleft, slideleft, smoothleft, circleopen, …),
   a hard ``cut``, or the signature **colour wipe**: a full-frame bar in the NEXT item's
   ``theme_color`` sweeps across, covering the outgoing shot, then sweeps on and reveals the
   incoming one. It's two hard-edged ``xfade`` wipes through a ``color`` source, so the edge
@@ -57,6 +59,7 @@ from . import brand as brandmod
 from . import deps, limits, render, store
 from . import intro as intromod
 from . import outro as outromod
+from . import transitions as trmod
 
 Runner = Callable[[list[str], "str | None"], subprocess.CompletedProcess]
 
@@ -89,7 +92,11 @@ COLOR_WIPES = {
     "colorwipe_up": "wipeup",  # bottom → top
     "colorwipe_down": "wipedown",  # top → bottom
 }
-TRANSITIONS = ("cut", *COLOR_WIPES, *XFADE_STYLES)
+# The protoLabs signature transitions (transitions.py): fixed, frame-quantized durations.
+SIGNATURES = tuple(trmod.SIGNATURES)
+TRANSITIONS = ("cut", *SIGNATURES, *COLOR_WIPES, *XFADE_STYLES)
+# What reduced motion keeps: dissolves (no spatial movement). Everything else becomes a cut.
+STILL_TRANSITIONS = ("cut", "fade", "fadeblack", "fadewhite", "dissolve")
 
 CLIP_KEYS = {"clip", "in", "out", "speed", "label", "theme_color", "transition", "fit", "focus", "hold", "caption"}
 CARD_ITEM_KEYS = {"card", "duration", "theme_color", "transition", "zoom"}
@@ -106,8 +113,9 @@ OUTPUT_DEFAULTS: dict[str, Any] = {
     "fit": "auto",  # auto | letterbox | crop — how a clip that isn't the canvas's shape meets it
     "fps": 30,
     "background": "",  # letterbox bars; blank = the brand background
-    "transition": "colorwipe",  # the default between items (an item's own `transition` wins)
-    "transition_duration": 0.45,
+    "transition": "edge_sweep",  # the default between items (an item's own `transition` wins)
+    "transition_duration": 0.45,  # for the non-signature styles (edge_sweep / boot_seam are fixed)
+    "reduced_motion": False,  # true: every moving transition becomes a cut (dissolves stay)
     "limit": "",  # a hard-limit id (campaign_limits) the mp4 must meet
     "max_bytes": None,  # and/or an explicit ceiling
     "crf": 20,
@@ -225,6 +233,10 @@ def _transition(value: Any, what: str, problems: list[str]) -> dict[str, Any] | 
         problems.append(f"{what}: unknown transition {value.get('style')!r} — use one of {', '.join(TRANSITIONS)}")
         return None
     out: dict[str, Any] = {"style": style}
+    if style in SIGNATURES and value.get("duration") is not None:
+        ms = trmod.SIGNATURES[style]["duration_ms"]
+        problems.append(f"{what}: {style} is a fixed {ms} ms signature transition — drop `duration`")
+        return out
     if value.get("duration") is not None:
         d = _num(value["duration"], f"{what}.duration", problems, *TRANSITION_S)
         if d is not None:
@@ -273,9 +285,12 @@ def normalize_output(output: Any) -> dict[str, Any]:
             background = hex_color(o["background"], "output.background")
         except MontageError as e:
             problems += e.problems
-    default_tr = _transition(
-        {"style": o["transition"], "duration": o["transition_duration"]}, "output.transition", problems
-    ) or {"style": "colorwipe", "duration": 0.45}
+    tr_raw: dict[str, Any] = {"style": o["transition"]}
+    if str(o["transition"]).strip().lower() not in SIGNATURES:
+        tr_raw["duration"] = o["transition_duration"]
+    default_tr = _transition(tr_raw, "output.transition", problems) or {"style": "edge_sweep"}
+    if not isinstance(o.get("reduced_motion"), bool):
+        problems.append("output.reduced_motion must be true or false")
     crf = _num(o["crf"], "output.crf", problems, 0, 40)
     max_bytes = None
     if o.get("max_bytes") not in (None, "", 0):
@@ -316,6 +331,8 @@ def normalize_output(output: Any) -> dict[str, Any]:
         "fps": fps,
         "background": background,
         "transition": default_tr,
+        "transition_duration": float(o["transition_duration"] or 0.45),
+        "reduced_motion": bool(o.get("reduced_motion")),
         "crf": int(crf if crf is not None else 20),
         "max_bytes": max_bytes,
         "limit": limit_id,
@@ -545,15 +562,16 @@ def _prepend_intro(items: list[dict[str, Any]], o: dict[str, Any], problems: lis
         problems.append("item 1: an intro needs a shot after it")
         return
     first = items[0]
-    tr = dict(o["transition"])
-    if first.get("transition") is not None and first["transition"]["style"] not in intromod.CROSSFADES:
+    tr = dict(o.get("transition") or {"style": "boot_seam"})
+    into = dict(o.get("into_content") or {"style": "edge_sweep"})
+    if first.get("transition") is not None and first["transition"]["style"] not in intromod.INTO_CONTENT:
         problems.append(
-            f"item {first['n']}: the intro crossfades into the first shot — its transition "
-            f"{first['transition']['style']!r} would be a hard cut; drop it or use fade"
+            f"item {first['n']}: the intro reveals the first shot — its transition "
+            f"{first['transition']['style']!r} would be a hard cut; drop it or use edge_sweep / fade"
         )
         return
-    first["transition"] = first.get("transition") or tr
-    first["intro_after"] = {"max_s": o["max_s"], "crossfade_s": first["transition"]["duration"]}
+    first["transition"] = first.get("transition") or into
+    first["intro_after"] = {"max_s": o["max_s"]}
     head: list[dict[str, Any]] = []
     b = o.get("bumper")
     if b:
@@ -601,7 +619,10 @@ def _append_outro(items: list[dict[str, Any]], o: dict[str, Any], n: int, proble
     tr = _transition(o["transition"], "outro.transition", problems)
     last = items[-1]
     cap = last.get("caption") or {}
-    share = _share({"style": "fade", "duration": 0.6, **(tr or {})}) if (o.get("bumper") or o.get("cta")) else 0.0
+    tr_eff = {"style": "fade", "duration": 0.6, **(tr or {})}
+    if tr_eff["style"] in SIGNATURES:  # a fixed signature: its nominal length (quantized later)
+        tr_eff["duration"] = trmod.SIGNATURES[tr_eff["style"]]["duration_ms"] / 1000
+    share = _share(tr_eff) if (o.get("bumper") or o.get("cta")) else 0.0
     last["hold"] = round(last["hold"] + outromod.beat_hold(o, bool(cap.get("region")), share), 4)
     last["outro"] = {
         "caption_hold_s": o["caption_hold_s"],
@@ -779,6 +800,28 @@ def _share(tr: dict[str, Any]) -> float:
     return tr["duration"] / 2 if tr["style"] in COLOR_WIPES else tr["duration"]
 
 
+def resolve_transition(tr: dict[str, Any], opts: dict[str, Any], accent: str) -> dict[str, Any]:
+    """Final style/duration/colour of one cut. A signature transition gets its frame-quantized
+    duration (N/fps) and the BRAND accent; under reduced motion it KEEPS its N-frame interval as a
+    hard cut at ceil(N/2) (the #606 contract — the timeline doesn't move). Any other moving
+    transition becomes a plain cut under reduced motion; others fall back to transition_duration."""
+    tr = dict(tr)
+    if opts.get("reduced_motion") and tr["style"] in SIGNATURES:
+        tr["reduced"] = True
+    elif opts.get("reduced_motion") and tr["style"] not in STILL_TRANSITIONS:
+        tr["reduced_from"] = tr["style"]
+        tr["style"] = "cut"
+    if tr["style"] in SIGNATURES:
+        tr["duration"] = round(trmod.duration_s(tr["style"], opts["fps"]), 6)
+        tr["frames"] = trmod.frames(tr["style"], opts["fps"])
+        tr["color"] = accent
+    elif "duration" not in tr:
+        tr["duration"] = opts.get("transition_duration", 0.45)
+    if tr["style"] == "cut":
+        tr["duration"] = 0.0
+    return tr
+
+
 def plan(items: list[dict[str, Any]], opts: dict[str, Any], look: dict[str, Any]) -> dict[str, Any]:
     """Resolve every transition (style, duration, colour) and lay out the timeline.
 
@@ -788,14 +831,20 @@ def plan(items: list[dict[str, Any]], opts: dict[str, Any], look: dict[str, Any]
     problems: list[str] = []
     trs: list[dict[str, Any] | None] = [None]
     accent = look["colors"]["accent"]
+    fps = opts["fps"]
+    for it in items:
+        # Frame-exact: every item lasts a whole number of output frames, so every cut — and every
+        # signature transition's u = k/N — lands on the frame grid.
+        it["length"] = round(max(1, round(it["length"] * fps)) / fps, 6)
     for k in range(1, len(items)):
         it = items[k]
-        tr = dict(opts["transition"])
+        tr = {"style": opts["transition"]["style"]}
+        if "duration" in opts["transition"]:
+            tr["duration"] = opts["transition"]["duration"]
         if it.get("transition"):
-            tr.update(it["transition"])
-            if "duration" not in it["transition"]:
-                tr["duration"] = opts["transition"]["duration"]
+            tr = dict(it["transition"])
         tr["color"] = it.get("theme_color") or (it.get("card", {}).get("colors", {}).get("accent")) or accent
+        tr = resolve_transition(tr, opts, accent)
         tr["into"] = k
         trs.append(tr)
     for k, it in enumerate(items):
@@ -815,7 +864,8 @@ def plan(items: list[dict[str, Any]], opts: dict[str, Any], look: dict[str, Any]
         else:
             start = acc - tr["duration"]
         if tr is not None:
-            tr["at"] = round(start + (tr["duration"] / 2 if tr["style"] in XFADE_STYLES else 0.0), 4)
+            mid = tr["style"] in XFADE_STYLES or tr["style"] in SIGNATURES
+            tr["at"] = round(start + (tr["duration"] / 2 if mid else 0.0), 4)
         starts.append(round(start, 4))
         acc = start + it["length"]
     total = round(acc, 4)
@@ -823,7 +873,8 @@ def plan(items: list[dict[str, Any]], opts: dict[str, Any], look: dict[str, Any]
     k_first = next((k for k, it in enumerate(items) if it.get("intro_after")), None)
     if k_first is not None:
         guard = items[k_first]["intro_after"]
-        intro_s = intromod.intro_seconds(starts, k_first, guard["crossfade_s"])
+        into = trs[k_first]
+        intro_s = intromod.intro_seconds(starts, k_first, into["duration"] if into else 0.0)
         if intro_s > guard["max_s"] + 1e-6:
             problems.append(
                 f"the intro runs {intro_s:.2f}s until the first shot is fully up — over its max_s "
@@ -1022,7 +1073,7 @@ def build_graph(
             # a `hold` (the outro's beat) freezes it for that long on purpose.
             pad = (
                 f"tpad=stop_mode=clone:stop_duration={_fmt(1 + it.get('hold', 0.0))},"
-                f"trim=duration={_fmt(L)},setpts=PTS-STARTPTS"
+                f"trim=end_frame={round(L * fps)},setpts=PTS-STARTPTS"
             )
             speed_fps = f"[{idx}:v]setpts=(PTS-STARTPTS)/{_fmt(it['speed'])},fps={_fmt(fps)}"
             clr = it.get("clear")
@@ -1063,14 +1114,14 @@ def build_graph(
                 parts.append(
                     f"[{idx}:v]scale={w * 2}:{h * 2}:flags=lanczos,"
                     f"zoompan=z='1+{ZOOM}*on/{frames}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:"
-                    f"s={w}x{h}:fps={_fmt(fps)},{norm},trim=duration={_fmt(L)},setpts=PTS-STARTPTS,{cfr}[v{k}]"
+                    f"s={w}x{h}:fps={_fmt(fps)},{norm},trim=end_frame={round(L * fps)},setpts=PTS-STARTPTS,{cfr}[v{k}]"
                 )
             else:
                 args += ["-loop", "1", "-framerate", _fmt(fps), "-t", _fmt(L), "-i", png]
                 idx, n_in = n_in, n_in + 1
                 parts.append(
                     f"[{idx}:v]scale={w}:{h}:flags=lanczos,fps={_fmt(fps)},{norm},"
-                    f"trim=duration={_fmt(L)},setpts=PTS-STARTPTS,{cfr}[v{k}]"
+                    f"trim=end_frame={round(L * fps)},setpts=PTS-STARTPTS,{cfr}[v{k}]"
                 )
 
     acc, acc_len = "[v0]", timeline["items"][0]["length"]
@@ -1082,6 +1133,29 @@ def build_graph(
         if tr["style"] == "cut":
             parts.append(f"{acc}[v{k}]concat=n=2:v=1:a=0,{cfr}{nxt}")
             acc_len += L
+        elif tr["style"] in SIGNATURES:
+            # Frame-indexed, not time-offset: the outgoing stream's last N frames and the incoming
+            # one's first N are composited frame by frame at u = k/N (transitions.graph), then
+            # spliced between the untouched head and tail — no frame duplicated or dropped.
+            n = tr["frames"]
+            cut_at = int(round(acc_len * fps)) - n
+            parts.append(f"{acc}split[h{k}][o{k}]")
+            parts.append(f"[h{k}]trim=end_frame={cut_at},setpts=PTS-STARTPTS[hh{k}]")
+            # Both sides of the composite on IDENTICAL integer timestamps (frame k at pts k): the
+            # mask merges sync by timestamp, and a microsecond of drift would emit extra frames.
+            grid = f"settb=1/{_fmt(fps)},setpts=N"
+            parts.append(f"[o{k}]trim=start_frame={cut_at}:end_frame={cut_at + n},{grid}[oa{k}]")
+            parts.append(f"[v{k}]split[i{k}][r{k}]")
+            parts.append(f"[i{k}]trim=end_frame={n},{grid}[ib{k}]")
+            parts.append(f"[r{k}]trim=start_frame={n},setpts=PTS-STARTPTS[rb{k}]")
+            parts += trmod.graph(
+                tr["style"], f"oa{k}", f"ib{k}", f"tx{k}", w=w, h=h, fps=fps, accent=ff_color(tr["color"]), tag=f"s{k}",
+                reduced=bool(tr.get("reduced")),
+            )  # fmt: skip
+            # Exactly N frames on the frame grid (an fps filter here can drop the last one at EOF).
+            parts.append(f"[tx{k}]{norm},setpts=N/({_fmt(fps)}*TB)[tc{k}]")
+            parts.append(f"[hh{k}][tc{k}][rb{k}]concat=n=3:v=1:a=0,{cfr}{nxt}")
+            acc_len += L - tr["duration"]
         elif tr["style"] in COLOR_WIPES:
             wipe, half = COLOR_WIPES[tr["style"]], tr["duration"] / 2
             parts.append(
@@ -1633,6 +1707,34 @@ def storyboard(
                 cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c=0x000000:s=8x{ch}:d=1", "-frames:v", "1", "-update", "1", str(out)]  # fmt: skip
             elif tr["style"] in COLOR_WIPES:
                 cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c={ff_color(tr['color'])}:s={sw}x{ch}:d=1", "-frames:v", "1", "-update", "1", str(out)]  # fmt: skip
+            elif tr["style"] in SIGNATURES:
+                # The real signature transition at u = ½ (frame N/2 of the same mask graph).
+                n, sfps = tr["frames"], opts["fps"]
+                d = f"{n / sfps:.6f}"
+                fc = ";".join(
+                    [
+                        f"[0:v]scale={cw}:{ch},fps={_fmt(sfps)},format=yuv420p,setsar=1,trim=end_frame={n}[a]",
+                        f"[1:v]scale={cw}:{ch},fps={_fmt(sfps)},format=yuv420p,setsar=1,trim=end_frame={n}[b]",
+                        *trmod.graph(
+                            tr["style"],
+                            "a",
+                            "b",
+                            "t",
+                            w=cw,
+                            h=ch,
+                            fps=sfps,
+                            accent=ff_color(tr["color"]),
+                            tag="sw",
+                            reduced=bool(tr.get("reduced")),
+                        ),
+                        f"[t]select=eq(n\\,{n // 2}),crop={sw}:{ch}:(iw-{sw})/2:0[o]",
+                    ]
+                )
+                cmd = [
+                    ff, "-y", "-hide_banner", "-loglevel", "error",
+                    "-loop", "1", "-t", d, "-i", cells[k - 1], "-loop", "1", "-t", d, "-i", cells[k],
+                    "-filter_complex", fc, "-map", "[o]", "-frames:v", "1", "-update", "1", str(out),
+                ]  # fmt: skip
             else:
                 # The real thing, mid-way: the two neighbouring frames through this xfade.
                 fc = (

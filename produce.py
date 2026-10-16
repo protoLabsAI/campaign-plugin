@@ -807,7 +807,7 @@ def review(
 
         max_s = float((intromod.preset() or {}).get("max_s", intromod.DEFAULTS["max_s"]))
         isec = final.get("intro_s")
-        gates.append(_gate("intro", f"intro ≤ {max_s:g} s, crossfaded in", isec is not None and isec <= max_s + 1e-6,
+        gates.append(_gate("intro", f"intro ≤ {max_s:g} s, revealed in", isec is not None and isec <= max_s + 1e-6,
                            f"{isec:.2f} s until the first shot is fully up" if isec is not None else "no intro rendered"))  # fmt: skip
     span = walk_span(final.get("timeline") or [], take["asset_id"])
     if span:
@@ -920,7 +920,7 @@ def review_assets(job: dict[str, Any], out: dict[str, Any], take: dict[str, Any]
 
 
 def sheet_times(final: dict[str, Any], span: tuple[float, float] | None, n_walk: int = 8) -> list[tuple[float, str]]:
-    """(time, label) for every tile: each intro/outro item's middle, the crossfade in, the first
+    """(time, label) for every tile: each intro/outro item's middle, the transition in, the first
     settled walkthrough frame, ``n_walk`` evenly spaced walkthrough frames, the final caption."""
     dur = float(final.get("duration_s") or 0)
     picks: list[tuple[float, str]] = []
@@ -937,7 +937,7 @@ def sheet_times(final: dict[str, Any], span: tuple[float, float] | None, n_walk:
         k = next((i for i, r in enumerate(rows) if abs(float(r["start"]) - a) < 1e-3), None)
         tr = (rows[k].get("transition") or {}) if k is not None else {}
         if tr.get("duration"):
-            picks.append((a + float(tr["duration"]) / 2, "crossfade in"))
+            picks.append((a + float(tr["duration"]) / 2, "transition in"))
             picks.append((a + float(tr["duration"]) + 0.1, "first settled frame"))
         for i in range(n_walk):
             picks.append((a + (b - a) * (i + 0.5) / n_walk, f"walkthrough {i + 1}/{n_walk}"))

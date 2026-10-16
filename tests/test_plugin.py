@@ -442,6 +442,12 @@ def test_videos_route_maps_a_job_and_skips_malformed_records(client):
     assert j["title"] == "Walk" and j["status"] == "done" and j["progress"] == 1.0
     assert j["downloads"] == {"final": "/api/plugins/campaign/file/7"} and j["links"] == {"final": "/media/x"}
     assert j["gates"] == [{"id": "resolution", "ok": True}]
-    assert client.get("/api/plugins/campaign/videos/vid-bbbbbbbbbbbb").status_code == 500
+    assert client.get("/api/plugins/campaign/videos/vid-bbbbbbbbbbbb").status_code == 422, "malformed: 422, not 500"
     assert client.get("/api/plugins/campaign/videos/vid-000000000000").status_code == 404
+    _write_job(
+        "vid-dddddddddddd", id="vid-dddddddddddd", status="done", delivery={"assets": {"final": 9, "gh": "x/../1"}}
+    )
+    assert client.get("/api/plugins/campaign/videos/vid-dddddddddddd").json()["downloads"] == {
+        "final": "/api/plugins/campaign/file/9"
+    }, "a non-integer asset id never becomes a /file URL"
     assert client.get("/api/plugins/campaign/videos/../../etc").status_code == 404

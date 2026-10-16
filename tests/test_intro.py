@@ -59,7 +59,16 @@ def test_the_preset_validates_and_reports_every_problem(bumper, tmp_path):
     for bit in ("unknown key `bumpr`", "nope.mp4 doesn't exist", "never a cut", "intro.card.template"):
         assert bit in probs
     assert intro.preset() == {}
-    assert "a crossfade needs at least" in intro.configure({**_preset(bumper), "transition": {"duration": 0.1}})[0]
+    assert (
+        "a crossfade needs at least"
+        in intro.configure({**_preset(bumper), "transition": {"style": "fade", "duration": 0.1}})[0]
+    )
+    zero = intro.configure({**_preset(bumper), "transition": {"style": "fade", "duration": 0}})
+    assert zero and "duration 0: that is a hard cut" in zero[0], "0 is a cut, not a silent 0.6 s"
+    assert (
+        "fixed-length signature"
+        in intro.configure({**_preset(bumper), "into_content": {"style": "edge_sweep", "duration": 1}})[0]
+    )
 
 
 def test_intro_is_first_needs_a_preset_and_an_override_may_not_name_a_file(bumper):
@@ -74,7 +83,7 @@ def test_intro_is_first_needs_a_preset_and_an_override_may_not_name_a_file(bumpe
         montage.parse_sequence([{"intro": True}])
 
 
-def test_the_intro_expands_to_bumper_card_and_a_crossfade_into_the_first_shot(bumper):
+def test_the_intro_expands_to_bumper_card_and_a_reveal_into_the_first_shot(bumper):
     intro.configure(_preset(bumper))
     items = montage.parse_sequence([{"intro": {"card": {"title": "protoAgent in 85 seconds",
                                                         "subtitle": "How it fits together"}}}, {"clip": 1, "in": 4.2}])  # fmt: skip
@@ -83,8 +92,8 @@ def test_the_intro_expands_to_bumper_card_and_a_crossfade_into_the_first_shot(bu
     assert bump["transition"] is None, "the bumper opens cold"
     assert card["card"]["template"] == "title-slide" and card["card"]["title"] == "protoAgent in 85 seconds"
     assert card["card"]["eyebrow"] == "Architecture walkthrough", "the preset's card keys survive a title override"
-    assert card["transition"] == {"style": "fade", "duration": 0.6}
-    assert walk["transition"] == {"style": "fade", "duration": 0.6}, "a CROSSFADE into the walkthrough"
+    assert card["transition"] == {"style": "boot_seam"}, "splash → title card: a brand boundary"
+    assert walk["transition"] == {"style": "edge_sweep"}, "title → walkthrough: the signature sweep, never a cut"
 
 
 def test_an_intro_never_hard_cuts_into_the_first_shot(bumper):
@@ -93,15 +102,15 @@ def test_an_intro_never_hard_cuts_into_the_first_shot(bumper):
         montage.parse_sequence([{"intro": True}, {"clip": 1, "transition": "cut"}])
 
 
-def test_guard_the_intro_is_at_most_six_seconds_and_crossfades_in(bumper, take):
+def test_guard_the_intro_is_at_most_six_seconds_and_reveals_the_shot(bumper, take):
     c, a = take
     intro.configure(_preset(bumper))
     tl = _plan(c, [{"intro": True}, {"clip": a["id"], "in": 4.2, "out": 80.0}])
-    # bumper 2.2 s → (fade 0.6) card 3.0 s → (fade 0.6) walkthrough, fully up 0.6 s later.
-    assert tl["intro_s"] == pytest.approx(2.2 + 3.0 - 0.6 - 0.6 + 0.6)
+    # bumper 2.2 s → (boot seam 0.4) card 3.0 s → (edge sweep 0.6) walkthrough, fully up 0.6 s later.
+    assert tl["intro_s"] == pytest.approx(2.2 + 3.0 - 0.4 - 0.6 + 0.6)
     assert tl["intro_s"] <= 6.0
     into_walk = next(t for t in tl["transitions"] if t["into"] == 2)
-    assert into_walk["style"] == "fade" and into_walk["duration"] >= intro.MIN_CROSSFADE_S
+    assert into_walk["style"] == "edge_sweep" and into_walk["frames"] == 18
     with pytest.raises(montage.MontageError, match=r"the intro runs 7\.\d\ds .* over its max_s 6s"):
         _plan(c, [{"intro": {"card": {"duration": 5.5}}}, {"clip": a["id"], "in": 4.2}])
 
