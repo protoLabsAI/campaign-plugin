@@ -11,7 +11,7 @@ The mirror of :mod:`outro`. The operator sets it up ONCE, as the plugin's ``intr
         title: "protoAgent"    # a montage / produce_video usually overrides title + subtitle
         subtitle: ""
         duration: 3.0
-      transition: boot_seam    # bumper → card (a brand boundary — the signature Boot Seam)
+      bumper_fade_ms: 300      # bumper → card: a short crossfade on the brand easing (0 = a cut)
       into_content: edge_sweep # card → the first shot (the signature Edge Sweep)
       max_s: 6.0               # REFUSE an intro longer than this (until the first shot is fully up)
 
@@ -20,7 +20,7 @@ and a montage prepends it with a FIRST item ``{intro: true}`` — or ``{intro: {
 asset; only the operator's setting may name a file ``path``).
 
 The intro never hard-cuts into the footage (Josh's no-jump-cuts rule): the transition into the
-first shot must be a signature reveal (``edge_sweep``, ``boot_seam``) or a crossfade-type xfade
+first shot must be the signature reveal (``edge_sweep``) or a crossfade-type xfade
 (``fade``, ``dissolve``, …) of at least :data:`MIN_CROSSFADE_S`. (Reduced motion — the montage's
 ``reduced_motion`` — turns the signatures into cuts on purpose.) The first shot itself should start on a SETTLED frame — trim its ``in``
 past any opening motion (produce_video measures it from the footage).
@@ -33,15 +33,30 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-INTRO_KEYS = {"bumper", "card", "transition", "into_content", "max_s"}
+INTRO_KEYS = {"bumper", "card", "transition", "into_content", "max_s", "bumper_fade_ms"}
 BUMPER_KEYS = {"path", "clip", "in", "out", "theme_color"}
 CARD_KEYS = {"template", "title", "subtitle", "eyebrow", "url", "duration", "zoom", "logo", "bg", "fg", "accent"}
 CARD_TEMPLATES = ("title-slide", "cta-slide")
 CROSSFADES = ("fade", "dissolve", "fadeblack", "fadewhite")
-SIGNATURES = ("edge_sweep", "boot_seam")  # transitions.py — fixed, frame-quantized
+SIGNATURES = ("edge_sweep",)  # transitions.py — fixed, frame-quantized
 INTO_CONTENT = (*SIGNATURES, *CROSSFADES)
+# bumper → card may also be a plain cut (splash → title card): only the reveal of the first SHOT
+# must never cut.
+INTO_CARD = ("cut", *INTO_CONTENT)
+REMOVED = {"boot_seam": "boot_seam was removed (Josh: edge sweep only) — use edge_sweep, cut or fade"}
 MIN_CROSSFADE_S = 0.3
-DEFAULTS: dict[str, Any] = {"transition": "boot_seam", "into_content": "edge_sweep", "max_s": 6.0}
+DEFAULTS: dict[str, Any] = {"transition": "cut", "into_content": "edge_sweep", "max_s": 6.0, "bumper_fade_ms": 300}
+MAX_BUMPER_FADE_MS = 2000
+
+
+def bumper_fade(raw: dict[str, Any], what: str, problems: list[str]) -> dict[str, Any]:
+    """The short crossfade on either side of a bumper (intro splash → title, outro bumper → CTA):
+    ``bumper_fade_ms`` (default 300) on the brand easing, frame-quantized; 0 = a straight cut."""
+    v = raw.get("bumper_fade_ms", DEFAULTS["bumper_fade_ms"])
+    ms = _num(v, f"{what}.bumper_fade_ms", problems, 0, MAX_BUMPER_FADE_MS)
+    ms = DEFAULTS["bumper_fade_ms"] if ms is None else ms
+    return {"style": "cut"} if ms == 0 else {"style": "ease_fade", "ms": ms}
+
 
 _PRESET: dict[str, Any] = {}
 
@@ -71,7 +86,15 @@ def configure(setting: Any) -> list[str]:
 
 
 def preset() -> dict[str, Any]:
-    return dict(_PRESET)
+    """The effective preset: the operator's ``intro`` setting, else the brand kit's bookends
+    (protoLabs bookends v1 in the protoLabs kit), else ``{}``."""
+    return dict(_PRESET) if _PRESET else _kit_preset()
+
+
+def _kit_preset() -> dict[str, Any]:
+    from . import brand
+
+    return dict(brand.kit_bookends().get("intro") or {})
 
 
 def _num(v: Any, what: str, problems: list[str], lo: float, hi: float) -> float | None:
@@ -107,6 +130,12 @@ def normalize(raw: dict[str, Any], problems: list[str], *, trusted: bool) -> dic
         if not isinstance(tr, dict):
             tr = {"style": str(tr)}
         style = str(tr.get("style") or DEFAULTS[key]).strip().lower()
+        if style in REMOVED:
+            problems.append(f"intro.{key}: {REMOVED[style]}")
+            continue
+        if key == "transition" and style == "cut":
+            out[key] = {"style": "cut"}
+            continue
         if style not in INTO_CONTENT:
             problems.append(
                 f"intro.{key}.style {style!r}: the intro reveals or crossfades — one of {', '.join(INTO_CONTENT)} "
@@ -128,6 +157,8 @@ def normalize(raw: dict[str, Any], problems: list[str], *, trusted: bool) -> dic
         elif dur < MIN_CROSSFADE_S:
             problems.append(f"intro.{key}.duration {dur:g}s: a crossfade needs at least {MIN_CROSSFADE_S:g}s")
         out[key] = {"style": style, "duration": dur}
+    if "transition" not in raw:  # the default: the bumper fade (bumper_fade_ms)
+        out["transition"] = bumper_fade(raw, "intro", problems)
     out["max_s"] = _num(raw.get("max_s", DEFAULTS["max_s"]), "intro.max_s", problems, 1, 15) or DEFAULTS["max_s"]
 
     b = raw.get("bumper")
@@ -188,18 +219,18 @@ def _merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
 def resolve(value: Any, problems: list[str]) -> dict[str, Any]:
     """A montage item's ``intro`` value (``true`` or overrides) → the effective intro."""
     if value is True:
-        if not _PRESET:
+        if not preset():
             problems.append(
                 "intro: true — but no intro preset is configured (the plugin's `intro` setting); "
                 "give it inline: {intro: {bumper: {clip}, card: {title, duration}}}"
             )
             return {}
-        out = normalize(_PRESET, problems, trusted=True)
+        out = normalize(preset(), problems, trusted=True)
     elif isinstance(value, dict):
         if isinstance(value.get("bumper"), dict) and "path" in value["bumper"]:
             problems.append("intro.bumper.path can only come from the operator's intro setting — name a `clip` instead")
             return {}
-        out = normalize(_merge(_PRESET, value), problems, trusted=True)
+        out = normalize(_merge(preset(), value), problems, trusted=True)
     else:
         problems.append("intro must be true (the brand preset) or a mapping of overrides")
         return {}

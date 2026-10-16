@@ -7,7 +7,8 @@ The operator sets it up ONCE, as the plugin's ``outro`` setting (YAML)::
       min_caption_s: 4.0       # REFUSE a cut that keeps less of the final caption than this
       caption_fade_s: 0.5      # the caption then fades out (clip `caption.region` painted over)…
       beat_s: 2.0              # …and the clean shot holds this long before the transition
-      transition: boot_seam    # content → bumper → CTA (the signature Boot Seam; or fade, edge_sweep, …)
+      transition: edge_sweep   # main clip → bumper (the signature Edge Sweep; or fade, cut)
+      bumper_fade_ms: 300      # bumper → CTA card: a short crossfade on the brand easing (0 = a cut)
       bumper: {path: ~/media/protoagent-splash.mp4, in: 0.15, out: 2.7}   # a recorded bumper clip
       cta:
         template: cta-slide    # cta-slide (big accent button) | title-slide
@@ -46,7 +47,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-OUTRO_KEYS = {"caption_hold_s", "min_caption_s", "caption_fade_s", "beat_s", "transition", "bumper", "cta"}
+OUTRO_KEYS = {
+    "caption_hold_s", "min_caption_s", "caption_fade_s", "beat_s", "transition", "into_cta", "bumper_fade_ms",
+    "bumper", "cta",
+}  # fmt: skip
 BUMPER_KEYS = {"path", "clip", "in", "out", "theme_color"}
 CTA_KEYS = {"template", "title", "subtitle", "eyebrow", "url", "cta", "duration", "zoom", "logo", "bg", "fg", "accent"}
 DEFAULTS: dict[str, Any] = {
@@ -54,7 +58,8 @@ DEFAULTS: dict[str, Any] = {
     "min_caption_s": 4.0,
     "caption_fade_s": 0.5,
     "beat_s": 2.0,
-    "transition": "boot_seam",  # content → bumper → CTA: brand boundaries (the signature Boot Seam)
+    "transition": "edge_sweep",  # main clip → bumper (or → the CTA when there's no bumper)
+    "into_cta": None,  # bumper → CTA card: None = the bumper fade (bumper_fade_ms; 0 = a cut)
 }
 CTA_TEMPLATES = ("cta-slide", "title-slide")
 
@@ -86,7 +91,15 @@ def configure(setting: Any) -> list[str]:
 
 
 def preset() -> dict[str, Any]:
-    return dict(_PRESET)
+    """The effective preset: the operator's ``outro`` setting, else the brand kit's bookends
+    (protoLabs bookends v1 in the protoLabs kit), else ``{}``."""
+    return dict(_PRESET) if _PRESET else _kit_preset()
+
+
+def _kit_preset() -> dict[str, Any]:
+    from . import brand
+
+    return dict(brand.kit_bookends().get("outro") or {})
 
 
 def _num(v: Any, what: str, problems: list[str], lo: float, hi: float) -> float | None:
@@ -119,6 +132,9 @@ def normalize(raw: dict[str, Any], problems: list[str], *, trusted: bool) -> dic
         v = _num(raw.get(key, DEFAULTS[key]), f"outro.{key}", problems, lo, hi)
         out[key] = DEFAULTS[key] if v is None else v
     out["transition"] = raw.get("transition", DEFAULTS["transition"])
+    from .intro import bumper_fade
+
+    out["into_cta"] = raw["into_cta"] if raw.get("into_cta") is not None else bumper_fade(raw, "outro", problems)
     b = raw.get("bumper")
     out["bumper"] = None
     if b is not None:
@@ -167,15 +183,15 @@ def normalize(raw: dict[str, Any], problems: list[str], *, trusted: bool) -> dic
 def resolve(value: Any, problems: list[str]) -> dict[str, Any]:
     """A montage item's ``outro`` value (``true`` or overrides) → the effective outro."""
     if value is True:
-        if not _PRESET:
+        if not preset():
             problems.append(
                 "outro: true — but no outro preset is configured (the plugin's `outro` setting); "
                 "give the outro inline: {outro: {beat_s, bumper: {clip}, cta: {…}}}"
             )
             return {}
-        return normalize(_PRESET, problems, trusted=True)
+        return normalize(preset(), problems, trusted=True)
     if isinstance(value, dict):
-        merged = {**_PRESET, **value}
+        merged = {**preset(), **value}
         # Only the operator's setting may name a file path; an override may not swap one in.
         if isinstance(value.get("bumper"), dict) and "path" in value["bumper"]:
             problems.append("outro.bumper.path can only come from the operator's outro setting — name a `clip` instead")

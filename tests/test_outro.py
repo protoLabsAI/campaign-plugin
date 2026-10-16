@@ -39,17 +39,23 @@ def _probe(path):
 
 
 def _preset(bumper, **kw):
-    # A 0.6 s fade keeps the beat arithmetic below readable; the brand default is boot_seam
-    # (test_the_outro_crosses_brand_boundaries_with_the_boot_seam).
+    # A 0.6 s fade keeps the beat arithmetic below readable; the brand default is the edge sweep
+    # (test_the_outro_sweeps_off_the_clip_and_fades_to_the_cta).
     return {"bumper": {"path": str(bumper), "in": 0.1, "out": 2.7}, "cta": CTA,
             "transition": {"style": "fade", "duration": 0.6}, **kw}  # fmt: skip
 
 
-def test_the_outro_crosses_brand_boundaries_with_the_boot_seam(bumper):
+def test_the_outro_sweeps_off_the_clip_and_fades_to_the_cta(bumper):
     outro.configure({"bumper": {"path": str(bumper), "in": 0.1, "out": 2.7}, "cta": CTA})
     walk, bump, card = montage.parse_sequence([{"clip": 1, "out": 50}, {"outro": True}])
-    assert bump["transition"] == {"style": "boot_seam"} and card["transition"] == {"style": "boot_seam"}
-    assert walk["hold"] == 2.5 + 2.0 + 0.4, "caption hold + beat + the 400 ms seam's overlap"
+    assert bump["transition"] == {"style": "edge_sweep"}, "main clip → bumper: the edge sweep"
+    assert card["transition"] == {"style": "ease_fade", "ms": 300}, "bumper → CTA: the short bumper fade"
+    outro.configure({"bumper": {"path": str(bumper), "in": 0.1, "out": 2.7}, "cta": CTA, "bumper_fade_ms": 0})
+    assert montage.parse_sequence([{"clip": 1, "out": 50}, {"outro": True}])[2]["transition"] == {"style": "cut"}
+    assert walk["hold"] == 2.5 + 2.0 + 0.6, "caption hold + beat + the 600 ms sweep's overlap (guard unchanged)"
+    outro.configure({"cta": CTA})
+    _, card_only = montage.parse_sequence([{"clip": 1, "out": 50}, {"outro": True}])
+    assert card_only["transition"] == {"style": "edge_sweep"}, "no bumper: the CTA sweeps in off the clip"
 
 
 # ── the preset ────────────────────────────────────────────────────────────────
@@ -149,7 +155,7 @@ def test_the_beat_is_a_frozen_frame_and_the_caption_fades_on_it(bumper, take):
     # The caption box fades in at footage end (104 s) + caption_hold (2.5 s), over 0.5 s.
     assert chains[1] == ("color=c=0x0a0a0c:s=2260x140:r=30:d=109.6,format=rgba,fade=t=in:st=106.5:d=0.5:alpha=1[cb0]")
     assert chains[2].startswith("[s0][cb0]overlay=140:1140:eof_action=pass,null,")
-    assert tl["total"] == pytest.approx(109.6 + 2.6 - 0.6 + 4.0 - 0.6)
+    assert tl["total"] == pytest.approx(109.6 + 2.6 - 0.6 + 4.0 - 0.3), "bumper → CTA: the 300 ms bumper fade"
 
 
 def test_the_cta_card_renders_its_button_and_hides_empty_slots():
@@ -188,8 +194,8 @@ def test_real_outro_freezes_fades_the_caption_then_bumper_then_card(tmp_path):
         c["id"], seq, {"size": "640x360", "name": "o", "poster": False}, d / "m",
         browser_ok=True, card_renderer=lambda card, w, h, out: str(card_png),
     )  # fmt: skip
-    # 3 s footage + hold (1.0 + 0.2 + 1.0 + 0.4) = 5.6; + bumper 2.0 − 0.4; + card 1.5 − 0.4.
-    assert abs(r["duration_s"] - 8.3) < 0.1, r["duration_s"]
+    # 3 s footage + hold (1.0 + 0.2 + 1.0 + 0.4) = 5.6; + bumper 2.0 − 0.4; + card 1.5 − 0.3 (the bumper fade).
+    assert abs(r["duration_s"] - 8.4) < 0.1, r["duration_s"]
     assert r["caption_visible_s"] == pytest.approx(4.0)
     mp4 = Path(r["path"])
     assert _near(_rgb(mp4, 105, 300, 318), "#ffffff")[0], "3.5 s: the frozen frame still shows the caption"

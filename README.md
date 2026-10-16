@@ -78,8 +78,8 @@ loads nothing from the network at all.
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.4.1`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.4.1`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.4.2`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.4.2`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —
@@ -305,19 +305,20 @@ every problem listed at once.
   square cut a clip is centre-cropped — or cropped to its `focus` rect (source pixels), grown
   to the canvas's shape and kept inside the frame (a focus outside the source is refused).
   Every item is normalised to the canvas's size, fps, square pixels, yuv420p and one timebase.
-- **Signature transitions** (the default): `edge_sweep` — 600 ms; both shots stay still and the
-  incoming one is revealed left → right behind a narrow brand-accent leading band (32 px at 2560
-  wide) — for beat → beat and chapter changes; `boot_seam` — 400 ms; a horizontal seam opens
-  vertically onto the incoming shot, edged by two accent lines that dissolve as it completes — for
-  brand boundaries (the intro's splash → title, the outro's content → bumper → CTA). Both follow
-  one deterministic contract shared with the console (`transitions.py`, `transitions.json` —
+- **The signature transition** (the default): `edge_sweep` — 600 ms; both shots stay still and
+  the incoming one is revealed left → right behind a narrow brand-accent leading band (32 px at
+  2560 wide) — between beats, and the one moving transition of the brand intro/outro (title card
+  → main clip, main clip → bumper; splash → title and bumper → CTA are a short eased crossfade,
+  `bumper_fade_ms` on the intro/outro presets — default 300, frame-quantized, 0 = a cut). The old
+  `boot_seam` was removed — asking for it is a validation error pointing at `edge_sweep`, `cut` or
+  `fade`. It follows one deterministic contract shared with the console (`transitions.py`, `transitions.json` —
   protoContent#606's `protolabs.brand-video/1`, checked against its analytic reference frames):
   exact easeInOutCubic, `N = round(ms·fps/1000)` frames evaluated at
   `u = k/N`, frame `k = 0` is the outgoing shot and the incoming one owns `u = 1`, geometry
   normalized to the canvas, edges antialiased by pixel coverage, the accent from the brand
-  snapshot. Their length is fixed (a `duration` is refused); every item is quantized to whole
-  frames so they land frame-exact. `reduced_motion: true` (output) keeps each signature's N-frame
-  interval as a stationary hard cut at `ceil(N/2)` (no band, seam or fade — the timeline doesn't
+  snapshot. Its length is fixed (a `duration` is refused); every item is quantized to whole
+  frames so it lands frame-exact. `reduced_motion: true` (output) keeps the sweep's N-frame
+  interval as a stationary hard cut at `ceil(N/2)` (no band or fade — the timeline doesn't
   move); any other moving transition becomes a plain cut; dissolves stay.
 - **Other transitions** (into an item): `colorwipe` — a full-frame bar in the NEXT item's
   `theme_color` (a card's `accent`; else the brand accent) sweeps across, covers the outgoing
@@ -350,6 +351,31 @@ every problem listed at once.
 The montage registers as a `montage` asset (the gallery plays it and filters by it) with
 `meta.sequence`, the cut sheet (`meta.timeline`), the encode attempts and the engines used;
 its poster and GIF are child assets.
+
+### protoLabs bookends v1 — the default intro + outro
+
+Every clip Campaign produces is bookended by default, the way Josh approved it (vfr-edge-fade,
+2026-10-16):
+
+**intro** — the console's real boot-splash bumper → a 300 ms fade (brand easing) → the title card →
+an **edge sweep** into the content; **outro** — the content (its final caption held ≥ 4 s, guarded)
+→ an **edge sweep** into the bumper → a 300 ms fade → the "Star protoAgent on GitHub" end card.
+
+The recipe lives in the protoLabs brand kit (`brands/protolabs/brand-kit.yaml` → `bookends:`,
+generated with the DS snapshot; the bumper is `brands/protolabs/protoagent-splash.mp4`), so with
+**Brand kit file** pointed at it, it applies with nothing else configured. The operator's own
+**Brand intro** / **Brand outro** settings win over it. Where it applies:
+
+- **campaign_produce_video** — `intro: brand`, `outro: brand` are the defaults.
+- **campaign_montage / campaign_storyboard** — `output.bookends` (default `auto`: whenever the brand
+  has bookends) wraps the sequence: the intro's title is `output.title` (required while bookends
+  apply), the outro follows the last clip. A sequence that already starts with `{intro: …}` /
+  ends with `{outro: …}` is left alone. **`bookends: false`** for README loop tiles, short
+  GIF-style loops and other cuts that must not have them; `true` makes them required.
+- **campaign_render** — each mp4 output takes `bookends: brand` (the default for a full clip) or
+  `none`; the plain render is wrapped in the bookends at its own size (title = the output's
+  `title`, else the asset's) and the asset points at the bookended file. GIFs and posters never
+  get them.
 
 ### The video end-card recipe (brand outro)
 
@@ -399,7 +425,8 @@ caption_hold_s: 2.5       # the last caption stays up this much longer (frozen f
 min_caption_s: 4.0        # REFUSE a cut that shows the final caption for less than this
 caption_fade_s: 0.5       # then the caption fades (the clip's `caption.region` is painted over)…
 beat_s: 2.0               # …and the clean shot holds before the bumper
-transition: {style: fade, duration: 0.6}
+transition: edge_sweep    # main clip → bumper (the default)
+bumper_fade_ms: 300       # bumper → CTA card: a short crossfade on the brand easing (0 = a cut)
 bumper: {path: ~/media/protoagent-splash.mp4, in: 0.1, out: 2.7}
 cta: {template: cta-slide, eyebrow: "Open source · MIT", title: "Star protoAgent on GitHub",
       cta: "★  Star on GitHub", url: github.com/protoLabsAI/protoAgent, duration: 4.5}
@@ -419,16 +446,19 @@ any key for one cut (its bumper may name a campaign `clip`, never a file `path`)
 
 The mirror of the outro, prepended with a FIRST item `{intro: true}`: **a bumper** (the same
 live boot splash, ~2 s), **a title card** (the `title-slide` template in the same card recipe —
-embedded Geist, the DS snapshot, the bordered look — eyebrow, title, subtitle, ~3 s), then a
-**crossfade** into the first shot. Never a hard cut: the transition into the first shot must be
-a crossfade (`fade`, `dissolve`, `fadeblack`, `fadewhite`, ≥ 0.3 s), and the montage REFUSES an
+embedded Geist, the DS snapshot, the bordered look — eyebrow, title, subtitle, ~3 s; the splash
+crossfades into it — `bumper_fade_ms`, default 300 ms on the brand easing, 0 = a cut), then the
+**edge sweep** into the first shot. Never a hard cut into the shot:
+`into_content` must be `edge_sweep` (the default) or a crossfade (`fade`, `dissolve`,
+`fadeblack`, `fadewhite`, ≥ 0.3 s; a `duration: 0` is refused), and the montage REFUSES an
 intro that runs longer than `max_s` (default 6 s, measured until the first shot is fully up —
 the cut sheet reports `intro_s`). The **Brand intro** setting (YAML; operator-only):
 
 ```yaml
 bumper: {path: ~/media/protoagent-splash.mp4, in: 0.1, out: 2.3}   # or `bumper: outro` — reuse the outro's file
 card: {template: title-slide, eyebrow: "Architecture walkthrough", title: "protoAgent", duration: 3.0}
-transition: {style: fade, duration: 0.6}
+bumper_fade_ms: 300       # splash → title card: a short eased crossfade (0 = a cut)
+into_content: edge_sweep  # title card → the first shot (the default)
 max_s: 6
 ```
 

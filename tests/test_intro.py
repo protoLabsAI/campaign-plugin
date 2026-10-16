@@ -51,7 +51,7 @@ def test_the_preset_validates_and_reports_every_problem(bumper, tmp_path):
             {
                 "bumpr": 1,
                 "bumper": {"path": str(tmp_path / "nope.mp4")},
-                "transition": {"style": "cut"},
+                "into_content": {"style": "cut"},
                 "card": {"template": "og"},
             }
         )  # fmt: skip
@@ -63,6 +63,8 @@ def test_the_preset_validates_and_reports_every_problem(bumper, tmp_path):
         "a crossfade needs at least"
         in intro.configure({**_preset(bumper), "transition": {"style": "fade", "duration": 0.1}})[0]
     )
+    assert "boot_seam was removed" in intro.configure({**_preset(bumper), "transition": "boot_seam"})[0]
+    assert "never a cut" in intro.configure({**_preset(bumper), "into_content": "cut"})[0], "only the title may cut in"
     zero = intro.configure({**_preset(bumper), "transition": {"style": "fade", "duration": 0}})
     assert zero and "duration 0: that is a hard cut" in zero[0], "0 is a cut, not a silent 0.6 s"
     assert (
@@ -92,7 +94,7 @@ def test_the_intro_expands_to_bumper_card_and_a_reveal_into_the_first_shot(bumpe
     assert bump["transition"] is None, "the bumper opens cold"
     assert card["card"]["template"] == "title-slide" and card["card"]["title"] == "protoAgent in 85 seconds"
     assert card["card"]["eyebrow"] == "Architecture walkthrough", "the preset's card keys survive a title override"
-    assert card["transition"] == {"style": "boot_seam"}, "splash → title card: a brand boundary"
+    assert card["transition"] == {"style": "ease_fade", "ms": 300}, "splash → title card: the short bumper fade"
     assert walk["transition"] == {"style": "edge_sweep"}, "title → walkthrough: the signature sweep, never a cut"
 
 
@@ -106,8 +108,15 @@ def test_guard_the_intro_is_at_most_six_seconds_and_reveals_the_shot(bumper, tak
     c, a = take
     intro.configure(_preset(bumper))
     tl = _plan(c, [{"intro": True}, {"clip": a["id"], "in": 4.2, "out": 80.0}])
-    # bumper 2.2 s → (boot seam 0.4) card 3.0 s → (edge sweep 0.6) walkthrough, fully up 0.6 s later.
-    assert tl["intro_s"] == pytest.approx(2.2 + 3.0 - 0.4 - 0.6 + 0.6)
+    # bumper 2.2 s → (fade 0.3) card 3.0 s → (edge sweep 0.6) walkthrough, fully up 0.6 s later.
+    assert tl["intro_s"] == pytest.approx(2.2 + 3.0 - 0.3 - 0.6 + 0.6)
+    fade = next(t for t in tl["transitions"] if t["into"] == 1)
+    assert (fade["style"], fade["frames"], fade["duration"]) == ("ease_fade", 9, 0.3)
+    intro.configure(_preset(bumper, bumper_fade_ms=0))
+    tl0 = _plan(c, [{"intro": True}, {"clip": a["id"], "in": 4.2, "out": 80.0}])
+    assert next(t for t in tl0["transitions"] if t["into"] == 1)["style"] == "cut", "bumper_fade_ms 0 = a cut"
+    assert "bumper_fade_ms 5000 is outside" in intro.configure(_preset(bumper, bumper_fade_ms=5000))[0]
+    intro.configure(_preset(bumper))
     assert tl["intro_s"] <= 6.0
     into_walk = next(t for t in tl["transitions"] if t["into"] == 2)
     assert into_walk["style"] == "edge_sweep" and into_walk["frames"] == 18

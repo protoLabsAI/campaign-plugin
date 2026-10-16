@@ -23,8 +23,8 @@ cut the take into two items (two beats) if it needs that.
 * a lower-third ``label`` is drawn with ``drawtext`` in the brand font (resolved to a font
   file; a well-known sans is the fallback), or — on an ffmpeg built without drawtext — as a
   transparent HTML overlay; with neither, labels are skipped and the reply says so;
-* the default transition is the signature **edge sweep** (and **boot seam** at brand boundaries)
-  — frame-exact mask composites from :mod:`transitions` (one contract with the console);
+* the default transition is the signature **edge sweep** — a frame-exact mask composite from
+  :mod:`transitions` (one contract with the console);
 * other transitions are ``xfade`` styles (fade, wipeleft, slideleft, smoothleft, circleopen, …),
   a hard ``cut``, or the signature **colour wipe**: a full-frame bar in the NEXT item's
   ``theme_color`` sweeps across, covering the outgoing shot, then sweeps on and reveals the
@@ -94,6 +94,9 @@ COLOR_WIPES = {
 }
 # The protoLabs signature transitions (transitions.py): fixed, frame-quantized durations.
 SIGNATURES = tuple(trmod.SIGNATURES)
+# Frame-indexed mask composites (the signature sweep + the brand fade around the bumper, which the
+# intro/outro presets set; not a user-facing style).
+COMPOSITES = (*SIGNATURES, trmod.EASE_FADE)
 TRANSITIONS = ("cut", *SIGNATURES, *COLOR_WIPES, *XFADE_STYLES)
 # What reduced motion keeps: dissolves (no spatial movement). Everything else becomes a cut.
 STILL_TRANSITIONS = ("cut", "fade", "fadeblack", "fadewhite", "dissolve")
@@ -114,7 +117,7 @@ OUTPUT_DEFAULTS: dict[str, Any] = {
     "fps": 30,
     "background": "",  # letterbox bars; blank = the brand background
     "transition": "edge_sweep",  # the default between items (an item's own `transition` wins)
-    "transition_duration": 0.45,  # for the non-signature styles (edge_sweep / boot_seam are fixed)
+    "transition_duration": 0.45,  # for the non-signature styles (edge_sweep is fixed)
     "reduced_motion": False,  # true: every moving transition becomes a cut (dissolves stay)
     "limit": "",  # a hard-limit id (campaign_limits) the mp4 must meet
     "max_bytes": None,  # and/or an explicit ceiling
@@ -127,6 +130,9 @@ OUTPUT_DEFAULTS: dict[str, Any] = {
     "label_font": "",  # a font FILE for labels; blank = the brand heading font, resolved
     "card_engine": "auto",  # auto | html | ffmpeg
     "label_engine": "auto",  # auto | drawtext | html | none
+    # protoLabs bookends v1 (the brand's default intro + outro) around the cut: auto = whenever the
+    # brand has bookends; false for README loop tiles / GIF-style loops; true = required.
+    "bookends": "auto",
 }
 CARD_ENGINES = ("auto", "html", "ffmpeg")
 LABEL_ENGINES = ("auto", "drawtext", "html", "none")
@@ -229,6 +235,9 @@ def _transition(value: Any, what: str, problems: list[str]) -> dict[str, Any] | 
         return None
     _unknown(value, TRANSITION_KEYS, what, problems)
     style = str(value.get("style") or "").strip().lower()
+    if style in intromod.REMOVED:
+        problems.append(f"{what}: {intromod.REMOVED[style]}")
+        return None
     if style not in TRANSITIONS:
         problems.append(f"{what}: unknown transition {value.get('style')!r} — use one of {', '.join(TRANSITIONS)}")
         return None
@@ -318,6 +327,7 @@ def normalize_output(output: Any) -> dict[str, Any]:
     for key in ("poster", "gif"):
         if not isinstance(o[key], bool):
             problems.append(f"output.{key} must be true or false")
+    bookends = _bookends_opt(o.get("bookends"), problems)
     if problems:
         raise MontageError(problems)
     return {
@@ -344,7 +354,55 @@ def normalize_output(output: Any) -> dict[str, Any]:
         "label_font": str(Path(label_font).expanduser()) if label_font else "",
         "card_engine": str(o["card_engine"]).lower(),
         "label_engine": str(o["label_engine"]).lower(),
+        "bookends": bookends,
     }
+
+
+BOOKENDS_RECIPE = "protoLabs bookends v1"
+
+
+def _bookends_opt(value: Any, problems: list[str]) -> str:
+    if value in (None, "", "auto"):
+        return "auto"
+    if value in (True, "brand", "true", "on"):
+        return "brand"
+    if value in (False, "none", "false", "off"):
+        return "none"
+    problems.append(f"output.bookends must be auto, true/brand or false/none, got {value!r}")
+    return "auto"
+
+
+def with_bookends(sequence: Any, opts: dict[str, Any]) -> tuple[Any, list[str]]:
+    """Wrap a cut in the brand's default bookends (protoLabs bookends v1: splash bumper → 300 ms
+    fade → title card → edge sweep → CONTENT → edge sweep → bumper → 300 ms fade → Star CTA) —
+    unless ``output.bookends`` is false, the sequence already opens with an intro / ends with an
+    outro, or (``auto``) the brand has no bookends. Returns (sequence, notes)."""
+    if opts.get("bookends") == "none" or not isinstance(sequence, list) or not sequence:
+        return sequence, []
+    have_intro, have_outro = bool(intromod.preset()), bool(outromod.preset())
+    if opts.get("bookends") == "brand" and not (have_intro and have_outro):
+        raise MontageError(
+            "output.bookends: true — but the brand has no bookends (the brand kit's `bookends:` or the "
+            "intro/outro settings); point Brand kit file at brands/protolabs/brand-kit.yaml, or bookends: false"
+        )
+    seq, notes = list(sequence), []
+    first, last = seq[0], seq[-1]
+    if have_intro and not (isinstance(first, dict) and "intro" in first):
+        title = str(opts.get("title") or "").strip()
+        if not title:
+            raise MontageError(
+                f"{BOOKENDS_RECIPE}: the intro's title card needs output.title (the video's title) — "
+                "or output.bookends: false for a loop tile / GIF-style cut"
+            )
+        seq.insert(0, {"intro": {"card": {"title": title}}})
+        notes.append(f"{BOOKENDS_RECIPE}: intro added (bumper → 300 ms fade → title card → edge sweep)")
+    if have_outro and not (isinstance(last, dict) and "outro" in last):
+        if isinstance(last, dict) and "clip" in last:
+            seq.append({"outro": True})
+            notes.append(f"{BOOKENDS_RECIPE}: outro added (edge sweep → bumper → 300 ms fade → Star CTA)")
+        else:
+            notes.append(f"{BOOKENDS_RECIPE}: no outro — the cut ends on a card, not a clip")
+    return seq, notes
 
 
 def parse_sequence(sequence: Any) -> list[dict[str, Any]]:
@@ -562,7 +620,7 @@ def _prepend_intro(items: list[dict[str, Any]], o: dict[str, Any], problems: lis
         problems.append("item 1: an intro needs a shot after it")
         return
     first = items[0]
-    tr = dict(o.get("transition") or {"style": "boot_seam"})
+    tr = dict(o.get("transition") or {"style": "cut"})
     into = dict(o.get("into_content") or {"style": "edge_sweep"})
     if first.get("transition") is not None and first["transition"]["style"] not in intromod.INTO_CONTENT:
         problems.append(
@@ -658,9 +716,18 @@ def _append_outro(items: list[dict[str, Any]], o: dict[str, Any], n: int, proble
                 "duration": dur,
                 "zoom": bool(c.get("zoom", False)),
                 "theme_color": None,
-                "transition": tr,
+                # after a bumper: the outro's into_cta (a straight cut by default); with no
+                # bumper the CTA follows the main clip, so it takes the clip's transition
+                "transition": (_cta_transition(o.get("into_cta"), problems) if b else tr),
             }
         )
+
+
+def _cta_transition(value: Any, problems: list[str]) -> dict[str, Any] | None:
+    """The outro's bumper → CTA: the eased bumper fade (outro.py), or any style the preset names."""
+    if isinstance(value, dict) and value.get("style") == trmod.EASE_FADE:
+        return dict(value)
+    return _transition(value if value is not None else "cut", "outro.into_cta", problems)
 
 
 def _clip_problem(campaign_id: int, it: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
@@ -806,6 +873,13 @@ def resolve_transition(tr: dict[str, Any], opts: dict[str, Any], accent: str) ->
     hard cut at ceil(N/2) (the #606 contract — the timeline doesn't move). Any other moving
     transition becomes a plain cut under reduced motion; others fall back to transition_duration."""
     tr = dict(tr)
+    if tr["style"] == trmod.EASE_FADE:
+        if opts.get("reduced_motion"):  # no fade under reduced motion: a plain cut
+            tr = {"style": "cut", "reduced_from": trmod.EASE_FADE}
+        else:
+            tr["frames"] = trmod.frames_ms(tr.get("ms", 300), opts["fps"])
+            tr["duration"] = round(tr["frames"] / opts["fps"], 6)
+            tr["color"] = accent
     if opts.get("reduced_motion") and tr["style"] in SIGNATURES:
         tr["reduced"] = True
     elif opts.get("reduced_motion") and tr["style"] not in STILL_TRANSITIONS:
@@ -815,7 +889,7 @@ def resolve_transition(tr: dict[str, Any], opts: dict[str, Any], accent: str) ->
         tr["duration"] = round(trmod.duration_s(tr["style"], opts["fps"]), 6)
         tr["frames"] = trmod.frames(tr["style"], opts["fps"])
         tr["color"] = accent
-    elif "duration" not in tr:
+    elif "duration" not in tr and tr["style"] != trmod.EASE_FADE:
         tr["duration"] = opts.get("transition_duration", 0.45)
     if tr["style"] == "cut":
         tr["duration"] = 0.0
@@ -864,7 +938,7 @@ def plan(items: list[dict[str, Any]], opts: dict[str, Any], look: dict[str, Any]
         else:
             start = acc - tr["duration"]
         if tr is not None:
-            mid = tr["style"] in XFADE_STYLES or tr["style"] in SIGNATURES
+            mid = tr["style"] in XFADE_STYLES or tr["style"] in COMPOSITES
             tr["at"] = round(start + (tr["duration"] / 2 if mid else 0.0), 4)
         starts.append(round(start, 4))
         acc = start + it["length"]
@@ -1133,7 +1207,7 @@ def build_graph(
         if tr["style"] == "cut":
             parts.append(f"{acc}[v{k}]concat=n=2:v=1:a=0,{cfr}{nxt}")
             acc_len += L
-        elif tr["style"] in SIGNATURES:
+        elif tr["style"] in COMPOSITES:
             # Frame-indexed, not time-offset: the outgoing stream's last N frames and the incoming
             # one's first N are composited frame by frame at u = k/N (transitions.graph), then
             # spliced between the untouched head and tail — no frame duplicated or dropped.
@@ -1150,7 +1224,7 @@ def build_graph(
             parts.append(f"[r{k}]trim=start_frame={n},setpts=PTS-STARTPTS[rb{k}]")
             parts += trmod.graph(
                 tr["style"], f"oa{k}", f"ib{k}", f"tx{k}", w=w, h=h, fps=fps, accent=ff_color(tr["color"]), tag=f"s{k}",
-                reduced=bool(tr.get("reduced")),
+                reduced=bool(tr.get("reduced")), n=n,
             )  # fmt: skip
             # Exactly N frames on the frame grid (an fps filter here can drop the last one at EOF).
             parts.append(f"[tx{k}]{norm},setpts=N/({_fmt(fps)}*TB)[tc{k}]")
@@ -1504,12 +1578,14 @@ def render_montage(
     runner = runner or _default_runner
     # Validate everything that needs no ffmpeg first: the agent's real error beats "install ffmpeg".
     opts = normalize_output(output)
+    sequence, bookend_notes = with_bookends(sequence, opts)
     items = parse_sequence(sequence)
     check_items(campaign_id, items)
     ff = deps.ffmpeg()
     if not ff:
         raise render.RenderError(deps.ffmpeg_hint())
     items, warnings = resolve_items(campaign_id, items)
+    warnings = bookend_notes + warnings
     warnings += framing(items, opts)
     look = brandmod.resolve({})
     timeline = plan(items, opts, look)
@@ -1663,12 +1739,14 @@ def storyboard(
     runner = runner or _default_runner
     # Validate everything that needs no ffmpeg first: the agent's real error beats "install ffmpeg".
     opts = normalize_output(output)
+    sequence, bookend_notes = with_bookends(sequence, opts)
     items = parse_sequence(sequence)
     check_items(campaign_id, items)
     ff = deps.ffmpeg()
     if not ff:
         raise render.RenderError(deps.ffmpeg_hint())
     items, warnings = resolve_items(campaign_id, items)
+    warnings = bookend_notes + warnings
     warnings += framing(items, opts)
     look = brandmod.resolve({})
     timeline = plan(items, opts, look)
@@ -1707,7 +1785,7 @@ def storyboard(
                 cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c=0x000000:s=8x{ch}:d=1", "-frames:v", "1", "-update", "1", str(out)]  # fmt: skip
             elif tr["style"] in COLOR_WIPES:
                 cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c={ff_color(tr['color'])}:s={sw}x{ch}:d=1", "-frames:v", "1", "-update", "1", str(out)]  # fmt: skip
-            elif tr["style"] in SIGNATURES:
+            elif tr["style"] in COMPOSITES:
                 # The real signature transition at u = ½ (frame N/2 of the same mask graph).
                 n, sfps = tr["frames"], opts["fps"]
                 d = f"{n / sfps:.6f}"
@@ -1726,6 +1804,7 @@ def storyboard(
                             accent=ff_color(tr["color"]),
                             tag="sw",
                             reduced=bool(tr.get("reduced")),
+                            n=n,
                         ),
                         f"[t]select=eq(n\\,{n // 2}),crop={sw}:{ch}:(iw-{sw})/2:0[o]",
                     ]
