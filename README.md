@@ -308,7 +308,8 @@ every problem listed at once.
 - **The signature transition** (the default): `edge_sweep` — 600 ms; both shots stay still and
   the incoming one is revealed left → right behind a narrow brand-accent leading band (32 px at
   2560 wide) — between beats, and the one moving transition of the brand intro/outro (title card
-  → main clip, main clip → bumper; splash → title and bumper → CTA are straight cuts). The old
+  → main clip, main clip → bumper; splash → title and bumper → CTA are a short eased crossfade,
+  `bumper_fade_ms` on the intro/outro presets — default 300, frame-quantized, 0 = a cut). The old
   `boot_seam` was removed — asking for it is a validation error pointing at `edge_sweep`, `cut` or
   `fade`. It follows one deterministic contract shared with the console (`transitions.py`, `transitions.json` —
   protoContent#606's `protolabs.brand-video/1`, checked against its analytic reference frames):
@@ -400,7 +401,7 @@ min_caption_s: 4.0        # REFUSE a cut that shows the final caption for less t
 caption_fade_s: 0.5       # then the caption fades (the clip's `caption.region` is painted over)…
 beat_s: 2.0               # …and the clean shot holds before the bumper
 transition: edge_sweep    # main clip → bumper (the default)
-into_cta: cut             # bumper → CTA card: a straight cut (the default)
+bumper_fade_ms: 300       # bumper → CTA card: a short crossfade on the brand easing (0 = a cut)
 bumper: {path: ~/media/protoagent-splash.mp4, in: 0.1, out: 2.7}
 cta: {template: cta-slide, eyebrow: "Open source · MIT", title: "Star protoAgent on GitHub",
       cta: "★  Star on GitHub", url: github.com/protoLabsAI/protoAgent, duration: 4.5}
@@ -421,7 +422,8 @@ any key for one cut (its bumper may name a campaign `clip`, never a file `path`)
 The mirror of the outro, prepended with a FIRST item `{intro: true}`: **a bumper** (the same
 live boot splash, ~2 s), **a title card** (the `title-slide` template in the same card recipe —
 embedded Geist, the DS snapshot, the bordered look — eyebrow, title, subtitle, ~3 s; the splash
-CUTS straight to it), then the **edge sweep** into the first shot. Never a hard cut into the shot:
+crossfades into it — `bumper_fade_ms`, default 300 ms on the brand easing, 0 = a cut), then the
+**edge sweep** into the first shot. Never a hard cut into the shot:
 `into_content` must be `edge_sweep` (the default) or a crossfade (`fade`, `dissolve`,
 `fadeblack`, `fadewhite`, ≥ 0.3 s; a `duration: 0` is refused), and the montage REFUSES an
 intro that runs longer than `max_s` (default 6 s, measured until the first shot is fully up —
@@ -430,7 +432,7 @@ the cut sheet reports `intro_s`). The **Brand intro** setting (YAML; operator-on
 ```yaml
 bumper: {path: ~/media/protoagent-splash.mp4, in: 0.1, out: 2.3}   # or `bumper: outro` — reuse the outro's file
 card: {template: title-slide, eyebrow: "Architecture walkthrough", title: "protoAgent", duration: 3.0}
-transition: cut           # splash → title card (the default)
+bumper_fade_ms: 300       # splash → title card: a short eased crossfade (0 = a cut)
 into_content: edge_sweep  # title card → the first shot (the default)
 max_s: 6
 ```

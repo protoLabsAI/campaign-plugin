@@ -1363,7 +1363,7 @@ def build_tools(registry):
         script: the YAML (or the whole reply) from atlas_record_script, or any Campaign shot
         script. title: the video's title (the intro card + file names). quality: 2k (2560 px wide
         device-pixel capture — crisp small text) or 1080p. intro / outro: 'brand' (the operator's
-        Brand intro / Brand outro presets — boot-splash bumper cut to a title card that edge-sweeps into
+        Brand intro / Brand outro presets — boot-splash bumper fading to a title card that edge-sweeps into
         the first SETTLED frame; final caption ≥ 4 s, bumper, Star-on-GitHub card) or 'none'.
         subtitle / eyebrow: the intro card's other lines. caption_region {x,y,w,h} (device px)
         overrides where the final caption is measured (Atlas footage is detected).

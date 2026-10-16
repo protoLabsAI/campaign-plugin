@@ -11,7 +11,7 @@ The mirror of :mod:`outro`. The operator sets it up ONCE, as the plugin's ``intr
         title: "protoAgent"    # a montage / produce_video usually overrides title + subtitle
         subtitle: ""
         duration: 3.0
-      transition: cut          # bumper → card: a straight cut (or fade / edge_sweep)
+      bumper_fade_ms: 300      # bumper → card: a short crossfade on the brand easing (0 = a cut)
       into_content: edge_sweep # card → the first shot (the signature Edge Sweep)
       max_s: 6.0               # REFUSE an intro longer than this (until the first shot is fully up)
 
@@ -33,7 +33,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-INTRO_KEYS = {"bumper", "card", "transition", "into_content", "max_s"}
+INTRO_KEYS = {"bumper", "card", "transition", "into_content", "max_s", "bumper_fade_ms"}
 BUMPER_KEYS = {"path", "clip", "in", "out", "theme_color"}
 CARD_KEYS = {"template", "title", "subtitle", "eyebrow", "url", "duration", "zoom", "logo", "bg", "fg", "accent"}
 CARD_TEMPLATES = ("title-slide", "cta-slide")
@@ -45,7 +45,18 @@ INTO_CONTENT = (*SIGNATURES, *CROSSFADES)
 INTO_CARD = ("cut", *INTO_CONTENT)
 REMOVED = {"boot_seam": "boot_seam was removed (Josh: edge sweep only) — use edge_sweep, cut or fade"}
 MIN_CROSSFADE_S = 0.3
-DEFAULTS: dict[str, Any] = {"transition": "cut", "into_content": "edge_sweep", "max_s": 6.0}
+DEFAULTS: dict[str, Any] = {"transition": "cut", "into_content": "edge_sweep", "max_s": 6.0, "bumper_fade_ms": 300}
+MAX_BUMPER_FADE_MS = 2000
+
+
+def bumper_fade(raw: dict[str, Any], what: str, problems: list[str]) -> dict[str, Any]:
+    """The short crossfade on either side of a bumper (intro splash → title, outro bumper → CTA):
+    ``bumper_fade_ms`` (default 300) on the brand easing, frame-quantized; 0 = a straight cut."""
+    v = raw.get("bumper_fade_ms", DEFAULTS["bumper_fade_ms"])
+    ms = _num(v, f"{what}.bumper_fade_ms", problems, 0, MAX_BUMPER_FADE_MS)
+    ms = DEFAULTS["bumper_fade_ms"] if ms is None else ms
+    return {"style": "cut"} if ms == 0 else {"style": "ease_fade", "ms": ms}
+
 
 _PRESET: dict[str, Any] = {}
 
@@ -138,6 +149,8 @@ def normalize(raw: dict[str, Any], problems: list[str], *, trusted: bool) -> dic
         elif dur < MIN_CROSSFADE_S:
             problems.append(f"intro.{key}.duration {dur:g}s: a crossfade needs at least {MIN_CROSSFADE_S:g}s")
         out[key] = {"style": style, "duration": dur}
+    if "transition" not in raw:  # the default: the bumper fade (bumper_fade_ms)
+        out["transition"] = bumper_fade(raw, "intro", problems)
     out["max_s"] = _num(raw.get("max_s", DEFAULTS["max_s"]), "intro.max_s", problems, 1, 15) or DEFAULTS["max_s"]
 
     b = raw.get("bumper")

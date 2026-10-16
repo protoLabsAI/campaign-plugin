@@ -89,6 +89,18 @@ def frames(style: str, fps: float) -> int:
     return max(1, math.floor(ms * fps / 1000 + 0.5))
 
 
+def frames_ms(ms: float, fps: float) -> int:
+    """N for an arbitrary duration (the bumper fade): the same quantization rule."""
+    if not (isinstance(fps, (int, float)) and math.isfinite(fps) and fps > 0):
+        raise ValueError(f"fps must be a positive finite number, got {fps!r}")
+    return max(1, math.floor(float(ms) * fps / 1000 + 0.5))
+
+
+# The brand crossfade around the bumper (intro splash → title card, outro bumper → CTA): a plain
+# dissolve, but on the brand easing E(u) and the same frame grid / endpoint rules as the sweep.
+EASE_FADE = "ease_fade"
+
+
 def duration_s(style: str, fps: float) -> float:
     """The effective (frame-quantized) duration ``N / fps``."""
     return frames(style, fps) / fps
@@ -156,12 +168,23 @@ def _grid(fps: float) -> str:
 
 
 def graph(
-    style: str, a: str, b: str, out: str, *, w: int, h: int, fps: float, accent: str, tag: str, reduced: bool = False
+    style: str,
+    a: str,
+    b: str,
+    out: str,
+    *,
+    w: int,
+    h: int,
+    fps: float,
+    accent: str,
+    tag: str,
+    reduced: bool = False,
+    n: int | None = None,
 ) -> list[str]:
     """filter_complex chains that composite ``N`` frames of ``a`` (outgoing) and ``b`` (incoming),
     both exactly ``N`` frames long, into ``out``. ``accent`` is an ffmpeg colour (0xRRGGBB).
     ``reduced``: the same N frames as a hard cut at ``ceil(N/2)``."""
-    n = frames(style, fps)
+    n = n or frames(style, fps)
     if reduced:
         half = math.ceil(n / 2)
         return [
@@ -169,6 +192,11 @@ def graph(
             f"[{a}][{b}][{tag}mr]maskedmerge[{out}]",
         ]
     e = _ease_expr(n)
+    if style == EASE_FADE:  # a uniform mask: B at opacity E(u)
+        return [
+            f"{_strip(w, h, fps, n, f'255*{e}', vertical=False)}[{tag}mf]",
+            f"[{a}][{b}][{tag}mf]maskedmerge[{out}]",
+        ]
     acc = f"color=c={accent}:s={w}x{h}:r={fps:g}:d={n / fps:.6f},format=yuv420p,setsar=1,{_grid(fps)}[{tag}c]"
     if style == "edge_sweep":
         bw = SIGNATURES["edge_sweep"]["geometry"]["band_width"]

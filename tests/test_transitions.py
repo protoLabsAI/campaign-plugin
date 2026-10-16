@@ -92,6 +92,22 @@ def test_the_contract_oracle_and_reduced_ownership():
         T.frames("edge_sweep", float("nan"))
 
 
+def test_the_bumper_fade_is_eased_frame_quantized_and_cuts_under_reduced_motion():
+    look = {"colors": {"accent": "#9b87f2", "bg": "#0a0a0c"}}
+    for fps, n in ((24, 7), (30, 9), (60, 18)):
+        tr = montage.resolve_transition(
+            {"style": "ease_fade", "ms": 300}, montage.normalize_output({"fps": fps}), "#fff"
+        )
+        assert (tr["frames"], tr["duration"]) == (n, round(n / fps, 6))
+    rm = montage.resolve_transition(
+        {"style": "ease_fade", "ms": 300}, montage.normalize_output({"reduced_motion": True}), "#fff"
+    )
+    assert rm["style"] == "cut" and rm["duration"] == 0.0
+    g = T.graph("ease_fade", "a", "b", "o", w=64, h=36, fps=30, accent="0x9b87f2", tag="t", n=9)
+    assert "geq=lum='255*if(lt((N/9),0.5)" in g[0] and g[1] == "[a][b][tmf]maskedmerge[o]", "a uniform E(u) mask"
+    assert look
+
+
 def test_boot_seam_is_removed_with_a_clear_error():
     for seq in ([{"clip": 1}, {"clip": 2, "transition": "boot_seam"}],):
         with pytest.raises(montage.MontageError, match="boot_seam was removed .* use edge_sweep, cut or fade"):

@@ -8,7 +8,7 @@ The operator sets it up ONCE, as the plugin's ``outro`` setting (YAML)::
       caption_fade_s: 0.5      # the caption then fades out (clip `caption.region` painted over)…
       beat_s: 2.0              # …and the clean shot holds this long before the transition
       transition: edge_sweep   # main clip → bumper (the signature Edge Sweep; or fade, cut)
-      into_cta: cut            # bumper → CTA card: a straight cut (or fade / edge_sweep)
+      bumper_fade_ms: 300      # bumper → CTA card: a short crossfade on the brand easing (0 = a cut)
       bumper: {path: ~/media/protoagent-splash.mp4, in: 0.15, out: 2.7}   # a recorded bumper clip
       cta:
         template: cta-slide    # cta-slide (big accent button) | title-slide
@@ -47,7 +47,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-OUTRO_KEYS = {"caption_hold_s", "min_caption_s", "caption_fade_s", "beat_s", "transition", "into_cta", "bumper", "cta"}
+OUTRO_KEYS = {
+    "caption_hold_s", "min_caption_s", "caption_fade_s", "beat_s", "transition", "into_cta", "bumper_fade_ms",
+    "bumper", "cta",
+}  # fmt: skip
 BUMPER_KEYS = {"path", "clip", "in", "out", "theme_color"}
 CTA_KEYS = {"template", "title", "subtitle", "eyebrow", "url", "cta", "duration", "zoom", "logo", "bg", "fg", "accent"}
 DEFAULTS: dict[str, Any] = {
@@ -56,7 +59,7 @@ DEFAULTS: dict[str, Any] = {
     "caption_fade_s": 0.5,
     "beat_s": 2.0,
     "transition": "edge_sweep",  # main clip → bumper (or → the CTA when there's no bumper)
-    "into_cta": "cut",  # bumper → CTA card: a straight cut
+    "into_cta": None,  # bumper → CTA card: None = the bumper fade (bumper_fade_ms; 0 = a cut)
 }
 CTA_TEMPLATES = ("cta-slide", "title-slide")
 
@@ -121,7 +124,9 @@ def normalize(raw: dict[str, Any], problems: list[str], *, trusted: bool) -> dic
         v = _num(raw.get(key, DEFAULTS[key]), f"outro.{key}", problems, lo, hi)
         out[key] = DEFAULTS[key] if v is None else v
     out["transition"] = raw.get("transition", DEFAULTS["transition"])
-    out["into_cta"] = raw.get("into_cta", DEFAULTS["into_cta"])
+    from .intro import bumper_fade
+
+    out["into_cta"] = raw["into_cta"] if raw.get("into_cta") is not None else bumper_fade(raw, "outro", problems)
     b = raw.get("bumper")
     out["bumper"] = None
     if b is not None:

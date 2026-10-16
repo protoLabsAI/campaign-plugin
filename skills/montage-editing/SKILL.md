@@ -61,7 +61,7 @@ recording — the montage only trims the ends, sets one speed, and joins beats w
 - **End card last, 3–4 s**: the wordmark (`logo: true`), the repo URL (`url`), one CTA
   (`cta`). `zoom: true` gives it a slow 4 % push so it doesn't feel frozen.
 - **Transitions**: the signature `edge_sweep` (600 ms, the default) between beats and chapters —
-  the intro/outro already sweep into and out of the main clip (and cut around the bumper); `cut`
+  the intro/outro already sweep into and out of the main clip (and fade briefly around the bumper); `cut`
   for a deliberate hard beat. (`boot_seam` is gone — Josh: edge sweep only.) Don't give the sweep a
   `duration` (it's fixed), and don't mix in
   more styles (`colorwipe`, `fade`, xfades) unless the operator asks. For a reduced-motion cut,
