@@ -85,6 +85,8 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         )  # fmt: skip
         out = {k: a.get(k) for k in keys}
         out["superseded_by"] = list(a.get("superseded_by") or [])
+        # created_at / updated_at (the row), made_at (the file: folder stamp or mtime), take_at.
+        out.update(store.asset_times(a))
         out["has_file"] = bool(a.get("path")) and paths.is_contained(a["path"])
         # Never the raw filesystem path: relative to the media dir (the gallery's "Copy path"),
         # or just the file name for anything outside it.

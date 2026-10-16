@@ -56,6 +56,7 @@ PAGE = r"""<!doctype html>
   .toggle{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--pl-color-fg-muted,#999);cursor:pointer}
   .toggle input{margin:0}
   .st.rendered,.st.captured{color:var(--pl-color-accent,#9b87f2);border-color:var(--pl-color-accent,#9b87f2)}
+  .when{cursor:help;border-bottom:1px dotted var(--pl-color-border,#2a2a2a)}
   .warn{color:var(--pl-color-danger,#e5484d);font-size:11px}
   .note{color:var(--pl-color-fg-muted,#999);font-size:11px;white-space:pre-wrap}
   .actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
@@ -82,6 +83,10 @@ PAGE = r"""<!doctype html>
       <option value="">All kinds</option><option>clip</option><option>gif</option>
       <option>still</option><option>card</option><option>montage</option><option>copy_ref</option>
     </select>
+    <select id="sort" aria-label="Sort">
+      <option value="newest">Newest first</option><option value="oldest">Oldest first</option>
+      <option value="id">Asset #</option>
+    </select>
     <label class="toggle" title="Takes a retake replaced — out of the review queue and the counts">
       <input type="checkbox" id="show-superseded"> Show superseded <span id="sup-n"></span></label>
     <span class="spacer"></span>
@@ -100,7 +105,37 @@ PAGE = r"""<!doctype html>
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
     (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
   const fmtBytes = (n) => !n ? "" : n < 1e6 ? (n/1e3).toFixed(0) + " KB" : (n/1e6).toFixed(2) + " MB";
-  const state = { campaign: "", lane: "", kind: "", status: "", showSuperseded: false, data: null };
+  const state = { campaign: "", lane: "", kind: "", status: "", sort: "newest", showSuperseded: false, data: null };
+  // ── time ── made_at = when the FILE was produced (shot/render folder stamp, else mtime);
+  // created_at = when the row was planned. Sort and "x ago" use made_at, falling back to created_at.
+  const ts = (iso) => (iso ? Date.parse(iso) : NaN);
+  const madeTs = (a) => { const t = ts(a.made_at); return Number.isNaN(t) ? ts(a.created_at) : t; };
+  const absTime = (iso) => { const t = ts(iso); return Number.isNaN(t) ? "" :
+    new Date(t).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" }); };
+  function span(ms){
+    const s = Math.abs(ms) / 1000;
+    if (s < 60) return Math.round(s) + " s";
+    if (s < 3600) return Math.round(s / 60) + " min";
+    if (s < 86400) return Math.round(s / 3600) + " h";
+    return Math.round(s / 86400) + " d";
+  }
+  function relTime(t, now = Date.now()){
+    if (Number.isNaN(t)) return "";
+    const d = now - t;
+    if (d < 45000) return "just now";   // also a clock a few seconds ahead
+    if (d >= 30 * 86400000) return new Date(t).toLocaleDateString(undefined, { dateStyle: "medium" });
+    return span(d) + " ago";
+  }
+  const relDelta = (ms) => Math.abs(ms) < 1000 ? "same time" : span(ms) + (ms > 0 ? " later" : " earlier");
+  function whenTitle(a){
+    const lines = [];
+    if (a.made_at) lines.push(`${a.take_at ? "Rendered" : "Made"} ${absTime(a.made_at)}` +
+      (a.made_from === "mtime" ? " (file time)" : ""));
+    if (a.take_at) lines.push(`Take shot ${absTime(a.take_at)}`);
+    if (a.created_at && (!a.made_at || Math.abs(ts(a.made_at) - ts(a.created_at)) >= 60000))
+      lines.push(`Planned ${absTime(a.created_at)}`);
+    return lines.join("\n");
+  }
   // Superseded takes (a retake replaced them) are hidden unless the toggle is on, and never
   // count toward the review queue or the totals.
   const retired = (a) => a.status === "superseded";
@@ -139,11 +174,16 @@ PAGE = r"""<!doctype html>
   }
 
   function visible(){
+    const order = {
+      newest: (x, y) => (madeTs(y) || 0) - (madeTs(x) || 0) || y.id - x.id,
+      oldest: (x, y) => (madeTs(x) || 0) - (madeTs(y) || 0) || x.id - y.id,
+      id: (x, y) => x.id - y.id,
+    }[state.sort] || ((x, y) => x.id - y.id);
     return (state.data?.assets || []).filter(a =>
       (!state.lane || String(a.lane_id) === state.lane) &&
       (!state.kind || a.kind === state.kind) &&
       (!state.status || a.status === state.status) &&
-      (state.showSuperseded || state.status === "superseded" || !retired(a)));
+      (state.showSuperseded || state.status === "superseded" || !retired(a))).sort(order);
   }
 
   function chips(){
@@ -162,7 +202,16 @@ PAGE = r"""<!doctype html>
   function card(a){
     const el = document.createElement("div");
     el.className = "card" + (retired(a) ? " superseded" : ""); el.dataset.id = a.id;
-    const supBy = (a.superseded_by || []).map(i => "#" + i).join(", ");
+    const all = state.data?.assets || [];
+    const byId = (i) => all.find(x => x.id === i);
+    // The retake chain, read by time: "#42 · 3 min later" / "replaces #41 · 2 h earlier".
+    const rel = (o) => { const d = madeTs(o) - madeTs(a); return Number.isNaN(d) ? "" : ` · ${relDelta(d)}`; };
+    const supBy = (a.superseded_by || []).map(i => { const o = byId(i); return "#" + i + (o ? rel(o) : ""); }).join(", ");
+    const replaces = all.filter(o => (o.superseded_by || []).includes(a.id)).map(o => "#" + o.id + rel(o)).join(", ");
+    const made = madeTs(a);
+    const when = Number.isNaN(made) ? "" :
+      `<span class="when" data-ts="${made}" data-pre="${a.take_at ? "rendered " : ""}" title="${esc(whenTitle(a))}">` +
+      `${a.take_at ? "rendered " : ""}${esc(relTime(made))}</span>`;
     const dims = a.width ? `${a.width}×${a.height}` : "";
     const dur = a.duration_s ? `${a.duration_s.toFixed(1)}s` : "";
     const violated = /^(VIOLATES|DRAFT INPUTS)/.test(a.notes || "");
@@ -171,11 +220,12 @@ PAGE = r"""<!doctype html>
       `<div class="body">` +
         `<div class="title">${esc(a.title || "(untitled)")}</div>` +
         `<div class="meta"><span class="st ${esc(a.status)}">${esc(a.status.replace(/_/g, " "))}</span>` +
-          `<span>${esc(a.kind)}</span><span>#${a.id}</span>${dims ? `<span>${dims}</span>` : ""}` +
+          `${when}<span>${esc(a.kind)}</span><span>#${a.id}</span>${dims ? `<span>${dims}</span>` : ""}` +
           `${dur ? `<span>${dur}</span>` : ""}${a.size_bytes ? `<span>${fmtBytes(a.size_bytes)}</span>` : ""}` +
           `${a.limit_id ? `<span title="hard limit">≤ ${esc(a.limit_id)}</span>` : ""}</div>` +
         (a.notes ? `<div class="${violated ? "warn" : "note"}">${esc(a.notes)}</div>` : "") +
         (retired(a) ? `<div class="note">Superseded${supBy ? ` by ${esc(supBy)}` : ""}</div>` : "") +
+        (replaces ? `<div class="note">Replaces ${esc(replaces)}</div>` : "") +
         (a.review_note ? `<div class="note">Review: ${esc(a.review_note)}</div>` : "") +
         `<div class="actions">` +
           (a.can_review && a.status !== "approved" ? `<button class="ok" data-act="approve">Approve</button>` : "") +
@@ -270,6 +320,10 @@ PAGE = r"""<!doctype html>
   document.getElementById("campaign").addEventListener("change", (ev) => {
     for (const u of blobs.values()) URL.revokeObjectURL(u); blobs.clear();
     state.campaign = ev.target.value; state.lane = ""; loadAssets().catch(e => showErr(String(e))); });
+  document.getElementById("sort").addEventListener("change", (ev) => { state.sort = ev.target.value; render(); });
+  // Keep "x min ago" honest while the page sits open.
+  setInterval(() => { for (const el of document.querySelectorAll(".when[data-ts]"))
+    el.textContent = el.dataset.pre + relTime(Number(el.dataset.ts)); }, 60000);
   document.getElementById("show-superseded").addEventListener("change", (ev) => {
     state.showSuperseded = ev.target.checked; render(); });
   document.getElementById("lane").addEventListener("change", (ev) => { state.lane = ev.target.value; render(); });

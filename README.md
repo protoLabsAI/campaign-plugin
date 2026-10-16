@@ -37,6 +37,12 @@ product: the planning + production half of a "Brand & Launch" agent.
   playable, with status, size, dimensions, and the operator-only **Approve / Reject** buttons.
   Superseded takes are hidden (a **Show superseded** toggle brings them back, dimmed); an
   approved asset has a **Supersede…** button, the only way it can be retired.
+  Every card says **when the clip was made** ("12 min ago"; hover for the local date and time):
+  the shot/render folder stamp (`YYYYMMDD-HHMMSS`, UTC), else the file's mtime — a render also
+  names its source take's time. Sorted **newest first** by default (oldest first / asset # too),
+  and the retake chain reads by time ("Superseded by #42 · 3 min later", "Replaces #41 · …").
+  The assets API carries `created_at` / `updated_at` (the row), `made_at` + `made_from`
+  (`stamp` | `mtime`) and `take_at`.
 
 **Draft-only.** It never posts anywhere and holds no platform credentials. Every asset has an
 approval state and only the operator approves (in the gallery — there is no agent tool for it).

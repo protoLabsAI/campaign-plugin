@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.3
+
+- **Gallery timestamps — see when a clip was made** (#27). Each card shows a relative time
+  ("12 min ago") with the absolute local date + time on hover: the file's make time is the
+  shot/render folder stamp (`YYYYMMDD-HHMMSS`, UTC), falling back to the file's mtime; a render
+  also names its source take's time, and a planned row's own creation time shows when it differs.
+- **Sort control:** newest first (default), oldest first, or asset #.
+- **The retake chain reads by time:** "Superseded by #42 · 3 min later" on the old take, and
+  "Replaces #41 · 3 min earlier" on the new one.
+- `GET /api/plugins/campaign/campaigns/{id}/assets` adds `created_at`, `updated_at`, `made_at`,
+  `made_from` (`stamp` | `mtime` | ``) and `take_at` per asset (no schema change — the rows
+  already carried `created`/`updated`).
+
 ## 0.4.2
 
 - **protoLabs bookends v1 are the default everywhere.** The protoLabs brand kit carries them
