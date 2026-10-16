@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import os
 import re
 import sys
@@ -41,6 +43,8 @@ TOOLS = {
     "campaign_view",
     "campaign_montage",
     "campaign_storyboard",
+    "campaign_produce_video",
+    "campaign_video_status",
 }
 
 
@@ -74,7 +78,7 @@ def test_settings_that_name_a_program_to_run_are_marked_spawns():
     agent that could widen it could upload anything it can read — and `outro`, whose bumper names
     a local video file the montage reads (only the operator may point it at one)."""
     spawns = {s["key"] for s in MANIFEST["settings"] if s.get("spawns") is True}
-    assert spawns == {"ffmpeg_path", "interpreter", "upload_dirs", "outro"}
+    assert spawns == {"ffmpeg_path", "interpreter", "upload_dirs", "outro", "intro"}
 
 
 def test_playwright_is_declared_runtime_scoped_and_optional():
@@ -341,7 +345,7 @@ def test_review_route_is_the_operators_approve_and_reject(client, registry):
         "asset_reviewed",
         {"campaign_id": a["campaign_id"], "asset_id": a["id"], "status": "approved"},
     ) in registry.events
-    assert client.post(f"/api/plugins/campaign/assets/{a['id']}/review", json={"decision": "meh"}).status_code == 400
+    assert client.post(f"/api/plugins/campaign/assets/{a['id']}/review", json={"decision": "meh"}).status_code == 422
 
 
 def test_campaign_list_route_counts(client):
@@ -368,6 +372,7 @@ def test_the_expected_skills_ship():
         "shot-scripting",
         "asset-review",
         "montage-editing",
+        "produce-walkthrough-video",
     }
 
 
@@ -392,3 +397,51 @@ def test_webp_is_served_inline(client):
     a = store.add_asset(c["id"], "still", "t", path=str(p))
     r = client.get(f"/api/plugins/campaign/file/{a['id']}")
     assert r.headers["content-type"] == "image/webp" and "content-disposition" not in r.headers
+
+
+# ── QA-panel follow-ups on the routes ─────────────────────────────────────────
+def test_public_assets_never_carry_the_raw_filesystem_path(client, tmp_path):
+    a = _asset_with_file()
+    (row,) = client.get(f"/api/plugins/campaign/campaigns/{a['campaign_id']}/assets").json()["assets"]
+    assert row["path"] == str(Path(a["path"]).resolve().relative_to(paths.media_root().resolve()))
+    assert not row["path"].startswith("/") and row["has_file"] is True
+    out = _asset_with_file(tmp_path, name="x.webm", outside=True)
+    rows = client.get(f"/api/plugins/campaign/campaigns/{out['campaign_id']}/assets").json()["assets"]
+    assert rows[0]["path"] == "x.webm" and rows[0]["has_file"] is False, "outside the media dir: a bare name"
+
+
+def test_assets_route_404s_an_unknown_campaign(client):
+    assert client.get("/api/plugins/campaign/campaigns/999/assets").status_code == 404
+
+
+def test_review_decision_is_a_closed_set(client):
+    a = _asset_with_file()
+    store.update_asset(a["id"], status="ready_for_review")
+    r = client.post(f"/api/plugins/campaign/assets/{a['id']}/review", json={"decision": "APPROVE"})
+    assert r.status_code == 422 and store.get_asset(a["id"])["status"] == "ready_for_review"
+    assert client.post("/api/plugins/campaign/assets/99999/review", json={"decision": "approve"}).status_code == 400
+
+
+def _write_job(job_id, **fields):
+    from campaign import produce
+
+    d = produce._jobs_dir()
+    (d / f"{job_id}.json").write_text(json.dumps(fields))
+
+
+def test_videos_route_maps_a_job_and_skips_malformed_records(client):
+    import json as _json  # noqa: F401
+
+    _write_job("vid-aaaaaaaaaaaa", id="vid-aaaaaaaaaaaa", inputs={"title": "Walk"}, status="done", stage="delivering",
+               gates=[{"id": "resolution", "ok": True}], delivery={"assets": {"final": 7}, "links": {"final": "/media/x"}})  # fmt: skip
+    _write_job("vid-bbbbbbbbbbbb", id="vid-bbbbbbbbbbbb", status="running", progress="not-a-number", stage="x")
+    _write_job("vid-cccccccccccc", status="done")  # no id
+    jobs = client.get("/api/plugins/campaign/videos").json()["jobs"]
+    assert [j["id"] for j in jobs] == ["vid-aaaaaaaaaaaa"], "malformed records are skipped, not a 500"
+    j = client.get("/api/plugins/campaign/videos/vid-aaaaaaaaaaaa").json()
+    assert j["title"] == "Walk" and j["status"] == "done" and j["progress"] == 1.0
+    assert j["downloads"] == {"final": "/api/plugins/campaign/file/7"} and j["links"] == {"final": "/media/x"}
+    assert j["gates"] == [{"id": "resolution", "ok": True}]
+    assert client.get("/api/plugins/campaign/videos/vid-bbbbbbbbbbbb").status_code == 500
+    assert client.get("/api/plugins/campaign/videos/vid-000000000000").status_code == 404
+    assert client.get("/api/plugins/campaign/videos/../../etc").status_code == 404

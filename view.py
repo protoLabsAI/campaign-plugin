@@ -181,7 +181,7 @@ PAGE = r"""<!doctype html>
           (a.can_review && a.status !== "approved" ? `<button class="ok" data-act="approve">Approve</button>` : "") +
           (a.can_review && a.status !== "rejected" ? `<button class="no" data-act="reject">Reject…</button>` : "") +
           (a.status === "approved" ? `<button data-act="supersede">Supersede…</button>` : "") +
-          (a.path ? `<button data-act="copy">Copy path</button>` : "") +
+          (a.path ? `<button data-act="copy" title="relative to the campaign media folder">Copy path</button>` : "") +
         `</div>` +
         `<div class="reject"><textarea placeholder="What should change? (the agent reads this)"></textarea>` +
           `<div class="actions"><button class="no" data-act="reject-confirm">Reject</button>` +

@@ -55,6 +55,7 @@ from typing import Any, Callable
 
 from . import brand as brandmod
 from . import deps, limits, render, store
+from . import intro as intromod
 from . import outro as outromod
 
 Runner = Callable[[list[str], "str | None"], subprocess.CompletedProcess]
@@ -339,10 +340,21 @@ def parse_sequence(sequence: Any) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     outro_spec: dict[str, Any] = {}
     outro_n = 0
+    intro_spec: dict[str, Any] = {}
     for n, raw in enumerate(sequence, start=1):
         what = f"item {n}"
         if not isinstance(raw, dict):
             problems.append(f"{what}: each item is a mapping with `clip` or `card`, got {raw!r}")
+            continue
+        if "intro" in raw:
+            if n != 1:
+                problems.append(f"{what}: `intro` must be the FIRST item — it opens the cut")
+            elif set(raw) != {"intro"}:
+                problems.append(f"{what}: an intro item is just {{intro: true}} or {{intro: {{overrides}}}}")
+            elif len(sequence) < 2:
+                problems.append(f"{what}: an intro needs a shot after it to crossfade into")
+            else:
+                intro_spec = intromod.resolve(raw["intro"], problems)
             continue
         if "outro" in raw:
             if n != len(sequence):
@@ -487,6 +499,8 @@ def parse_sequence(sequence: Any) -> list[dict[str, Any]]:
             )
     if outro_spec and not problems:
         _append_outro(items, outro_spec, outro_n, problems)
+    if intro_spec and not problems:
+        _prepend_intro(items, intro_spec, problems)
     if problems:
         raise MontageError(problems)
     return items
@@ -521,6 +535,61 @@ def _caption(value: Any, what: str, problems: list[str]) -> dict[str, Any] | Non
         except MontageError as e:
             problems += e.problems
     return out
+
+
+def _prepend_intro(items: list[dict[str, Any]], o: dict[str, Any], problems: list[str]) -> None:
+    """Expand an intro (intro.py) in front of the parsed items: the bumper clip, the title card,
+    then a CROSSFADE into the first shot (never a cut). Each intro item carries ``intro_part``
+    so :func:`plan` can measure the intro and refuse one longer than its ``max_s``."""
+    if not items:
+        problems.append("item 1: an intro needs a shot after it")
+        return
+    first = items[0]
+    tr = dict(o["transition"])
+    if first.get("transition") is not None and first["transition"]["style"] not in intromod.CROSSFADES:
+        problems.append(
+            f"item {first['n']}: the intro crossfades into the first shot — its transition "
+            f"{first['transition']['style']!r} would be a hard cut; drop it or use fade"
+        )
+        return
+    first["transition"] = first.get("transition") or tr
+    first["intro_after"] = {"max_s": o["max_s"], "crossfade_s": first["transition"]["duration"]}
+    head: list[dict[str, Any]] = []
+    b = o.get("bumper")
+    if b:
+        head.append(
+            {
+                "kind": "clip", "n": 1, "asset_id": int(b.get("clip") or 0),
+                "fixed_path": str(Path(str(b["path"])).expanduser().resolve()) if b.get("path") else "",
+                "in": b["in"], "out": b["out"], "speed": 1.0, "label": "",
+                "theme_color": hex_color(b["theme_color"], "intro.bumper.theme_color") if b.get("theme_color") else None,
+                "transition": None, "fit": None, "focus": None, "hold": 0.0, "caption": None, "title": "intro bumper",
+                "intro_part": True,
+            }
+        )  # fmt: skip
+    c = o.get("card")
+    if c:
+        colors = {k: hex_color(c[k], f"intro.card.{k}") for k in ("bg", "fg", "accent") if c.get(k)}
+        dur = _num(c.get("duration", 3.0), "intro.card.duration", problems, *CARD_S) or 3.0
+        head.append(
+            {
+                "kind": "card",
+                "n": 1,
+                "card": {
+                    **{k: str(c.get(k) or "").strip() for k in ("title", "subtitle", "eyebrow", "url")},
+                    "cta": "",
+                    "colors": colors,
+                    "logo": bool(c.get("logo", True)),
+                    "template": c.get("template") or "title-slide",
+                },
+                "duration": dur,
+                "zoom": bool(c.get("zoom", False)),
+                "theme_color": None,
+                "transition": dict(tr) if head else None,
+                "intro_part": True,
+            }
+        )
+    items[:0] = head
 
 
 def _append_outro(items: list[dict[str, Any]], o: dict[str, Any], n: int, problems: list[str]) -> None:
@@ -579,7 +648,10 @@ def _clip_problem(campaign_id: int, it: dict[str, Any]) -> tuple[dict[str, Any] 
     if it.get("fixed_path"):  # the operator's outro bumper — a file, not a campaign asset
         p = Path(it["fixed_path"])
         if not p.is_file():
-            return None, f"item {it['n']} (outro bumper {p}): the file is gone — fix the outro setting"
+            return (
+                None,
+                f"item {it['n']} ({it.get('title') or 'bumper'} {p}): the file is gone — fix the intro/outro setting",
+            )
         return {"path": str(p), "status": "approved", "title": it.get("title") or p.name}, ""
     a = store.get_asset(it["asset_id"])
     if a is None or a["campaign_id"] != int(campaign_id):
@@ -747,6 +819,16 @@ def plan(items: list[dict[str, Any]], opts: dict[str, Any], look: dict[str, Any]
         starts.append(round(start, 4))
         acc = start + it["length"]
     total = round(acc, 4)
+    intro_s = None
+    k_first = next((k for k, it in enumerate(items) if it.get("intro_after")), None)
+    if k_first is not None:
+        guard = items[k_first]["intro_after"]
+        intro_s = intromod.intro_seconds(starts, k_first, guard["crossfade_s"])
+        if intro_s > guard["max_s"] + 1e-6:
+            problems.append(
+                f"the intro runs {intro_s:.2f}s until the first shot is fully up — over its max_s "
+                f"{guard['max_s']:g}s: shorten the bumper (in/out) or the title card's duration"
+            )
     if total > MAX_TOTAL_S:
         problems.append(f"the montage runs {total:.1f}s — at most {MAX_TOTAL_S:g}s in one render")
     row = limits.get(opts["limit"]) if opts.get("limit") else None
@@ -755,7 +837,7 @@ def plan(items: list[dict[str, Any]], opts: dict[str, Any], look: dict[str, Any]
             problems.append(f"output.limit {opts['limit']}: {v}")
     if problems:
         raise MontageError(problems)
-    return {"items": items, "transitions": [t for t in trs if t], "starts": starts, "total": total}
+    return {"items": items, "transitions": [t for t in trs if t], "starts": starts, "total": total, "intro_s": intro_s}
 
 
 # ── the filter graph ─────────────────────────────────────────────────────────
@@ -1423,6 +1505,7 @@ def render_montage(
             "unapproved": [it["asset_id"] for it in items if it["kind"] == "clip" and it.get("unapproved")],
             "inputs": sorted({it["asset_id"] for it in items if it["kind"] == "clip" and it["asset_id"]}),
             "caption_visible_s": next((it["caption_visible_s"] for it in items if "caption_visible_s" in it), None),
+            "intro_s": timeline.get("intro_s"),
         }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -1458,6 +1541,7 @@ def summarize(timeline: dict[str, Any]) -> list[dict[str, Any]]:
                 **{"in": it["in"], "out": it["out"]},
                 speed=it["speed"],
                 label=it.get("label", ""),
+                title=it.get("title", ""),
             )
         else:
             row["title"] = it["card"]["title"]

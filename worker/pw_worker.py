@@ -18,7 +18,7 @@ Usage (by the host, never by hand)::
 
 Job (``v: 1``) — secrets travel ONLY in this stdin payload, never argv or a file::
 
-    {"v": 1, "kind": "shoot" | "card", "report_path": "...",
+    {"v": 1, "kind": "shoot" | "card" | "probe", "report_path": "...",
      "fence": {"block_paths": ["<regex, case-insensitive, on every normalized form of the path>", ...]},   # REQUIRED
      # shoot: "script": {validated script, goto steps carry "_url"}, "out_dir": "...",
      #        "bearer": "<token or ''>"
@@ -374,12 +374,18 @@ REDACT_PRESET_PREFIXES: dict[str, list[str]] = {
 }
 
 
+MASK_RULES = {
+    "blur": "filter: blur(7px) !important;",
+    "hide": "visibility: hidden !important;",
+    "remove": "display: none !important;",
+}
+
+
 def mask_css(mask: dict[str, Any]) -> str:
-    rule = {
-        "blur": "filter: blur(7px) !important;",
-        "hide": "visibility: hidden !important;",
-        "remove": "display: none !important;",
-    }[mask.get("mode", "blur")]
+    mode = mask.get("mode", "blur")
+    rule = MASK_RULES.get(mode) if isinstance(mode, str) else None
+    if rule is None:
+        raise ValueError(f"mask mode {mode!r} is not one of {', '.join(MASK_RULES)}")
     return "\n".join(f"{sel} {{ {rule} }}" for sel in mask["selectors"])
 
 
@@ -1324,9 +1330,36 @@ def run_card(job: dict[str, Any], playwright_factory: Callable | None = None) ->
     return {"path": str(final), "attempts": attempts, "fonts_loaded": fonts_loaded}, ""
 
 
+def run_probe(job: dict[str, Any], playwright_factory: Callable | None = None) -> tuple[dict[str, Any], str]:
+    """A recording's PREFLIGHT: plain HTTP GETs through Playwright's request context — no
+    browser is launched. Same fence as a take; the bearer goes only to ``base_url``'s origin."""
+    fence = _fence_patterns(job)
+    home = origin(str(job.get("base_url") or ""))
+    bearer = str(job.get("bearer") or "")
+    out: list[dict[str, Any]] = []
+    factory = playwright_factory or _default_factory
+    with factory() as pw:
+        ctx = pw.request.new_context()
+        try:
+            for url in job.get("urls") or []:
+                url = str(url)
+                if path_blocked(url, fence):
+                    out.append({"url": url, "error": "blocked by the fence"})
+                    continue
+                headers = {"Authorization": f"Bearer {bearer}"} if bearer and home and origin(url) == home else {}
+                try:
+                    r = ctx.get(url, headers=headers, timeout=8000, max_redirects=5)
+                    out.append({"url": url, "status": int(r.status)})
+                except Exception as e:  # noqa: BLE001 — refused / DNS / timeout
+                    out.append({"url": url, "error": first_line(e)})
+        finally:
+            ctx.dispose()
+    return {"responses": out}, ""
+
+
 # ── dispatch ───────────────────────────────────────────────────────────────────
 
-RUNNERS = {"shoot": run_shoot, "card": run_card}
+RUNNERS = {"shoot": run_shoot, "card": run_card, "probe": run_probe}
 
 
 def _scrub(value: Any, secret: str) -> Any:
