@@ -78,8 +78,8 @@ loads nothing from the network at all.
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.4.0`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.4.0`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.4.1`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.4.1`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —
@@ -452,8 +452,8 @@ campaign_video_status(job_id="vid-3f9c…", wait_s=300)   # stage, %, gates, fil
 ```
 
 **Preflight** (before any browser starts): the script's `base_url` must be THIS agent's console
-(compared with core's `sdk.console_url()` when present, else `A2A_PUBLIC_URL` / the bound port
-— loopback spellings equal), its first page must answer 200, and its `bearer_env` /
+(compared with core's `sdk.console_url()` when present — on a fleet member that is the member's
+own console, never the hub's — else `A2A_PUBLIC_URL` / the bound port; loopback spellings equal), its first page must answer 200, and its `bearer_env` /
 `storage_state` token must pass one authenticated GET. Otherwise it refuses at once, saying
 what to fix. `allow_other_console=true` is the explicit opt-in for recording another console.
 

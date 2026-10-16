@@ -365,6 +365,52 @@ def test_an_unknown_own_console_needs_the_opt_in(world):
     assert world.shots == 0
 
 
+def _fake_host(monkeypatch, *, console_url=None, port=7870):
+    import sys
+    import types
+
+    fake = types.ModuleType("graph.sdk")
+    if console_url is not None:
+        fake.console_url = console_url
+    pkg = types.ModuleType("graph")
+    pkg.sdk = fake
+    monkeypatch.setitem(sys.modules, "graph", pkg)
+    monkeypatch.setitem(sys.modules, "graph.sdk", fake)
+    monkeypatch.setitem(sys.modules, "runtime", types.ModuleType("runtime"))
+    monkeypatch.setitem(
+        sys.modules, "runtime.state", types.SimpleNamespace(STATE=types.SimpleNamespace(active_port=port))
+    )
+    return fake
+
+
+def test_own_console_prefers_the_core_seam_exclusively(monkeypatch):
+    # protoAgent#4256: on a fleet member A2A_PUBLIC_URL is the HUB's tenant path and active_port's
+    # class default is 7870 — neither may count as "ours" once the core says which console it is.
+    monkeypatch.setenv("A2A_PUBLIC_URL", "https://hub.example/agents/w1")
+    _fake_host(monkeypatch, console_url=lambda: "http://127.0.0.1:7953/")
+    assert produce.own_console_urls() == ["http://127.0.0.1:7953"]
+    # the remote-caller links still lead with the public URL
+    assert produce.link_bases() == ["https://hub.example/agents/w1", "http://127.0.0.1:7953"]
+
+
+def test_own_console_seam_none_means_unknown(monkeypatch):
+    monkeypatch.delenv("A2A_PUBLIC_URL", raising=False)
+    _fake_host(monkeypatch, console_url=lambda: None)
+    assert produce.own_console_urls() == []
+
+
+def test_own_console_on_an_older_core_keeps_the_cards_rule(monkeypatch):
+    monkeypatch.setenv("A2A_PUBLIC_URL", "https://agent.example/")
+    _fake_host(monkeypatch, port=7953)
+    assert produce.own_console_urls() == ["https://agent.example", "http://127.0.0.1:7953"]
+
+    def broken():
+        raise RuntimeError("boom")
+
+    _fake_host(monkeypatch, console_url=broken, port=7953)
+    assert produce.own_console_urls() == ["https://agent.example", "http://127.0.0.1:7953"]
+
+
 def test_an_unreachable_or_broken_console_fails_fast(world):
     world.codes.pop("/app/")
     with pytest.raises(produce.ProduceError, match="unreachable .* Nothing was recorded"):

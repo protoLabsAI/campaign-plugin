@@ -190,20 +190,28 @@ AUTH_PROBE = "/api/campaign-preflight"
 
 
 def own_console_urls() -> list[str]:
-    """The URL(s) THIS agent's console serves on, from the host — ``graph.sdk.console_url()``
-    when the core has it (protoAgent#4256), else what core advertises in its A2A card:
-    ``A2A_PUBLIC_URL`` and the actually-bound loopback port. ``[]`` with no host."""
+    """The URL(s) THIS agent's console serves on, from the host. ``graph.sdk.console_url()``
+    when the core has it (protoAgent#4256) is authoritative — ``A2A_PUBLIC_URL``, else the
+    running server's bound host/port, and on a hub-spawned fleet member the member's OWN
+    console (not the hub's ``/agents/<id>`` tenant path, whose origin is the hub's own agent);
+    its ``None`` means unknown, ``[]``. An older core without the seam: what core advertises
+    in its A2A card — ``A2A_PUBLIC_URL`` and the actually-bound loopback port. ``[]`` with no
+    host."""
     import os
 
-    out: list[str] = []
     try:
         from graph import sdk  # host import — lazy
 
         fn = getattr(sdk, "console_url", None)
-        if callable(fn) and fn():
-            out.append(str(fn()))
     except Exception:  # noqa: BLE001
-        pass
+        fn = None
+    if callable(fn):
+        try:
+            url = str(fn() or "").strip().rstrip("/")
+            return [url] if url else []
+        except Exception:  # noqa: BLE001 — a broken seam: the card's rule below
+            pass
+    out: list[str] = []
     pub = (os.environ.get("A2A_PUBLIC_URL") or "").strip().rstrip("/")
     if pub:
         out.append(pub)
@@ -216,6 +224,16 @@ def own_console_urls() -> list[str]:
     except Exception:  # noqa: BLE001
         pass
     return out
+
+
+def link_bases() -> list[str]:
+    """Bases to make a ``/media`` link absolute for a REMOTE caller: the public URL first
+    (``A2A_PUBLIC_URL`` — on a fleet member the hub path a remote can reach), then this
+    agent's own console URL(s)."""
+    import os
+
+    pub = (os.environ.get("A2A_PUBLIC_URL") or "").strip().rstrip("/")
+    return ([pub] if pub else []) + [u for u in own_console_urls() if u != pub]
 
 
 def _origin_key(url: str) -> tuple[str, str, int] | None:
@@ -1152,7 +1170,7 @@ def summary(job: dict[str, Any]) -> str:
         lines.append("\nWhy it isn't done:")
         lines += [f"- {r}" for r in job["reasons"]]
     d = job.get("delivery") or {}
-    bases = own_console_urls()
+    bases = link_bases()
     if d.get("files"):
         lines.append("\nFiles:")
         for k, p in d["files"].items():
