@@ -22,7 +22,7 @@ anything you'd write into their repo).
 ## The clip rules (Josh's, non-negotiable)
 
 - **Continuous, no jump cuts.** One take, one stretch. Speed ramps only, never cutting action
-  out. The intro CROSSFADES into the first settled frame; the outro begins after the final
+  out. The intro reveals the first settled frame with the signature edge sweep (bumper → title is the boot seam); the outro begins after the final
   caption has been read.
 - **The plugin view on camera.** The view the action lands in (Atlas, for a walkthrough) is on
   screen, live, the whole time — not a screenshot, not a mock.

@@ -291,7 +291,7 @@ campaign_storyboard(campaign_id, sequence, output={...})
 
 `output` (a mapping, or just a preset name): `name`, `title`, `preset` (`landscape`
 1920×1080 · `vertical` 1080×1920 · `square` 1080×1080) or `size: WxH`, `fit`
-(`auto` · `letterbox` · `crop`), `fps` (30), `background`, `transition` (`colorwipe`) and
+(`auto` · `letterbox` · `crop`), `fps` (30), `background`, `transition` (`edge_sweep`), `reduced_motion` and
 `transition_duration` (0.45 s), `limit` / `max_bytes`, `crf`, `poster`, `poster_at`, `gif`,
 `gif_limit`, `gif_width`, `label_font`, `card_engine` (`auto` · `html` · `ffmpeg`),
 `label_engine` (`auto` · `drawtext` · `html` · `none`). Unknown keys anywhere are refused, with
@@ -305,7 +305,19 @@ every problem listed at once.
   square cut a clip is centre-cropped — or cropped to its `focus` rect (source pixels), grown
   to the canvas's shape and kept inside the frame (a focus outside the source is refused).
   Every item is normalised to the canvas's size, fps, square pixels, yuv420p and one timebase.
-- **Transitions** (into an item): `colorwipe` — a full-frame bar in the NEXT item's
+- **Signature transitions** (the default): `edge_sweep` — 600 ms; both shots stay still and the
+  incoming one is revealed left → right behind a narrow brand-accent leading band (32 px at 2560
+  wide) — for beat → beat and chapter changes; `boot_seam` — 400 ms; a horizontal seam opens
+  vertically onto the incoming shot, edged by two accent lines that dissolve as it completes — for
+  brand boundaries (the intro's splash → title, the outro's content → bumper → CTA). Both follow
+  one deterministic contract shared with the console (`transitions.py`, `transitions.json`;
+  protoContent#606): exact easeInOutCubic, `N = round(ms·fps/1000)` frames evaluated at
+  `u = k/N`, frame `k = 0` is the outgoing shot and the incoming one owns `u = 1`, geometry
+  normalized to the canvas, edges antialiased by pixel coverage, the accent from the brand
+  snapshot. Their length is fixed (a `duration` is refused); every item is quantized to whole
+  frames so they land frame-exact. `reduced_motion: true` (output) turns every moving transition
+  into a cut — dissolves stay — and keeps the surrounding holds.
+- **Other transitions** (into an item): `colorwipe` — a full-frame bar in the NEXT item's
   `theme_color` (a card's `accent`; else the brand accent) sweeps across, covers the outgoing
   shot, then sweeps on and reveals the incoming one (two hard-edged `xfade` wipes through a
   `color` source; `colorwipe_left`/`_up`/`_down` change direction); `cut`; or an xfade style —

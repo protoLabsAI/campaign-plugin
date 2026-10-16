@@ -1092,9 +1092,11 @@ def build_tools(registry):
         LAST, {outro: true} to append the operator's brand outro (beat on the last clip, bumper,
         CTA card; it refuses a cut that trims into the last clip's final caption). A clip is ONE continuous stretch: in/out trim only
         its ends, speed is one uniform factor (no ramps, no interior cuts). Transitions (into an
-        item): colorwipe (default — a full-frame bar in the NEXT item's theme_color sweeps across
-        and reveals it; also colorwipe_left/_up/_down), cut, or an xfade style (fade, wipeleft,
-        slideleft, smoothleft, circleopen, …). output (mapping, or just a preset name): name,
+        item): edge_sweep (default — the 600 ms signature: the next shot revealed left → right
+        behind a brand-accent band), boot_seam (400 ms, brand boundaries: a seam opening onto the
+        next shot) — both fixed-length, no duration — colorwipe (a bar in the NEXT item's
+        theme_color; also colorwipe_left/_up/_down), cut, or an xfade style (fade, wipeleft,
+        slideleft, smoothleft, circleopen, …); output reduced_motion: true makes moving ones cuts. output (mapping, or just a preset name): name,
         preset landscape 1920x1080 (canonical — 1920x1080 clips pass through untouched) |
         vertical 1080x1920 | square 1080x1080, fit auto|letterbox|crop, fps, transition,
         transition_duration (0.45), limit (a hard-limit id — duration and size are enforced),

@@ -210,7 +210,7 @@ def test_one_request_runs_to_a_delivered_self_reviewed_video(world, tmp_path):
         "vfr-protoagent-in-85-seconds-gh.mp4", "vfr-protoagent-in-85-seconds-sheet.png",
         "vfr-protoagent-in-85-seconds-text-crop.png", "vfr-protoagent-in-85-seconds.mp4"]  # fmt: skip
     sheet = Path(d["files"]["sheet"]).read_text()
-    for label in ("intro bumper", "crossfade in", "first settled frame", "final caption / beat"):
+    for label in ("intro bumper", "transition in", "first settled frame", "final caption / beat"):
         assert label in sheet, f"the contact sheet has a {label!r} tile"
     (sess, jid, text) = world.notified[0]
     assert sess == "sess-1" and jid == job["id"] and "save_file_artifact" in text
