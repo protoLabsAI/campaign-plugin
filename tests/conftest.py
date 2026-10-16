@@ -366,6 +366,36 @@ class FakePage:
         self.calls.append(("set_content", len(html)))
 
 
+class FakeCDPSession:
+    """``context.new_cdp_session(page)`` — a screencast that emits the playwright's queued
+    ``screencast`` frames ([(dt_s after start, data bytes, w, h)]) as soon as it starts."""
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+        self.sent: list[tuple[str, dict]] = []
+        self.handlers: dict[str, list] = {}
+
+    def on(self, event, handler):
+        self.handlers.setdefault(event, []).append(handler)
+
+    def send(self, method, params=None):
+        import base64
+        import time as _time
+
+        self.sent.append((method, dict(params or {})))
+        if method == "Page.startScreencast":
+            now = _time.time()
+            for n, (dt, data, w, h) in enumerate(self.ctx.browser.pw.screencast):
+                ev = {
+                    "data": base64.b64encode(data).decode(),
+                    "sessionId": n + 1,
+                    "metadata": {"timestamp": now + dt, "deviceWidth": w, "deviceHeight": h},
+                }
+                for fn in self.handlers.get("Page.screencastFrame", []):
+                    fn(ev)
+        return {}
+
+
 class FakeContext:
     def __init__(self, browser, kw):
         self.browser, self.kw = browser, kw
@@ -387,6 +417,10 @@ class FakeContext:
     def new_page(self, **kw):
         self.page = FakePage(self)
         return self.page
+
+    def new_cdp_session(self, page):
+        self.cdp = FakeCDPSession(self)
+        return self.cdp
 
     def close(self):
         if self.page and self.page.video:
@@ -442,6 +476,9 @@ class FakePlaywright:
         self.browser = None
         self.png_size = png_size
         self.jpeg_sizes = list(jpeg_sizes or [])
+        # capture: device — the frames the fake screencast sends: (dt_s, bytes, w, h)
+        self.screencast = [(0.05, b"\xff\xd8f0", 2560, 1600), (0.5, b"\xff\xd8f1", 2560, 1600),
+                           (0.6, b"\xff\xd8f2", 2560, 1600)]  # fmt: skip
 
     def screenshot_bytes(self, kw):
         if kw.get("type") == "jpeg":

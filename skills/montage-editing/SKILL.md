@@ -25,6 +25,9 @@ recording — the montage only trims the ends, sets one speed, and joins beats w
   full frame, no crop.** Every beat then shares one geometry: 1920×1080 clips pass straight
   through the landscape cut untouched (no scaling, no letterbox) and transitions line up pixel
   for pixel. Anything else is letterboxed and the montage reply names it — re-record it.
+  For crisper text, record `viewport: {width: 1280, height: 720}`, `device_scale_factor: 2`,
+  `capture: device` instead: the 2560×1440 take downscales cleanly onto 1920×1080 (no warning),
+  or passes straight through a `size: 2560x1440` montage.
 - **A different app theme per beat** (different accent + background). Note each beat's accent
   as its `theme_color` — the colour wipe INTO that beat sweeps in that colour, so the cut
   itself announces "new theme, new idea".

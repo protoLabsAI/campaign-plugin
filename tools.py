@@ -742,8 +742,9 @@ def build_tools(registry):
         overrides: dict | str = "",
     ) -> str:
         """Record a take: run a shot script in headless Chromium (Playwright) with video on,
-        and register the .webm, the named stills, and a timing log of every mark as campaign
-        assets (status 'captured'). Pass script_id for a saved script, or script (YAML/JSON) to
+        and register the .webm (or, with `capture: device`, a device-pixel H.264 .mp4 — e.g.
+        2560×1600 from a 1280×800 viewport at device_scale_factor 2, for crisp small text), the
+        named stills, and a timing log of every mark as campaign assets (status 'captured'). Pass script_id for a saved script, or script (YAML/JSON) to
         validate, save and run in one go. Pass asset_id to fill a planned asset with this take.
         overrides={N: change} fixes step N (1-based, as errors number them) without resubmitting
         the script: a whole step ({"click": {"role": "button", "name": "Save"}}) replaces it,
@@ -865,7 +866,8 @@ def build_tools(registry):
             f"Recorded take → asset #{take['id']} ({take['duration_s']:.1f}s, {take['width']}×{take['height']}, "
             f"{limits.human_bytes(take['size_bytes'])})\n"
             f"- video: {res['video']}\n- timing log: {res['timing']}\n- marks: {marks}\n"
-            f"- stills: {', '.join(f'#{i}' for i in still_ids) or 'none'}\n"
+            + (f"- capture: {res['capture_note']}\n" if res.get("capture_note") else "")
+            + f"- stills: {', '.join(f'#{i}' for i in still_ids) or 'none'}\n"
             + "".join(f"- {n}\n" for n in superseded)
             + "\n"
             "LOOK at it before rendering — campaign_view each still (asset_id) and the clip around its marks "

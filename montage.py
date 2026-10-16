@@ -65,7 +65,9 @@ PRESETS: dict[str, tuple[int, int]] = {
 }
 FITS = ("auto", "letterbox", "crop")
 # The canonical canvas: beats recorded at a 1920×1080 viewport (device scale 1, full frame)
-# pass straight through — no scaling, no letterbox — so every cut lines up pixel for pixel.
+# pass straight through — no scaling, no letterbox — so every cut lines up pixel for pixel. A
+# ``capture: device`` beat of the same shape (1280×720 at scale 2 → 2560×1440) is cleanly
+# downscaled onto it — or passes through a ``size: 2560x1440`` montage untouched.
 CANONICAL = (1920, 1080)
 FOCUS_KEYS = {"x", "y", "w", "h"}
 MIN_FOCUS = 64
@@ -670,6 +672,14 @@ def frame_plan(it: dict[str, Any], opts: dict[str, Any]) -> dict[str, Any]:
     return {"mode": "letterbox", "rect": None}
 
 
+def hidpi_fit(sw: int, sh: int, opts: dict[str, Any]) -> bool:
+    """A source with the canvas's shape and at least its size — a ``capture: device`` take (a
+    1280×720 viewport at scale 2 → 2560×1440 on a 1920×1080 canvas) — is only DOWNscaled: no
+    letterbox, no crop, and sharper than a 1920×1080 dsf-1 take. Nothing to warn about."""
+    W, H = opts["width"], opts["height"]
+    return sw >= W and sh >= H and abs(sw / sh - W / H) < 0.004
+
+
 def framing(items: list[dict[str, Any]], opts: dict[str, Any]) -> list[str]:
     """Decide each clip's frame plan; validate focus areas. Returns warnings that NAME every
     clip that isn't on the canonical canvas (it gets scaled, and letterboxed if its shape differs)."""
@@ -691,13 +701,14 @@ def framing(items: list[dict[str, Any]], opts: dict[str, Any]) -> list[str]:
                 )
                 continue
         it["frame"] = frame_plan(it, opts)
-        if sw and sh and (sw, sh) != CANONICAL and it["frame"]["mode"] != "pass":
+        if sw and sh and (sw, sh) != CANONICAL and it["frame"]["mode"] != "pass" and not hidpi_fit(sw, sh, opts):
             how = {"letterbox": "letterboxed", "crop": "centre-cropped", "focus": "cropped to its focus"}.get(
                 it["frame"]["mode"], "passed through"
             )
             warnings.append(
                 f"{what} is {sw}×{sh}, not the canonical {CANONICAL[0]}×{CANONICAL[1]} — {how} and scaled; "
-                "re-record it at a 1920×1080 viewport, device_scale_factor 1, full frame"
+                "re-record it at a 1920×1080 viewport, device_scale_factor 1, full frame — or, for crisper "
+                "text, a 1280×720 viewport at device_scale_factor 2 with `capture: device` (a 2560×1440 take)"
             )
     if problems:
         raise MontageError(problems)

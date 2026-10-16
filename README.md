@@ -10,6 +10,9 @@ product: the planning + production half of a "Brand & Launch" agent.
 - **Shot scripts → takes** — a declarative YAML script (viewport, colour scheme, timezone,
   locale, auth, steps) recorded by headless Chromium through Playwright: `.webm` + named
   stills + a timing log of every `mark`. Same script, same take. Redaction built in.
+  `capture: device` records in device pixels instead — a 1280×800 viewport at scale 2 becomes a
+  2560×1600 H.264 take (CDP screencast frames, held across idle stretches, assembled at a
+  constant frame rate) so small text stays crisp without shrinking the UI.
 - **Renders** — ffmpeg trims the head/tail by mark, speed-ramps dead time, crops, and encodes
   H.264 mp4 (yuv420p, faststart) and palette-optimised GIFs, stepping quality down until the
   file fits its **hard** limit — and refusing to call it ready if it still doesn't. Clips are
@@ -123,7 +126,8 @@ subagent (allowlist: `campaign_*`, `browser_open/snapshot/screenshot/get_text`,
 name: install-from-url
 base_url: http://localhost:7871
 viewport: {width: 1440, height: 900}
-device_scale_factor: 2          # sharpens stills; the VIDEO records at CSS pixels
+device_scale_factor: 2          # sharpens stills — and, with capture: device, the video
+capture: device                 # 2880×1800 H.264 take: crisp small text, normal-size UI
 color_scheme: dark
 timezone_id: UTC
 locale: en-US

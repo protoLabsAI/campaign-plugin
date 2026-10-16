@@ -443,15 +443,116 @@ def guarded_init_js(source: str, origin_: str) -> str:
 
 
 def video_size(script: dict[str, Any]) -> dict[str, int]:
-    """The recording size: the viewport in CSS pixels.
+    """The recording size: the viewport in CSS pixels — or, for ``capture: device``, in DEVICE
+    pixels (viewport × ``device_scale_factor``, even).
 
-    Playwright's screencast captures CSS-pixel frames whatever ``device_scale_factor`` says;
-    asking for a bigger video does NOT upscale them — it pads the frame with grey (measured on
-    Chromium 153 / Playwright 1.63). So the video is the viewport, and ``device_scale_factor``
-    sharpens the ``screenshot`` stills only.
+    ``capture: css`` (the default) is Playwright's ``recordVideo``. Re-measured 2026-10-15
+    (Chromium headless shell 1243 / Playwright 1.63): with ``--force-device-scale-factor`` (see
+    :func:`launch_args`) a ``record_video_size`` of viewport × dsf DOES fill the frame with real
+    device pixels — the old "pads with grey" finding predates that flag. It still isn't usable
+    for crisp text: Playwright pipes the frames through its own ffmpeg with fixed, unconfigurable
+    settings (VP8, ``-b:v 1M -deadline realtime -speed 8 -threads 1``), so a 2560×1600 take came
+    out at ~0.75 Mbit/s and smears small text in motion. So the default take stays at CSS pixels,
+    and ``capture: device`` is our own pipeline — :class:`ScreencastRecorder` here, frame assembly
+    on the host (``capture.py``). A CSS ``zoom``/transform hack was rejected: it changes layout
+    and hit-testing in the app being filmed, and iframes (plugin views) don't inherit it.
     """
     vp = script["viewport"]
+    if (script.get("capture") or {}).get("scale") == "device":
+        dsf = float(script.get("device_scale_factor") or 1)
+        return {"width": int(round(vp["width"] * dsf)) // 2 * 2, "height": int(round(vp["height"] * dsf)) // 2 * 2}
     return {"width": int(vp["width"]) // 2 * 2, "height": int(vp["height"]) // 2 * 2}
+
+
+# A device-pixel take's frames wait on disk until the host assembles them (JPEG, ~0.2–0.4 MB at
+# 2560×1600 → ~0.3–0.6 GB a minute of constant motion). Past this budget new frames are dropped
+# (the last one is held) and the take says so — a runaway 15-minute shoot can't fill the disk.
+MAX_FRAME_BYTES = 3_000_000_000
+
+
+class ScreencastRecorder:
+    """``capture: device`` — DEVICE-pixel frames over CDP ``Page.startScreencast``.
+
+    Chromium sends a frame only when the page's pixels change (on "damage"), each stamped with
+    the moment it was composited (``metadata.timestamp``, epoch seconds). Every frame is written
+    as a JPEG with its time on the take's clock (seconds since page creation — the clock marks
+    use) and acked (Chromium sends no more until it is). Idle stretches simply have no frames:
+    the host's assembly (``capture.cfr_schedule``) holds the last frame across them, from t=0
+    (the first frame is held back to the start) to ``end_s`` (the last is held to the end).
+
+    Frames arrive as events, which the sync API dispatches whenever the step loop is inside a
+    Playwright call — a ``hold`` is ``page.wait_for_timeout``, so they keep flowing; the
+    timestamps come from Chromium, so a late dispatch never shifts a frame in time."""
+
+    def __init__(self, context, page, frames_dir: Path, size: dict[str, int], quality: int,
+                 max_bytes: int = MAX_FRAME_BYTES):  # fmt: skip
+        self.context, self.page = context, page
+        self.dir = Path(frames_dir)
+        self.size, self.quality, self.max_bytes = size, int(quality), int(max_bytes)
+        self.frames: list[list[Any]] = []  # [file name, t]
+        self.bytes = 0
+        self.dropped = 0
+        self.errors = 0
+        self.wall0 = 0.0
+        self.session = None
+
+    def start(self, wall0: float) -> None:
+        self.wall0 = wall0
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.session = self.context.new_cdp_session(self.page)
+        self.session.on("Page.screencastFrame", self._on_frame)
+        self.session.send(
+            "Page.startScreencast",
+            {
+                "format": "jpeg",
+                "quality": self.quality,
+                "maxWidth": self.size["width"],
+                "maxHeight": self.size["height"],
+                "everyNthFrame": 1,
+            },
+        )
+
+    def _on_frame(self, ev: dict[str, Any]) -> None:
+        import base64
+
+        try:
+            meta = ev.get("metadata") or {}
+            ts = meta.get("timestamp")
+            t = (float(ts) if ts else time.time()) - self.wall0
+            data = base64.b64decode(ev.get("data") or "")
+            if self.bytes + len(data) > self.max_bytes:
+                self.dropped += 1
+            elif data:
+                name = f"f{len(self.frames):06d}.jpg"
+                (self.dir / name).write_bytes(data)
+                self.bytes += len(data)
+                self.frames.append([name, round(max(0.0, t), 4)])
+        except Exception:  # noqa: BLE001 — one bad frame must not stop the take
+            self.errors += 1
+        finally:
+            try:
+                self.session.send("Page.screencastFrameAck", {"sessionId": ev.get("sessionId")})
+            except Exception:  # noqa: BLE001 — the page may be closing
+                pass
+
+    def stop(self, end_s: float) -> dict[str, Any]:
+        """Stop the screencast and write ``frames.json`` (the host's assembly input)."""
+        try:
+            if self.session is not None:
+                self.session.send("Page.stopScreencast")
+        except Exception:  # noqa: BLE001 — a crashed page still leaves the frames it sent
+            pass
+        manifest = {
+            "dir": str(self.dir),
+            "frames": self.frames,
+            "end_s": round(end_s, 4),
+            "size": self.size,
+            "frame_bytes": self.bytes,
+            "dropped": self.dropped,
+            "errors": self.errors,
+        }
+        (self.dir / "frames.json").write_text(json.dumps(manifest), encoding="utf-8")
+        return manifest
 
 
 def launch_args(script: dict[str, Any]) -> list[str]:
@@ -883,6 +984,11 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
     failure_png = ""
     video_path = ""
     t0 = time.monotonic()
+    capture = script.get("capture") or {"scale": "css"}
+    device = capture.get("scale") == "device"
+    recorder: ScreencastRecorder | None = None
+    frames_manifest = ""
+    capture_note = ""
 
     def remaining_ms() -> float:
         return max(0.0, (deadline - time.monotonic()) * 1000)
@@ -897,11 +1003,12 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
                 "color_scheme": script["color_scheme"],
                 "timezone_id": script["timezone_id"],
                 "locale": script["locale"],
-                "record_video_dir": str(video_tmp),
-                "record_video_size": video_size(script),
                 # Service workers would answer requests outside the route guards below.
                 "service_workers": "block",
             }
+            if not device:
+                ctx_kw["record_video_dir"] = str(video_tmp)
+                ctx_kw["record_video_size"] = video_size(script)
             if script["auth"].get("storage_state"):
                 ctx_kw["storage_state"] = str(Path(script["auth"]["storage_state"]).expanduser())
             context = browser.new_context(**ctx_kw)
@@ -923,7 +1030,13 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
                 if script.get("redact"):
                     context.add_init_script(redact_init_js(redact_rules(script["redact"])))
                 page = context.new_page()
+                if device:
+                    recorder = ScreencastRecorder(
+                        context, page, out_dir / ".frames", video_size(script), capture.get("quality", 92)
+                    )
                 t0 = time.monotonic()
+                if recorder is not None:
+                    recorder.start(time.time())
                 try:
                     for step in script["steps"]:
                         if remaining_ms() <= 0:
@@ -961,6 +1074,14 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
                 finally:
                     # A failed take keeps its recording: read the video's path, then close the
                     # page so Playwright flushes the file — whatever the step loop did.
+                    if recorder is not None:
+                        man = recorder.stop(time.monotonic() - t0)
+                        frames_manifest = str(Path(man["dir"]) / "frames.json")
+                        if man["dropped"]:
+                            capture_note = (
+                                f"{man['dropped']} frames past the {MAX_FRAME_BYTES // 10**9} GB frame budget were "
+                                "dropped — the last kept frame is held to the end; shoot a shorter take"
+                            )
                     try:
                         if page.video:
                             video_path = str(page.video.path())
@@ -1000,6 +1121,7 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
         "viewport": script["viewport"],
         "device_scale_factor": script["device_scale_factor"],
         "video_size": video_size(script),
+        "capture": capture,
         "duration_s": duration,
         "marks": marks,
         "screenshots": stills,
@@ -1019,6 +1141,10 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
         "error": error,
         "failed_step": failed_step,
         "failure_png": failure_png,
+        # capture: device — the host assembles these frames into <name>.mp4 (capture.py).
+        "frames": frames_manifest,
+        "capture": capture,
+        "capture_note": capture_note,
     }
     return result, error
 
