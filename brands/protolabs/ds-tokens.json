@@ -1,0 +1,150 @@
+{
+  "color": {
+    "brand": {
+      "lavender": "#9b87f2",
+      "lavenderLight": "#b8a6f5",
+      "lavenderDeep": "#5b3fc9",
+      "indigo": "#6366f1",
+      "indigoBright": "#818cf8",
+      "indigoDeep": "#4f46e5"
+    },
+    "bg": "#0a0a0c",
+    "bgRaised": "#131316",
+    "bgSubtle": "#1c1c22",
+    "bgHover": "#19191d",
+    "bgInset": "#060608",
+    "overlay": "rgba(0, 0, 0, 0.6)",
+    "fg": "#ededed",
+    "fgMuted": "#a1a1aa",
+    "fgSubtle": "#71717a",
+    "fgOnAccent": "#0a0a0c",
+    "border": "rgba(255, 255, 255, 0.08)",
+    "borderStrong": "rgba(255, 255, 255, 0.18)",
+    "accent": "#9b87f2",
+    "accentHover": "#b8a6f5",
+    "accentFg": "#b8a6f5",
+    "focus": "#9b87f2",
+    "status": {
+      "success": "oklch(0.72 0.13 145)",
+      "warning": "oklch(0.78 0.12 75)",
+      "error": "oklch(0.64 0.16 25)",
+      "info": "oklch(0.68 0.12 230)"
+    },
+    "chart": {
+      "series1": "oklch(0.72 0.14 290)",
+      "series2": "oklch(0.70 0.12 250)",
+      "series3": "oklch(0.72 0.13 170)",
+      "series4": "oklch(0.74 0.14 135)",
+      "series5": "oklch(0.78 0.12 80)",
+      "series6": "oklch(0.70 0.14 30)",
+      "series7": "oklch(0.68 0.12 210)",
+      "series8": "oklch(0.70 0.13 320)",
+      "grid": "rgba(255, 255, 255, 0.06)",
+      "axis": "#a1a1aa"
+    }
+  },
+  "gradient": {
+    "brand": "linear-gradient(135deg, var(--pl-color-accent) 0%, var(--pl-color-brand-indigo-bright) 50%, var(--pl-color-brand-indigo) 100%)",
+    "brandLight": "linear-gradient(135deg, var(--pl-color-accent) 0%, var(--pl-color-brand-indigo) 50%, var(--pl-color-brand-indigo-deep) 100%)"
+  },
+  "shadow": {
+    "glow": "0 0 80px rgba(155, 135, 242, 0.08)",
+    "card": "0 1px 3px rgba(0, 0, 0, 0.35)",
+    "popover": "0 8px 28px rgba(0, 0, 0, 0.5)"
+  },
+  "font": {
+    "sans": "\"Geist\", system-ui, -apple-system, sans-serif",
+    "mono": "\"Geist Mono\", ui-monospace, \"SF Mono\", monospace",
+    "baseSize": "14px",
+    "size": {
+      "3xs": "10px",
+      "2xs": "11px",
+      "xs": "12px",
+      "sm": "13px",
+      "base": "14px",
+      "lg": "16px",
+      "xl": "18px"
+    },
+    "lineHeightBody": "1.6",
+    "lineHeightHeading": "1.2",
+    "weight": {
+      "body": "440",
+      "medium": "500",
+      "semibold": "600"
+    }
+  },
+  "radius": "4px",
+  "radiusMd": "6px",
+  "radiusLg": "8px",
+  "radiusXl": "12px",
+  "radiusPill": "999px",
+  "space": {
+    "1": "4px",
+    "2": "8px",
+    "3": "12px",
+    "4": "16px",
+    "5": "20px",
+    "6": "24px",
+    "8": "32px",
+    "12": "48px",
+    "0_5": "2px",
+    "1_5": "6px",
+    "2_5": "10px"
+  },
+  "borderWidth": "1px",
+  "motion": {
+    "fast": "120ms",
+    "base": "200ms",
+    "theme": "400ms",
+    "loading": "1000ms",
+    "status": "2000ms",
+    "ease": "ease",
+    "easeInOut": "ease-in-out",
+    "linear": "linear"
+  },
+  "light": {
+    "color": {
+      "bg": "#f6f7f9",
+      "bgRaised": "#ffffff",
+      "bgSubtle": "#eceef2",
+      "bgHover": "#e4e7ec",
+      "bgInset": "#eef0f4",
+      "overlay": "rgba(20, 20, 30, 0.35)",
+      "fg": "#18181b",
+      "fgMuted": "#52525b",
+      "fgSubtle": "#8a8a94",
+      "fgOnAccent": "#ffffff",
+      "border": "rgba(0, 0, 0, 0.10)",
+      "borderStrong": "rgba(0, 0, 0, 0.20)",
+      "accent": "#6164ef",
+      "accentHover": "#4f46e5",
+      "accentFg": "#4f46e5",
+      "focus": "#6164ef",
+      "status": {
+        "success": "oklch(0.62 0.15 150)",
+        "warning": "oklch(0.645 0.132 94)",
+        "error": "oklch(0.58 0.20 25)",
+        "info": "oklch(0.58 0.133 240)"
+      },
+      "chart": {
+        "series1": "oklch(0.52 0.16 290)",
+        "series2": "oklch(0.50 0.14 250)",
+        "series3": "oklch(0.52 0.15 170)",
+        "series4": "oklch(0.54 0.16 135)",
+        "series5": "oklch(0.58 0.14 80)",
+        "series6": "oklch(0.50 0.16 30)",
+        "series7": "oklch(0.48 0.14 210)",
+        "series8": "oklch(0.50 0.15 320)",
+        "grid": "rgba(0, 0, 0, 0.06)",
+        "axis": "#52525b"
+      }
+    },
+    "gradient": {
+      "brand": "linear-gradient(135deg, var(--pl-color-accent) 0%, var(--pl-color-brand-indigo) 50%, var(--pl-color-brand-indigo-deep) 100%)"
+    },
+    "shadow": {
+      "card": "0 1px 3px rgba(0, 0, 0, 0.08)",
+      "popover": "0 8px 24px rgba(0, 0, 0, 0.12)"
+    }
+  }
+}

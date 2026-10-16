@@ -1271,6 +1271,13 @@ def _act(page, root, context, step, timeout, out_dir: Path, marks, stills, t0) -
 JPEG_QUALITIES = (92, 86, 80, 72, 64)
 
 
+FONTS_LOADED_JS = (
+    "async () => { if (!document.fonts) return []; await document.fonts.ready;"
+    " return [...document.fonts].filter(f => f.status === 'loaded')"
+    ".map(f => f.family.replace(/^[\"']|[\"']$/g, '')); }"
+)
+
+
 def run_card(job: dict[str, Any], playwright_factory: Callable | None = None) -> tuple[dict[str, Any], str]:
     """Render one card page to PNG (stepping to JPEG when over ``max_bytes``)."""
     fence = _fence_patterns(job)  # a card loads nothing at all, but the fence is still required
@@ -1290,9 +1297,13 @@ def run_card(job: dict[str, Any], playwright_factory: Callable | None = None) ->
             context.route(lambda url: True, lambda route: route.abort("blockedbyclient"))
             page = context.new_page()
             page.set_content(job["html"], wait_until="load")
+            fonts_loaded: list[str] = []
             try:
-                page.evaluate("document.fonts && document.fonts.ready.then(() => true)")
-            except Exception:  # noqa: BLE001 — fonts.ready is a nicety
+                # Wait for every face the page uses, then REPORT which loaded — the host checks a
+                # brand's bundled fonts really painted (a family name alone proves nothing).
+                got = page.evaluate(FONTS_LOADED_JS)
+                fonts_loaded = [str(x) for x in got] if isinstance(got, list) else []
+            except Exception:  # noqa: BLE001 — no FontFace API: the host sees an empty list
                 pass
             page.screenshot(path=str(out_path), type="png", omit_background=transparent)
             final = out_path
@@ -1310,7 +1321,7 @@ def run_card(job: dict[str, Any], playwright_factory: Callable | None = None) ->
             context.close()
         finally:
             browser.close()
-    return {"path": str(final), "attempts": attempts}, ""
+    return {"path": str(final), "attempts": attempts, "fonts_loaded": fonts_loaded}, ""
 
 
 # ── dispatch ───────────────────────────────────────────────────────────────────

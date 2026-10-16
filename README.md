@@ -334,7 +334,40 @@ The montage registers as a `montage` asset (the gallery plays it and filters by 
 `meta.sequence`, the cut sheet (`meta.timeline`), the encode attempts and the engines used;
 its poster and GIF are child assets.
 
-### The brand outro
+### The video end-card recipe (brand outro)
+
+Not a new component — a **recipe** composed from what's already here: the last shot's beat, a
+recorded bumper, and the `cta-slide` card drawn in the brand's own look. A brand kit's
+`visual.card` says how its end cards are drawn (anything unset keeps the generic Campaign look):
+
+```yaml
+visual:
+  fonts:
+    heading: Geist
+    body: Geist
+    mono: Geist Mono
+    files:                     # EMBEDDED as data: URIs — same face on every machine, nothing fetched;
+      - {family: Geist, path: fonts/Geist-Variable.woff2, weight: "100 900"}   # a card whose bundled
+      - {family: Geist Mono, path: fonts/GeistMono-Variable.woff2, weight: "100 900"}  # face didn't paint FAILS
+  card:
+    button: outline            # outline = bordered rectangle, no fill, no glow (| fill: the accent pill)
+    background: subtle         # subtle = one 8 % accent wash, no grid (| glow | plain)
+    title_weight: 600          # weight stops; sizes stay canvas-relative (video-readable)
+    eyebrow_weight: 500
+    button_weight: 500
+    body_weight: 440
+    radius_px: 4               # at 1280 px wide — scaled to the canvas (2560 → 8 px)
+    border_px: 1               # doubled for video (2560 → 4 px)
+```
+
+**protoLabs** ships as a checked-in snapshot, `brands/protolabs/brand-kit.yaml`, GENERATED from
+the `@protolabsai/design` tokens (pinned: `ds-tokens.json` + `ds-version.txt`, the mapping in
+`scripts/gen_brand_protolabs.py`; the suite fails if the kit drifts from the tokens) with Geist /
+Geist Mono bundled under their SIL OFL licence (`brands/protolabs/fonts/OFL.txt`). Point
+**Brand kit file** at it. Regenerate after a DS bump:
+`python scripts/gen_brand_protolabs.py --design <path to @protolabsai/design>`.
+
+#### The brand outro
 
 One ending, set up once and appended to any montage with a last item `{outro: true}`:
 **the beat** (the last shot's final frame frozen — its last caption held, faded, then the clean

@@ -33,7 +33,7 @@ _SIZE_RE = re.compile(r"^(\d{2,4})x(\d{2,4})$")
 BASE_CSS = """
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{width:var(--w);height:var(--h);overflow:hidden;background:var(--bg)}
-body{font-family:var(--font-body);color:var(--fg);-webkit-font-smoothing:antialiased}
+body{font-family:var(--font-body);color:var(--fg);-webkit-font-smoothing:antialiased;font-weight:var(--w-body,400)}
 .card{position:relative;width:var(--w);height:var(--h);overflow:hidden;background:var(--bg);
   padding:calc(var(--u)*7) calc(var(--u)*8);display:flex}
 .glow{position:absolute;inset:0;pointer-events:none;
@@ -43,11 +43,11 @@ body{font-family:var(--font-body);color:var(--fg);-webkit-font-smoothing:antiali
   background-image:linear-gradient(var(--fg) 1px,transparent 1px),linear-gradient(90deg,var(--fg) 1px,transparent 1px);
   background-size:calc(var(--u)*6) calc(var(--u)*6);mask-image:linear-gradient(120deg,#000,transparent 70%)}
 .copy,.center,.bottom,.shot{position:relative;z-index:1}
-h1{font-family:var(--font-heading);font-weight:750;letter-spacing:-.025em;line-height:1.04;
+h1{font-family:var(--font-heading);font-weight:var(--w-title,750);letter-spacing:-.025em;line-height:1.04;
   font-size:var(--title-size);text-wrap:balance}
 .sub{color:var(--muted);font-size:calc(var(--u)*2.6);line-height:1.35;margin-top:calc(var(--u)*2.2);
   text-wrap:pretty;max-width:34em}
-.eyebrow{color:var(--accent);font-weight:650;font-size:calc(var(--u)*1.9);letter-spacing:.08em;
+.eyebrow{color:var(--accent);font-weight:var(--w-eyebrow,650);font-size:calc(var(--u)*1.9);letter-spacing:.08em;
   text-transform:uppercase;margin-bottom:calc(var(--u)*1.8)}
 .eyebrow.inline{margin:0 0 0 auto}
 .top{display:flex;align-items:center;gap:calc(var(--u)*1.4);font-weight:650;font-size:calc(var(--u)*2.2)}
@@ -99,10 +99,18 @@ h1{font-family:var(--font-heading);font-weight:750;letter-spacing:-.025em;line-h
 
 /* cta-slide: the end card's call to action — a big accent button above the URL */
 .cta .button{margin-top:calc(var(--u)*4.4);padding:calc(var(--u)*1.7) calc(var(--u)*4.2);border-radius:999px;
-  background:var(--accent);color:var(--bg);font-family:var(--font-heading);font-weight:700;
+  background:var(--accent);color:var(--bg);font-family:var(--font-heading);font-weight:var(--w-button,700);
   font-size:calc(var(--u)*3);letter-spacing:-.01em;
   box-shadow:0 calc(var(--u)*1.2) calc(var(--u)*5) color-mix(in srgb,var(--accent) 45%,transparent)}
 .cta .url{margin-top:calc(var(--u)*2.6)}
+
+/* Brand card recipe (brand kit `visual.card`): an OUTLINE button is the bordered rectangle — a
+   stronger border, the base radius, no fill, no glow (sizes scale from 1280 px wide); a SUBTLE
+   background is one restrained 8 % accent wash, no grid; PLAIN is the bare ground. */
+body.btn-outline .cta .button{background:transparent;color:var(--fg);box-shadow:none;
+  border:var(--btn-border) solid var(--fg);border-radius:var(--btn-radius)}
+body.bg-subtle .glow{background:radial-gradient(ellipse 80% 70% at 50% 0%, color-mix(in srgb,var(--accent) 8%,transparent), transparent 70%)}
+body.bg-subtle .card::after, body.bg-plain .card::after, body.bg-plain .glow{display:none}
 """
 
 FONT_STACK = (
@@ -152,11 +160,26 @@ def build_html(template: str, data: dict[str, Any], size: tuple[int, int], look:
     if template.startswith("title-slide"):
         title_size *= 1.15
     c, f = look["colors"], look["fonts"]
+    recipe = look.get("card") or {}
+    weights = "".join(
+        f"--w-{k.split('_')[0]}:{int(recipe[k])};" for k in ("title_weight", "eyebrow_weight", "button_weight", "body_weight")
+        if k in recipe
+    )  # fmt: skip
     css_vars = (
         f":root{{--w:{w}px;--h:{h}px;--u:{unit:.3f}px;--title-size:{title_size:.1f}px;"
         f"--bg:{c['bg']};--fg:{c['fg']};--accent:{c['accent']};--muted:{c['muted']};"
         f"--font-heading:{_font(f.get('heading', ''), FONT_STACK)};--font-body:{_font(f.get('body', ''), FONT_STACK)};"
-        f"--font-mono:{MONO_STACK}}}"
+        f"--font-mono:{_font(f.get('mono', ''), MONO_STACK)};{weights}"
+        # the DS sizes are console px at 1280 wide: scale to the canvas; the border doubles (a
+        # video's "strong border" must survive scaling down and compression)
+        f"--btn-radius:{float(recipe.get('radius_px', 4)) * w / 1280:.1f}px;"
+        f"--btn-border:{max(1.0, float(recipe.get('border_px', 1)) * 2 * w / 1280):.1f}px}}"
+    )
+    faces = brandmod.font_face_css(look.get("font_files") or [])
+    body_tag = (
+        f'<body class="btn-{recipe.get("button", "fill")} bg-{recipe.get("background", "glow")}">'
+        if recipe
+        else "<body>"
     )
     logo = brandmod.data_uri(look.get("logo", ""))
     image = brandmod.data_uri(str(data.get("image") or ""), max_bytes=12_000_000)
@@ -183,7 +206,7 @@ def build_html(template: str, data: dict[str, Any], size: tuple[int, int], look:
             body = re.sub(rf'class="({cls}[^"]*)"', r'class="\1 empty"', body, count=1)
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
-        f"<style>{css_vars}{BASE_CSS}</style></head><body>{body}</body></html>"
+        f"<style>{faces}{css_vars}{BASE_CSS}</style></head>{body_tag}{body}</body></html>"
     )
 
 
@@ -238,6 +261,10 @@ def render(
     w, h = parse_size(size, tpls[template])
     look = brandmod.resolve(data)
     page_html = build_html(template, data, (w, h), look)
+    want_fonts = {f["family"] for f in look.get("font_files") or []} & {
+        look["fonts"].get("heading"),
+        look["fonts"].get("body"),
+    }
     limit_id = DEFAULT_LIMITS.get(template, "") if limit is None else limit
     row = limits.get(limit_id) if limit_id else None
     if limit_id and row is None:
@@ -249,6 +276,12 @@ def render(
     violations = (
         limits.check(limit_id, size=size_bytes, width=w, height=h, fmt=final.suffix.lstrip(".")) if limit_id else []
     )
+    loaded = set(res.get("fonts_loaded") or [])
+    missing = sorted(f for f in want_fonts if f not in loaded)
+    if missing:
+        # A brand that bundles its fonts gets THOSE faces or no card: a silent system-font
+        # fallback is exactly the drift the bundle exists to prevent.
+        raise ValueError(f"the card's bundled font(s) {', '.join(missing)} didn't load in the renderer")
     return {
         "path": str(final),
         "size_bytes": size_bytes,
@@ -259,4 +292,5 @@ def render(
         "violations": violations,
         "limit": limit_id,
         "brand_source": look["source"],
+        "fonts_loaded": sorted(loaded),
     }

@@ -165,7 +165,7 @@ visual:
     )
     b = brand.resolve()
     assert b["colors"] == {"bg": "#0D1117", "fg": "#E6EDF3", "accent": "#F78166", "muted": "#9aa0ac"}
-    assert b["fonts"] == {"heading": "Inter", "body": "IBM Plex Sans"}
+    assert b["fonts"] == {"heading": "Inter", "body": "IBM Plex Sans", "mono": ""}
     assert b["name"] == "ACME", "the wordmark is the name as set in type"
     assert b["logo"] == str(d / "assets/logo-on-dark.png"), "dark card → the logo variant for dark backgrounds"
     b = brand.resolve({"colors": {"bg": "#ffffff"}})
