@@ -349,7 +349,15 @@ def run_worker(job: dict[str, Any], timeout: float, playwright_factory: Callable
                 f"the browser worker ({res.source}: {res.python}) exited {done.returncode} without a report"
                 + (f": {clean(done.stderr or done.stdout)}" if (done.stderr or done.stdout).strip() else "")
             )
-        return json.loads(report_path.read_text(encoding="utf-8"))
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise WorkerError(
+                f"the browser worker exited {done.returncode} with a corrupt or partial report ({e})"
+            ) from None
+        if not isinstance(report, dict):
+            raise WorkerError(f"the browser worker's report isn't a JSON object (got {type(report).__name__})")
+        return report
 
 
 PROBE_TIMEOUT_S = 40

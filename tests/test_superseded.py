@@ -208,7 +208,9 @@ def test_gallery_counts_exclude_superseded_and_the_operator_can_supersede_approv
     )
     assert r.status_code == 200 and r.json()["asset"]["status"] == "superseded"
     r = client.post(f"/api/plugins/campaign/assets/{new['id']}/review", json={"decision": "ship"})
-    assert r.status_code == 400 and "supersede" in r.json()["detail"]
+    assert r.status_code == 422 and "supersede" in str(r.json()["detail"]), (
+        "an unknown decision is refused at the schema"
+    )
 
 
 def test_gallery_hides_superseded_by_default_with_a_toggle():

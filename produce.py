@@ -803,8 +803,11 @@ def review(
                   f"{seen:.2f} s" if seen is not None else "couldn't measure the final caption — check it by eye")
         )  # fmt: skip
     if job["inputs"]["intro"] == "brand":
+        from . import intro as intromod
+
+        max_s = float((intromod.preset() or {}).get("max_s", intromod.DEFAULTS["max_s"]))
         isec = final.get("intro_s")
-        gates.append(_gate("intro", "intro ≤ 6 s, crossfaded in", isec is not None and isec <= 6.0 + 1e-6,
+        gates.append(_gate("intro", f"intro ≤ {max_s:g} s, crossfaded in", isec is not None and isec <= max_s + 1e-6,
                            f"{isec:.2f} s until the first shot is fully up" if isec is not None else "no intro rendered"))  # fmt: skip
     span = walk_span(final.get("timeline") or [], take["asset_id"])
     if span:

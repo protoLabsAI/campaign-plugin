@@ -16,7 +16,10 @@ what isn't approved.
 # NOTE: no `from __future__ import annotations` here — the route signatures annotate with
 # classes imported inside the builder (the host-free rule), and FastAPI resolves string
 # annotations against MODULE globals, where those names don't exist.
-from typing import Any, Callable
+import logging
+from typing import Any, Callable, Literal
+
+log = logging.getLogger("protoagent.plugins.campaign")
 
 MEDIA_TYPES = {
     ".webm": "video/webm",
@@ -61,9 +64,19 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
     router = APIRouter()
 
     class Review(BaseModel):
-        decision: str  # approve | reject | supersede
+        decision: Literal["approve", "reject", "supersede"]
         note: str = ""
         superseded_by: list[int] = []
+
+    def _rel_path(raw: str) -> str:
+        from pathlib import Path
+
+        if not raw:
+            return ""
+        try:
+            return str(Path(raw).expanduser().resolve().relative_to(paths.media_root().resolve()))
+        except (OSError, RuntimeError, ValueError):
+            return Path(raw).name
 
     def _public_asset(a: dict[str, Any]) -> dict[str, Any]:
         keys = (
@@ -73,6 +86,9 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         out = {k: a.get(k) for k in keys}
         out["superseded_by"] = list(a.get("superseded_by") or [])
         out["has_file"] = bool(a.get("path")) and paths.is_contained(a["path"])
+        # Never the raw filesystem path: relative to the media dir (the gallery's "Copy path"),
+        # or just the file name for anything outside it.
+        out["path"] = _rel_path(a.get("path") or "")
         out["can_review"] = a.get("status") in ("ready_for_review", "approved", "rejected")
         return out
 
@@ -152,8 +168,16 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
     async def _videos() -> JSONResponse:
         from . import produce
 
-        # A malformed record (no id) is skipped rather than 500-ing the whole listing.
-        return JSONResponse({"jobs": [_public_job(j) for j in produce.list_jobs(50) if j.get("id")]})
+        # A malformed record is skipped (and logged) rather than 500-ing the whole listing.
+        jobs = []
+        for j in produce.list_jobs(50):
+            try:
+                if not isinstance(j, dict) or not j.get("id"):
+                    raise ValueError("no id")
+                jobs.append(_public_job(j))
+            except Exception as e:  # noqa: BLE001 — one bad record never takes the listing down
+                log.warning("[campaign] skipping a malformed video job record: %s", e)
+        return JSONResponse({"jobs": jobs})
 
     @router.get("/videos/{job_id}")
     async def _video(job_id: str) -> JSONResponse:
@@ -162,7 +186,11 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         job = produce.load(job_id)
         if job is None:
             raise HTTPException(404, "no such video job")
-        return JSONResponse(_public_job(job))
+        try:
+            return JSONResponse(_public_job(job))
+        except Exception as e:  # noqa: BLE001
+            log.warning("[campaign] video job %s is malformed: %s", job_id, e)
+            raise HTTPException(500, "this video job's record is malformed") from None
 
     def _public_job(job: dict[str, Any]) -> dict[str, Any]:
         from . import produce

@@ -486,3 +486,41 @@ def test_the_preflight_probe_runs_in_the_worker_fenced_and_bearer_scoped():
     assert r[1]["error"] == "blocked by the fence", "never this plugin's own data API"
     assert seen[0][1] == {"Authorization": "Bearer sekret"} and seen[1][1] == {}, "the bearer goes home only"
     assert "ECONNREFUSED" in r[3]["error"] and "sekret" not in json.dumps(rep)
+
+
+def test_the_intro_gate_reads_the_presets_max_s(world, tmp_path):
+    from campaign import intro
+
+    splash = tmp_path / "s.mp4"
+    splash.write_bytes(b"x")
+    assert intro.configure({"bumper": {"path": str(splash)}, "card": {"title": "t"}, "max_s": 4.0}) == []
+    job = _start(world)  # the fake render reports intro_s 4.6
+    gate = next(g for g in job["gates"] if g["id"] == "intro")
+    assert not gate["ok"] and gate["label"] == "intro ≤ 4 s, crossfaded in" and job["status"] == "needs_review"
+    assert intro.configure({"bumper": {"path": str(splash)}, "card": {"title": "t"}, "max_s": 8.0}) == []
+    job = _start(world, force=True)
+    gate = next(g for g in job["gates"] if g["id"] == "intro")
+    assert gate["ok"] and gate["label"] == "intro ≤ 8 s, crossfaded in", "a valid intro under a custom max_s passes"
+
+
+def test_mask_css_refuses_an_unknown_mode_clearly():
+    from campaign.worker import pw_worker
+
+    with pytest.raises(ValueError, match="mask mode 'smudge' is not one of blur, hide, remove"):
+        pw_worker.mask_css({"mode": "smudge", "selectors": [".x"]})
+    assert "blur(7px)" in pw_worker.mask_css({"selectors": [".x"]})
+
+
+@pytest.mark.parametrize("report", ['{"ok": tr', "[1, 2]"])
+def test_run_worker_names_a_corrupt_or_partial_report(monkeypatch, report):
+    from campaign import deps, interpreter, shoot
+
+    monkeypatch.setattr(deps, "resolve", lambda: interpreter.Resolution(python="/py", source="test"))
+
+    def fake_run(python, args, *, stdin=None, timeout=None, **kw):
+        Path(json.loads(stdin)["report_path"]).write_text(report)
+        return interpreter.Completed(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(interpreter, "run_python", fake_run)
+    with pytest.raises(shoot.WorkerError, match="corrupt or partial report|isn't a JSON object"):
+        shoot.run_worker({"v": 1, "kind": "probe", "fence": shoot.fence()}, 5)

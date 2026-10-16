@@ -111,3 +111,11 @@ def test_an_intro_can_reuse_the_outro_bumper(bumper):
     assert intro.configure({"bumper": "outro", "card": CARD}) == []
     (bump, _card, _walk) = montage.parse_sequence([{"intro": True}, {"clip": 1}])
     assert bump["fixed_path"] == str(bumper.resolve()) and bump["out"] == 2.7
+
+
+def test_booleans_are_not_seconds(bumper):
+    probs = "\n".join(intro.configure({**_preset(bumper), "max_s": True}))
+    assert "intro.max_s must be a number, got True" in probs
+    assert "outro.beat_s must be a number, got False" in "\n".join(
+        outro.configure({"beat_s": False, "cta": {"title": "x"}})
+    )

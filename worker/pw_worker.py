@@ -374,12 +374,18 @@ REDACT_PRESET_PREFIXES: dict[str, list[str]] = {
 }
 
 
+MASK_RULES = {
+    "blur": "filter: blur(7px) !important;",
+    "hide": "visibility: hidden !important;",
+    "remove": "display: none !important;",
+}
+
+
 def mask_css(mask: dict[str, Any]) -> str:
-    rule = {
-        "blur": "filter: blur(7px) !important;",
-        "hide": "visibility: hidden !important;",
-        "remove": "display: none !important;",
-    }[mask.get("mode", "blur")]
+    mode = mask.get("mode", "blur")
+    rule = MASK_RULES.get(mode) if isinstance(mode, str) else None
+    if rule is None:
+        raise ValueError(f"mask mode {mode!r} is not one of {', '.join(MASK_RULES)}")
     return "\n".join(f"{sel} {{ {rule} }}" for sel in mask["selectors"])
 
 

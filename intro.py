@@ -71,6 +71,9 @@ def preset() -> dict[str, Any]:
 
 
 def _num(v: Any, what: str, problems: list[str], lo: float, hi: float) -> float | None:
+    if isinstance(v, bool):  # true/false aren't seconds (float(True) == 1.0) — as montage._num
+        problems.append(f"{what} must be a number, got {v!r}")
+        return None
     try:
         f = float(v)
     except (TypeError, ValueError):
