@@ -315,6 +315,32 @@ def test_status_tool_and_route_report_the_job(world, registry, client):
     assert client.get("/api/plugins/campaign/videos/vid-nope").status_code == 404
 
 
+def test_videos_listing_maps_jobs_and_skips_malformed_records(world, client):
+    job = _start(world)
+    # A record with no id (hand-edited / truncated) must not 500 the whole listing.
+    (produce._jobs_dir() / "vid-broken0000.json").write_text('{"status": "done"}')
+    r = client.get("/api/plugins/campaign/videos")
+    assert r.status_code == 200
+    jobs = r.json()["jobs"]
+    assert [j["id"] for j in jobs] == [job["id"]]
+    assert jobs[0]["status"] == "done" and jobs[0]["downloads"]["final"].startswith("/api/plugins/campaign/file/")
+
+
+def test_list_jobs_tolerates_a_file_deleted_mid_listing(world, monkeypatch):
+    job = _start(world)
+    ghost = produce._jobs_dir() / "vid-ghost0000.json"
+    ghost.write_text("{}")
+    real_stat = type(ghost).stat
+
+    def stat(self, *a, **k):
+        if self.name == ghost.name:
+            raise FileNotFoundError(self)
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(type(ghost), "stat", stat)
+    assert job["id"] in [j.get("id") for j in produce.list_jobs()]
+
+
 # ── preflight (#22): never start a browser against an unverified console ─────
 def test_same_console_treats_loopback_spellings_alike():
     assert produce.same_console("http://localhost:7870", "http://127.0.0.1:7870/")

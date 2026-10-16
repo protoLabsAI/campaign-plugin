@@ -366,9 +366,17 @@ def save(job: dict[str, Any]) -> dict[str, Any]:
     return job
 
 
+def _mtime(p: Path) -> float:
+    """A job file's mtime, or 0 if it vanished between glob() and stat() (a concurrent delete)."""
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def list_jobs(limit: int = 20) -> list[dict[str, Any]]:
     rows = []
-    for p in sorted(_jobs_dir().glob("vid-*.json"), key=lambda q: q.stat().st_mtime, reverse=True)[:limit]:
+    for p in sorted(_jobs_dir().glob("vid-*.json"), key=_mtime, reverse=True)[:limit]:
         try:
             rows.append(json.loads(p.read_text()))
         except (OSError, ValueError):

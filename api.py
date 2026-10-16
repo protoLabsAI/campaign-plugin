@@ -152,7 +152,8 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
     async def _videos() -> JSONResponse:
         from . import produce
 
-        return JSONResponse({"jobs": [_public_job(j) for j in produce.list_jobs(50)]})
+        # A malformed record (no id) is skipped rather than 500-ing the whole listing.
+        return JSONResponse({"jobs": [_public_job(j) for j in produce.list_jobs(50) if j.get("id")]})
 
     @router.get("/videos/{job_id}")
     async def _video(job_id: str) -> JSONResponse:
@@ -168,7 +169,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
 
         d = job.get("delivery") or {}
         return {
-            "id": job["id"],
+            "id": job.get("id", ""),
             "title": (job.get("inputs") or {}).get("title", ""),
             "status": job.get("status", "unknown"),
             "stage": job.get("stage"),
