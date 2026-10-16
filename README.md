@@ -113,10 +113,13 @@ loads nothing from the network at all.
 | `campaign_view` | LOOK at a still/card/poster, or frames of a clip (evenly spaced, `every_s` apart from `start` to `end` — paged 12 per contact sheet, the reply naming the next page's `start` — or either side of a mark/cut), as images the model sees — downscaled JPEGs, ≤ 3 per call, contained to the campaign's dir. Needs a core with `graph.sdk.multimodal_tool_result` and a vision model; otherwise it says it couldn't show them |
 | `campaign_montage` | Cut an ordered `sequence` of clips + cards into one mp4 (see **Montages**) and register it as a `montage` asset with its poster (+ GIF) |
 | `campaign_storyboard` | The montage's contact sheet — one frame per item, a swatch per transition — returned as an image, plus the cut sheet |
+| `campaign_produce_video` | One shot script → a finished, self-reviewed video as a background job: record (2K device capture) → [brand intro] + walkthrough + [brand outro] → gates → deliver (see **Videos from a request**) |
+| `campaign_video_status` | A video job's stage, progress, gate table, files and links; `wait_s` blocks until it ends |
 | `campaign_limits` | The hard-limit table, each row with its source URL and as-of date |
 | `campaign_setup` | What's installed and how to fix what isn't |
 
-Plus: skills `campaign-planning`, `shot-scripting`, `asset-review`, `montage-editing`; the `campaign_producer`
+Plus: skills `campaign-planning`, `shot-scripting`, `asset-review`, `montage-editing`,
+`produce-walkthrough-video`; the `campaign_producer`
 subagent (allowlist: `campaign_*`, `browser_open/snapshot/screenshot/get_text`,
 `social_brand_kit`, `show_artifact`).
 
@@ -398,6 +401,84 @@ sets `caption.until` (when the caption starts fading) and the preset's `caption_
 is never cut to make room for the beat — the frame is frozen instead. `{outro: {…}}` overrides
 any key for one cut (its bumper may name a campaign `clip`, never a file `path`).
 
+#### The brand intro
+
+The mirror of the outro, prepended with a FIRST item `{intro: true}`: **a bumper** (the same
+live boot splash, ~2 s), **a title card** (the `title-slide` template in the same card recipe —
+embedded Geist, the DS snapshot, the bordered look — eyebrow, title, subtitle, ~3 s), then a
+**crossfade** into the first shot. Never a hard cut: the transition into the first shot must be
+a crossfade (`fade`, `dissolve`, `fadeblack`, `fadewhite`, ≥ 0.3 s), and the montage REFUSES an
+intro that runs longer than `max_s` (default 6 s, measured until the first shot is fully up —
+the cut sheet reports `intro_s`). The **Brand intro** setting (YAML; operator-only):
+
+```yaml
+bumper: {path: ~/media/protoagent-splash.mp4, in: 0.1, out: 2.3}   # or `bumper: outro` — reuse the outro's file
+card: {template: title-slide, eyebrow: "Architecture walkthrough", title: "protoAgent", duration: 3.0}
+transition: {style: fade, duration: 0.6}
+max_s: 6
+```
+
+`{intro: {card: {title: "protoAgent in 85 seconds", subtitle: "…"}}}` sets one cut's title
+(merged into the preset's card). Start the first shot on a SETTLED frame — `in` past any
+opening motion; `campaign_produce_video` measures it from the footage.
+
+## Videos from a request
+
+`campaign_produce_video` turns ONE shot script into a finished, self-reviewed video with no
+hand-driving — the path behind "make a 60-second 2K walkthrough of our architecture, end with
+the star CTA" (the `produce-walkthrough-video` skill is the agent's recipe, from the one-line
+brief to delivery):
+
+```
+campaign_produce_video(script=<atlas_record_script's reply, unchanged>, title="protoAgent in 85 seconds",
+                       subtitle="How a self-hosted agent runtime fits together",
+                       quality="2k", intro="brand", outro="brand")
+→ "Started video job vid-3f9c…"            # returns at once
+campaign_video_status(job_id="vid-3f9c…", wait_s=300)   # stage, %, gates, files, links
+```
+
+It runs as a **background job** (a worker thread in the plugin; one at a time): **record** the
+take (`quality: 2k` → `device_scale_factor` = 2560 ÷ viewport width + `capture: device`; an
+Atlas script also gets a `last-slide` mark) → **measure** the first settled frame after `start`
+(the in-point) and, for Atlas footage, when the final caption is fully up and starts fading →
+**render** `[intro] → walkthrough → [outro]` twice: a review cut (crf 18) and a GitHub variant
+held under `github_attachment_video_free` (10 MB) → **self-review** → **deliver**.
+
+**Self-review gates** — all must pass before a job is `done`:
+
+| Gate | Check |
+|---|---|
+| `resolution` | rendered ≥ 2560 px wide (1920 for `1080p`) |
+| `final_caption` | the final caption is on screen ≥ the outro's `min_caption_s` (4 s) before the outro |
+| `intro` | the intro is ≤ 6 s and crossfades in |
+| `no_blank_frames` | a sample every second of the walkthrough segment: none blank / near-black (luma p95−p5 < 10 on a 64×36 sample — a dark theme with content passes) |
+| `size_budget` | the GitHub variant is within `github_attachment_video_free` |
+| `review_assets` | a labelled **contact sheet** (intro bumper, card, crossfade, first settled frame, eight walkthrough frames, final caption, outro) and a **100 % crop** of the densest small text are saved |
+
+A failed gate gets **one** automatic retry where it can help — blank frames or a short
+resolution re-record; an oversize GitHub variant re-renders at 24 fps. A refused cut (final
+caption too short, intro too long) is a script/preset fix, so it doesn't retry. Otherwise the
+job ends **`needs_review`** with the reasons, its files stay `rendered` (not offered for
+review), and the chat is told not to present it as finished.
+
+**Idempotent**: jobs live in `<data dir>/videos/vid-<hash>.json`, keyed by a hash of the
+inputs. The same request returns the same job; a failed (or orphaned) job resumes, reusing a
+good take; `force=True` re-records.
+
+**Delivery** (what each channel gets today):
+
+- **Campaign gallery** — the review mp4 + GitHub mp4 as `montage` assets (`ready_for_review`
+  when every gate passed) with the sheet and the text crop as stills; the operator approves.
+- **Console chat** — when the job ends, the requesting chat gets a follow-up turn
+  (`graph.sdk.run_in_session`) telling the agent to `save_file_artifact` the mp4 and the sheet
+  (the Artifact panel's versioned download) and post the gate table.
+- **Links** — each file goes through the host's media store (`registry.save_media`), so
+  `campaign_video_status` carries a signed `/media/…?sig=` link; any client — A2A, `/v1` —
+  gets it in the reply text. `GET /api/plugins/campaign/videos/{job_id}` (bearer) returns the
+  job's status, gates and `downloads` (`/api/plugins/campaign/file/{asset_id}`).
+- **Not yet**: A2A replies carry no *file part* and `/media` links are server-relative — the
+  caller must resolve them against the agent's base URL. Tracked in core (see the PR).
+
 ## Hard limits, not folklore
 
 `limits.py` is the only table of platform constraints, and it holds only *documented* limits —
@@ -421,7 +502,8 @@ named so core's agent self-config fence refuses agent writes to it), `brand_kit_
 `brand_fonts` / `brand_logo` (fallbacks), `limit_overrides`, `bearer_envs` (extra env-var
 names a shot script may use as its bearer), `upload_dirs` (folders an `upload` step may read
 files from; blank refuses uploads; operator-only), `outro` (the brand outro — see **The brand
-outro**; operator-only), `producer_model`.
+outro**; operator-only), `intro` (the brand intro — see **The brand intro**; operator-only),
+`producer_model`.
 
 ## Development
 

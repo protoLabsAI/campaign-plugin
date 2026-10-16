@@ -14,11 +14,16 @@ import logging
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from langchain_core.tools import tool
 
-from . import cards, deps, limits, look, montage, paths, render, shoot, shotscript, store
+from . import cards, deps, limits, look, montage, paths, produce, render, shoot, shotscript, store
+
+try:  # the host's graph state, injected into a tool body (the chat session id lives there)
+    from langgraph.prebuilt import InjectedState
+except ImportError:  # host-free suite: a plain annotation (the tool then sees state=None)
+    InjectedState = "injected-state"  # type: ignore[assignment]
 
 log = logging.getLogger("protoagent.plugins.campaign")
 
@@ -1271,6 +1276,123 @@ def build_tools(registry):
         except ValueError as e:
             return f"{text}\n\nThe host refused the image ({e})."
 
+    # ── one request → a finished video ───────────────────────────────────────
+    def _session(state: Any) -> str:
+        if isinstance(state, dict):
+            return str(state.get("session_id") or "")
+        return ""
+
+    def _notify(session_id: str, job_id: str, text: str) -> None:
+        try:
+            from graph import sdk  # host import — lazy
+        except Exception:  # noqa: BLE001 — no host: the status tool is the only channel
+            return
+        fn = getattr(sdk, "run_in_session", None)
+        if callable(fn):
+            fn(session_id, text, job_id=f"campaign-{job_id}")
+
+    def _hooks() -> produce.Hooks:
+        save = getattr(registry, "save_media", None)
+        return produce.Hooks(
+            save_media=save if callable(save) else None,
+            notify=_notify,
+            emit=_emit,
+        )
+
+    @tool
+    def campaign_produce_video(
+        script: str,
+        title: str,
+        quality: str = "2k",
+        intro: str = "brand",
+        outro: str = "brand",
+        subtitle: str = "",
+        eyebrow: str = "Architecture walkthrough",
+        campaign_id: int = 0,
+        caption_region: dict | str = "",
+        force: bool = False,
+        state: Annotated[Any, InjectedState] = None,
+    ) -> str:
+        """Produce a FINISHED video from one shot script, end to end, as a background job:
+        record the take → render [brand intro] + the walkthrough + [brand outro] → self-review →
+        deliver. Returns a job id at once; follow it with campaign_video_status(job_id).
+        script: the YAML (or the whole reply) from atlas_record_script, or any Campaign shot
+        script. title: the video's title (the intro card + file names). quality: 2k (2560 px wide
+        device-pixel capture — crisp small text) or 1080p. intro / outro: 'brand' (the operator's
+        Brand intro / Brand outro presets — boot-splash bumper, title card crossfading into the
+        first SETTLED frame; final caption ≥ 4 s, bumper, Star-on-GitHub card) or 'none'.
+        subtitle / eyebrow: the intro card's other lines. caption_region {x,y,w,h} (device px)
+        overrides where the final caption is measured (Atlas footage is detected).
+        Self-review gates before delivery: resolution, final caption ≥ 4 s, intro ≤ 6 s, no
+        blank frames in the walkthrough, the GitHub variant ≤ 10 MB, plus a contact sheet and a
+        100 % crop of the smallest text. One automatic retry where it helps; otherwise the job
+        ends needs_review with the reasons — never present that as finished. Same inputs again →
+        the same job (force=True re-records). Follow the produce-walkthrough-video skill."""
+        if (reason := deps.need_browser()) is not None:
+            return reason
+        if (reason := deps.need_ffmpeg()) is not None:
+            return reason
+        region = None
+        if caption_region not in (None, "", {}):
+            try:
+                region = {k: int(v) for k, v in _parse_obj(caption_region, "caption_region").items()}
+            except (ValueError, AttributeError, TypeError) as e:
+                return f"caption_region must be {{x, y, w, h}} in device pixels — {e}"
+        try:
+            job = produce.start(
+                script, title=title, quality=quality, intro=intro, outro=outro, subtitle=subtitle,
+                eyebrow=eyebrow, campaign_id=campaign_id, region=region, session_id=_session(state),
+                force=force, hooks=_hooks(),
+            )  # fmt: skip
+        except (produce.ProduceError, ValueError) as e:
+            return f"Not started — {e}"
+        if job.get("reused"):
+            return (
+                f"That video was already requested: job {job['id']} is {job['status']} — nothing new started "
+                "(force=True re-records it).\n\n" + produce.summary(job)
+            )
+        pred = job.get("predicted_s")
+        return (
+            f"Started video job {job['id']} — {title!r} at {quality}"
+            + (f" (~{pred:g} s of footage; recording runs in real time, then ~1–2 min of rendering)" if pred else "")
+            + ". It runs in the background: report progress with campaign_video_status(job_id="
+            f"{job['id']!r}, wait_s=…). When it ends, this chat gets a follow-up turn to deliver the files."
+            + ("\nNotes: " + "; ".join(job["notes"]) if job.get("notes") else "")
+        )
+
+    @tool
+    def campaign_video_status(job_id: str = "", wait_s: int = 0) -> str:
+        """Progress of a campaign_produce_video job: stage (recording → measuring → rendering →
+        reviewing → delivering), percent, the self-review gate table (PASS/FAIL each) and, once
+        it ends, the files (review mp4, GitHub-sized mp4, contact sheet, 100 % text crop) with
+        their asset ids and signed download links. wait_s (≤ 600) blocks until the job ends or
+        that many seconds pass — use it from an API/A2A turn that must return the finished file.
+        No job_id lists recent jobs. Status 'needs_review' means a gate failed: say so and why —
+        never present that video as finished."""
+        if not job_id:
+            jobs = produce.list_jobs(10)
+            if not jobs:
+                return "No video jobs yet — start one with campaign_produce_video."
+            return "Recent video jobs:\n" + "\n".join(
+                f"- {j['id']} {j['inputs']['title']!r}: {j['status']} ({j.get('stage')}, "
+                f"{round(produce.progress(j) * 100)}%)"
+                for j in jobs
+            )
+        import time as _time
+
+        deadline = _time.monotonic() + max(0, min(int(wait_s or 0), 600))
+        job = produce.load(job_id)
+        while job and job["status"] not in produce.TERMINAL and _time.monotonic() < deadline:
+            _time.sleep(2)
+            job = produce.load(job_id)
+        if job is None:
+            return f"No video job {job_id!r} — campaign_video_status() lists recent ones."
+        out = produce.summary(job)
+        sheet = (job.get("delivery") or {}).get("files", {}).get("sheet")
+        if job["status"] in produce.TERMINAL and sheet:
+            out += _embed(sheet, "image/png", f"{job['inputs']['title']} — review sheet")
+        return out
+
     return [
         campaign_create,
         campaign_update,
@@ -1293,6 +1415,8 @@ def build_tools(registry):
         campaign_view,
         campaign_montage,
         campaign_storyboard,
+        campaign_produce_video,
+        campaign_video_status,
     ]
 
 

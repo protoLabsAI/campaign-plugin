@@ -59,6 +59,10 @@ def register(registry) -> None:
 
         for w in outro.configure(cfg.get("outro", "")):
             log.warning("[campaign] %s", w)
+        from . import intro  # after the outro: an intro may reuse its bumper (`bumper: outro`)
+
+        for w in intro.configure(cfg.get("intro", "")):
+            log.warning("[campaign] %s", w)
     except Exception:
         log.exception("[campaign] configuring failed")
 

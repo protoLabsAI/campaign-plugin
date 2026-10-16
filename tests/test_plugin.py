@@ -41,6 +41,8 @@ TOOLS = {
     "campaign_view",
     "campaign_montage",
     "campaign_storyboard",
+    "campaign_produce_video",
+    "campaign_video_status",
 }
 
 
@@ -74,7 +76,7 @@ def test_settings_that_name_a_program_to_run_are_marked_spawns():
     agent that could widen it could upload anything it can read — and `outro`, whose bumper names
     a local video file the montage reads (only the operator may point it at one)."""
     spawns = {s["key"] for s in MANIFEST["settings"] if s.get("spawns") is True}
-    assert spawns == {"ffmpeg_path", "interpreter", "upload_dirs", "outro"}
+    assert spawns == {"ffmpeg_path", "interpreter", "upload_dirs", "outro", "intro"}
 
 
 def test_playwright_is_declared_runtime_scoped_and_optional():
@@ -368,6 +370,7 @@ def test_the_expected_skills_ship():
         "shot-scripting",
         "asset-review",
         "montage-editing",
+        "produce-walkthrough-video",
     }
 
 

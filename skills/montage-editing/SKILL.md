@@ -76,6 +76,12 @@ recording — the montage only trims the ends, sets one speed, and joins beats w
   final caption is fully up, `region` = its box in source pixels. The montage then REFUSES a cut
   that shows that caption for less than `min_caption_s` — never trim into the last caption;
   cut at the take's end mark (Atlas's `tour-done`) and let the outro hold the frame.
+- **The brand intro**: its mirror (the `intro` setting) — START the sequence with
+  `{intro: {card: {title: "<the video's title>", subtitle: "…"}}}`: the boot-splash bumper, the
+  title card, then a CROSSFADE into your first shot (never a cut; the montage refuses an intro
+  over 6 s). Set the first shot's `in` on a SETTLED frame — past any opening camera move — so
+  the crossfade lands on a still picture. For a whole walkthrough video from one script,
+  `campaign_produce_video` does all of this (and measures the settled frame) for you.
 
 ## 3. Storyboard, LOOK, then render
 

@@ -146,4 +146,41 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
                 pass
         return JSONResponse({"asset": _public_asset(a)})
 
+    # Video jobs (campaign_produce_video): progress + gates + where the files are, for a
+    # dashboard or an API caller polling a job it started. Files download through /file/{id}.
+    @router.get("/videos")
+    async def _videos() -> JSONResponse:
+        from . import produce
+
+        return JSONResponse({"jobs": [_public_job(j) for j in produce.list_jobs(50)]})
+
+    @router.get("/videos/{job_id}")
+    async def _video(job_id: str) -> JSONResponse:
+        from . import produce
+
+        job = produce.load(job_id)
+        if job is None:
+            raise HTTPException(404, "no such video job")
+        return JSONResponse(_public_job(job))
+
+    def _public_job(job: dict[str, Any]) -> dict[str, Any]:
+        from . import produce
+
+        d = job.get("delivery") or {}
+        return {
+            "id": job["id"],
+            "title": job["inputs"]["title"],
+            "status": job["status"],
+            "stage": job.get("stage"),
+            "progress": produce.progress(job),
+            "attempt": job.get("attempt", 0),
+            "gates": job.get("gates") or [],
+            "reasons": job.get("reasons") or [],
+            "assets": d.get("assets") or {},
+            "downloads": {k: f"/api/plugins/campaign/file/{aid}" for k, aid in (d.get("assets") or {}).items()},
+            "links": d.get("links") or {},
+            "created": job.get("created"),
+            "updated": job.get("updated"),
+        }
+
     return router

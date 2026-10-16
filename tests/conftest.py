@@ -31,9 +31,10 @@ if PKG not in sys.modules:
 
 @pytest.fixture(autouse=True)
 def isolated_data_dir(tmp_path, monkeypatch):
-    from campaign import brand, deps, interpreter, limits, outro, paths, shoot
+    from campaign import brand, deps, interpreter, intro, limits, outro, paths, shoot
 
     outro.configure("")  # no brand outro preset leaks between tests
+    intro.configure("")
 
     data = tmp_path / "data"
     monkeypatch.setenv("CAMPAIGN_DIR", str(data))
