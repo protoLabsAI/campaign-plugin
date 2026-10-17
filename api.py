@@ -309,7 +309,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         campaign_id: int = 0
 
     @router.get("/archive")
-    async def _archive_status() -> JSONResponse:
+    def _archive_status() -> JSONResponse:
         from . import archive
 
         return JSONResponse(archive.status())
