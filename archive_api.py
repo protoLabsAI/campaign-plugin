@@ -29,20 +29,23 @@ def build_archive_router():
     class Backfill(BaseModel):
         campaign_id: int = 0
 
+    def _guarded(what: str, fn):
+        try:
+            return JSONResponse(fn())
+        except Exception:  # noqa: BLE001 — the archive redacts its own errors; this is the last net
+            log.exception("[campaign] archive %s failed", what)
+            raise HTTPException(500, f"the archive {what} failed — see the agent log") from None
+
     @router.get("/archive")
     def _status() -> JSONResponse:
-        return JSONResponse(archive.status())
+        return _guarded("status", archive.status)
 
     @router.post("/archive/backfill")
     def _backfill(body: Backfill) -> JSONResponse:
-        return JSONResponse({"queued": archive.backfill(body.campaign_id)})
+        return _guarded("backfill", lambda: {"queued": archive.backfill(body.campaign_id)})
 
     @router.post("/archive/drain")
     def _drain() -> JSONResponse:
-        try:
-            return JSONResponse(archive.drain(surface.config()))
-        except Exception as e:  # noqa: BLE001 — drain redacts its own errors; this is the last net
-            log.exception("[campaign] archive pass failed")
-            raise HTTPException(500, f"archive pass failed ({type(e).__name__}) — see the agent log") from None
+        return _guarded("pass", lambda: archive.drain(surface.config()))
 
     return router

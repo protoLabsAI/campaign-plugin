@@ -653,3 +653,12 @@ def test_a_catalog_over_1mb_is_read_through_the_blob_api():
 
     got = archive.GitHub(TOKEN, "o/r", opener=opener).get_file("specs/media/catalog/x.json", "b")
     assert got == (doc, "blobsha") and calls[-1].endswith("/git/blobs/blobsha")
+
+
+@pytest.mark.parametrize(("method", "path", "fn"), [("get", "/archive", "status"), ("post", "/archive/backfill", "backfill"),
+                                                    ("post", "/archive/drain", "drain")])  # fmt: skip
+def test_the_archive_routes_fail_plainly(client, monkeypatch, method, path, fn):
+    monkeypatch.setattr(archive, fn, lambda *a, **k: (_ for _ in ()).throw(RuntimeError(f"secret {TOKEN}")))
+    kw = {"json": {}} if method == "post" else {}
+    r = getattr(client, method)(f"/api/plugins/campaign{path}", **kw)
+    assert r.status_code == 500 and TOKEN not in r.text and "RuntimeError" not in r.text and "agent log" in r.text
