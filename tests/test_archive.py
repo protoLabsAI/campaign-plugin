@@ -137,9 +137,7 @@ def _approved(c, name="hero.mp4", data=None, note="ship it", lane="A · Claude C
     a = store.add_asset(c["id"], "clip", f"Title {name}", path=str(p), status="captured", size_bytes=p.stat().st_size,
                         width=1280, height=720, duration_s=12.5, lane_id=(ln or {}).get("id", 0))  # fmt: skip
     store.update_asset(a["id"], status="ready_for_review")
-    a = store.review(a["id"], "approve", note)
-    archive.queue_approved(a)
-    return a
+    return store.review(a["id"], "approve", note)
 
 
 def _catalog(gh, branch, slug="protoagent-github-trending-launch-oct-13"):
@@ -184,7 +182,8 @@ def test_nothing_runs_until_enabled_with_a_token(c, gh):
     assert "no archive_token" in archive.drain({"archive_enabled": True}, gh=gh)["skipped"]
     assert "isn't owner/name" in archive.drain({**CFG, "archive_repo": "nope"}, gh=gh)["skipped"]
     assert "plain repo path" in archive.drain({**CFG, "archive_catalog_dir": "../x"}, gh=gh)["skipped"]
-    assert gh.calls == [] and len(store.archive_queue()) == 1, "the queue waits — nothing is lost"
+    assert gh.calls == [] and store.archive_queue() == [], "nothing is touched while it's off"
+    assert archive.drain(CFG, gh=gh, now=NOW)["cataloged"], "turned on, the pass finds the approval itself"
 
 
 # ── the happy path ────────────────────────────────────────────────────────────
@@ -348,7 +347,8 @@ def test_a_catalog_failure_keeps_the_upload_and_retries_only_the_catalog(c, gh, 
 def test_an_asset_unapproved_since_it_was_queued_is_dropped(c, gh):
     a = _approved(c)
     b = _approved(c, "b.mp4")
-    store.review(a["id"], "supersede", "replaced", superseded_by=[b["id"]])
+    archive.reconcile()  # both queued while approved…
+    store.review(a["id"], "supersede", "replaced", superseded_by=[b["id"]])  # …then a is retired
     out = archive.drain(CFG, gh=gh, now=NOW)
     assert out["dropped"] == [a["id"]] and out["cataloged"] == [b["id"]]
 
@@ -382,7 +382,7 @@ def test_a_collected_approved_copy_is_cataloged_in_the_collection_without_reuplo
     best = store.create_campaign("Best of")
     out = library.copy_assets([a["id"]], best["id"], lineage=False, operator=True)
     cp = out["map"][str(a["id"])]
-    assert [q["asset_id"] for q in store.archive_queue()] == [cp]
+    assert archive.reconcile() == [cp], "the copy's record doesn't list the collection's catalog yet"
     res = archive.drain(CFG, gh=gh, now=NOW + timedelta(minutes=1))
     assert res["already"] == [cp] and [x[0] for x in gh.calls].count("upload") == 1
     assert "media/best-of" not in gh.releases, "no empty release for a collection of already-archived files"
@@ -509,21 +509,30 @@ def client(registry):
     return TestClient(app)
 
 
-def test_the_review_route_queues_an_approval(client, c):
+def test_the_archive_routes(client, c):
     p = paths.campaign_dir(c["id"], c["name"]) / "a.mp4"
     p.write_bytes(b"x")
     a = store.add_asset(c["id"], "clip", "a", path=str(p), status="captured")
     store.update_asset(a["id"], status="ready_for_review")
-    client.post(f"/api/plugins/campaign/assets/{a['id']}/review", json={"decision": "reject", "note": "no"})
-    assert store.archive_queue() == []
     client.post(f"/api/plugins/campaign/assets/{a['id']}/review", json={"decision": "approve"})
-    assert [q["asset_id"] for q in store.archive_queue()] == [a["id"]]
     st = client.get("/api/plugins/campaign/archive").json()
-    assert st == {"queued": 1, "waiting_retry": [], "archived": 0, "approved": 1}
+    assert st == {"queued": 0, "waiting_retry": [], "archived": 0, "approved": 1}
     assert client.post("/api/plugins/campaign/archive/backfill", json={}).json() == {"queued": [a["id"]]}
     assert "archive_enabled is off" in client.post("/api/plugins/campaign/archive/drain").json()["skipped"]
-    row = client.get(f"/api/plugins/campaign/campaigns/{c['id']}/assets").json()["assets"][0]
-    assert row["archived"] is None
+
+
+def test_reconcile_finds_approvals_without_any_hook_and_never_unparks(c, gh):
+    a = _approved(c, "a.mp4")
+    b = _approved(c, "b.mp4")
+    assert sorted(archive.reconcile()) == sorted([a["id"], b["id"]]) and archive.reconcile() == []
+    store.update_archive_queue(a["id"], attempts=10, next_at="9999-12-31T00:00:00+00:00")
+    archive.reconcile()
+    assert next(q for q in store.archive_queue() if q["asset_id"] == a["id"])["attempts"] == 10
+    os.unlink(a["path"])
+    archive.drain(CFG, gh=gh, now=NOW)  # b archives; a stays parked
+    assert archive.reconcile() == [] and [q["asset_id"] for q in store.archive_queue()] == [a["id"]]
+    rfr = store.add_asset(c["id"], "clip", "not approved")
+    assert rfr["id"] not in archive.reconcile()
 
 
 def test_the_surface_drains_while_enabled(c, gh, monkeypatch):
@@ -534,8 +543,11 @@ def test_the_surface_drains_while_enabled(c, gh, monkeypatch):
     assert "archive" not in surface.tick(NOW)
     surface.configure(lambda: {**CFG, "retention_mode": "disabled"})
     assert surface.tick(NOW) == {"archive": {"uploaded": []}} and len(calls) == 1
-    store.dequeue_archive([q["asset_id"] for q in store.archive_queue()])
-    assert surface.tick(NOW) == {}, "an empty queue makes no GitHub call"
+
+
+def test_a_pass_with_nothing_due_makes_no_github_call(c, gh):
+    assert archive.drain(CFG, gh=gh, now=NOW) == {"uploaded": [], "cataloged": [], "errors": []}
+    assert gh.calls == []
 
 
 def test_the_backup_tool_reports_and_backfills(registry, c):

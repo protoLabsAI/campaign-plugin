@@ -114,6 +114,12 @@ def register(registry) -> None:
         registry.register_router(build_data_router(getattr(registry, "emit", None)), prefix="/api/plugins/campaign")
     except Exception:
         log.exception("[campaign] mounting routers failed")
+    try:  # the protoContent archive's operator routes — their own router, same gated prefix
+        from .archive_api import build_archive_router
+
+        registry.register_router(build_archive_router(), prefix="/api/plugins/campaign")
+    except Exception:
+        log.exception("[campaign] mounting the archive routes failed")
 
     # The library surface: the daily retention pass (report-only until the operator flips
     # retention_mode). Module-level start/stop, so a config reload's re-register is the SAME

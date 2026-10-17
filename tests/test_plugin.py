@@ -137,7 +137,7 @@ def test_no_cross_plugin_imports():
 def test_register_contributes_tools_routers_and_the_setup_step(registry):
     campaign.register(registry)
     assert set(registry.tool_names()) == TOOLS
-    assert [p for p, _ in registry.routers] == ["/plugins/campaign", "/api/plugins/campaign"]
+    assert [p for p, _ in registry.routers] == ["/plugins/campaign", "/api/plugins/campaign", "/api/plugins/campaign"]
     assert list(registry.steps) == ["install-chromium", "check-setup"]
 
 

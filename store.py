@@ -754,6 +754,17 @@ def enqueue_archive(asset_id: int, campaign_id: int = 0, stage: str = "upload") 
         )
 
 
+def enqueue_archive_new(asset_id: int, campaign_id: int = 0) -> bool:
+    """Queue an asset only if it isn't queued already — never resets a parked row's retry clock
+    (that's what an explicit backfill is for). True when it was added."""
+    with _write() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO archive_queue (asset_id, campaign_id, queued_at) VALUES (?, ?, ?)",
+            (int(asset_id), int(campaign_id or 0), _now()),
+        )
+        return cur.rowcount > 0
+
+
 def archive_queue() -> list[dict[str, Any]]:
     return _read("SELECT * FROM archive_queue ORDER BY asset_id")
 

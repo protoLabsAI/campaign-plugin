@@ -14,8 +14,10 @@ protoContent (``protoLabsAI/protoContent``, private) is the marketing hub. What 
   (branch ``media-catalog/<slug>``): every drain adds its new entries to that branch, and a new
   PR opens only after the last one merged. Nothing here ever merges it.
 
-**Flow.** Approving an asset in the gallery queues it (``store.enqueue_archive``); so does
-:func:`backfill` for every approved, non-superseded asset. The library surface drains the
+**Flow.** Each pass first :func:`reconcile`-s: every approved asset with no archive record (or
+none for its current campaign's catalog) is queued — so an approval in the gallery, or an
+approved asset collected into another campaign, needs no hook anywhere. :func:`backfill`
+re-queues every approved, non-superseded asset explicitly (and un-parks a parked one). The library surface drains the
 queue every minute while ``archive_enabled`` is on and a token is set: hash → upload (unless
 ``meta.archive.sha256`` already matches — same sha256 = already archived; a same-named asset
 already on the release with the right size is adopted instead of re-uploaded) → record
@@ -423,10 +425,24 @@ def _backoff(attempts: int) -> float:
     return BACKOFF_S[min(max(attempts, 1), len(BACKOFF_S)) - 1]
 
 
-def queue_approved(asset: dict[str, Any]) -> None:
-    """Queue an asset the operator just approved (the review route calls this)."""
-    if asset and asset.get("status") == "approved":
-        store.enqueue_archive(asset["id"], asset["campaign_id"])
+def reconcile() -> list[int]:
+    """Find what needs backing up — no hook in the review route required. Queues (once; a
+    parked row stays parked) every APPROVED asset that has no archive record yet, or whose
+    record doesn't list its CURRENT campaign's catalog (it was approved, moved or copied into a
+    collection since). Cheap: it reads the approved rows, never a file."""
+    queued = {q["asset_id"] for q in store.archive_queue()}
+    added = []
+    for a in store.list_assets(status="approved"):
+        if a["id"] in queued:
+            continue
+        arch = (a.get("meta") or {}).get("archive") or {}
+        if arch.get("url") and arch.get("sha256"):
+            c = store.get_campaign(a["campaign_id"])
+            if c is None or campaign_slug(c) in (arch.get("cataloged_in") or []):
+                continue
+        if store.enqueue_archive_new(a["id"], a["campaign_id"]):
+            added.append(a["id"])
+    return added
 
 
 def backfill(campaign_id: int = 0) -> list[int]:
@@ -450,6 +466,8 @@ def drain(cfg: dict[str, Any] | None, *, gh: GitHub | None = None, now: datetime
     if not _DRAIN_LOCK.acquire(blocking=False):
         return {"skipped": "another archive pass is running"}
     try:
+        if not problems(settings(cfg)):
+            reconcile()
         return _drain(cfg, gh=gh, now=now, limit=limit)
     finally:
         _DRAIN_LOCK.release()

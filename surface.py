@@ -65,19 +65,13 @@ def retention_due(cfg: dict[str, Any], now: datetime) -> bool:
     return at is None or (now - at).total_seconds() >= RETENTION_EVERY_S
 
 
-def store_queue_nonempty() -> bool:
-    from . import store
-
-    return bool(store.archive_queue())
-
-
 def tick(now: datetime | None = None) -> dict[str, Any]:
     """One pass. Returns what ran (for tests and the log)."""
     now = now or datetime.now(UTC)
     cfg = config()
     ran: dict[str, Any] = {}
     try:
-        if archive.settings(cfg)["enabled"] and store_queue_nonempty():
+        if archive.settings(cfg)["enabled"]:  # the pass reconciles first; no GitHub call unless work is due
             ran["archive"] = archive.drain(cfg, now=now)
     except Exception:  # noqa: BLE001 — one bad pass never kills the loop
         log.exception("[campaign] archive pass failed")

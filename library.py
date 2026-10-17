@@ -123,17 +123,7 @@ def move_assets(asset_ids: list[int], target_campaign_id: int, *, lineage: bool 
     lanes = _lane_map(rows, p["target"]["id"])
     moves = {a["id"]: lanes.get((a["campaign_id"], int(a.get("lane_id") or 0)), 0) for a in rows}
     store.move_rows(moves, p["target"]["id"], allow_approved=operator)
-    _queue_catalog(sorted(moves))
     return {**p, "done": sorted(moves)}
-
-
-def _queue_catalog(ids: list[int]) -> None:
-    """An approved asset that arrives in a campaign belongs in THAT campaign's catalog too. The
-    archive sees the same sha256 and only adds the catalog entry — the bytes never re-upload."""
-    for aid in ids:
-        a = store.get_asset(aid)
-        if a and a["status"] == "approved":
-            store.enqueue_archive(a["id"], a["campaign_id"])
 
 
 # ── copy ──────────────────────────────────────────────────────────────────────
@@ -268,7 +258,6 @@ def copy_assets(asset_ids: list[int], target_campaign_id: int, *, lineage: bool 
             # only replacements that came along: a chain never points into another campaign
             store.set_meta_paths(imap[a["id"]], superseded_by=[imap[i] for i in a["superseded_by"] if i in imap])
 
-    _queue_catalog(made)
     return {**p, "done": made, "map": {str(k): v for k, v in imap.items() if k in {x["asset_id"] for x in p["items"]}},
             "files_copied": len(copied), "no_file": skipped, "already_copied": sorted(existing.keys() & {a["id"] for a in rows})}  # fmt: skip
 
