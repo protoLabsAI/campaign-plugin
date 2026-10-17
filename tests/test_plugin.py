@@ -46,6 +46,8 @@ TOOLS = {
     "campaign_produce_video",
     "campaign_video_status",
     "campaign_prune",
+    "campaign_archive",
+    "campaign_collect",
 }
 
 

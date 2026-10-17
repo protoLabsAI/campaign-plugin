@@ -107,6 +107,7 @@ loads nothing from the network at all.
 | Tool | What it does |
 |---|---|
 | `campaign_create` / `campaign_update` / `campaign_list` / `campaign_get` | The plan: goal, target metric, launch window, target URL, goal math, sourced assumptions, channel plan, do-not list |
+| `campaign_collect` / `campaign_archive` | Collections: move or copy assets (with their lineage) into another campaign; archive a campaign (hidden by default) or bring it back (see **Collections**) |
 | `campaign_lane` | A lane: name, pitch, audience, hero asset |
 | `campaign_asset_add` / `campaign_asset_update` / `campaign_assets` | The shot list. Status `planned → scripted → captured → rendered → ready_for_review`, or `superseded` (with `superseded_by`) to retire a replaced take; `ready_for_review` is refused if the file is missing or breaks its hard limit; `approved`/`rejected` are refused outright, and so is superseding an approved asset. `campaign_assets` hides superseded takes unless `include_superseded=true` |
 | `campaign_milestone` / `campaign_decision` | Dated milestones (owner agent/operator); operator decisions with options + a recommendation |
@@ -287,6 +288,32 @@ on for itself. `campaign_prune` shows the dry run any time; the operator routes 
 `GET /api/plugins/campaign/retention` (the last saved report + a fresh plan) and
 `POST /api/plugins/campaign/retention/prune` (`{"dry_run": false}` prunes now, whatever the
 mode).
+
+## Collections — keep the good ones together, start fresh
+
+A collection is a campaign. To gather the keepers and start over:
+
+1. `campaign_create(name="protoAgent launch — best of")`.
+2. `campaign_collect(target_campaign_id=<new>, asset_ids=[…])` — a **dry run** by default:
+   it lists every asset that would come, with sizes. With `lineage=true` (default) that is the
+   selected assets **plus everything they were made from** (the take a render was cut from, a
+   bookended clip's render, a montage's inputs), so the chain still reads and retention keeps it.
+3. Run it for real (`dry_run=false`):
+   * `mode="move"` re-homes the rows — same ids, same files (they stay where they are on disk,
+     inside the media root), same status and approval. Lanes are matched by name in the
+     target (created when missing).
+   * `mode="copy"` duplicates them: files are COPIED into the target's folder (same layout),
+     side files too (raw masters, a take's stills and timing log), and every id and path in the
+     copies is re-pointed at the copies. Copying the same asset again maps to its existing copy.
+4. `campaign_archive(old_id)` — hidden from `campaign_list` and the gallery picker (**Show
+   archived** brings it back); nothing in it is touched. `archived=false` restores the status it
+   had.
+
+**Approval stays the operator's:** the agent can't move an APPROVED asset, and its copy of one
+lands `ready_for_review`. The operator's route does both:
+`POST /api/plugins/campaign/campaigns/<target>/collect` with
+`{"asset_ids": [...], "mode": "move" | "copy", "lineage": true, "dry_run": false}` (dry run by
+default), and `POST /api/plugins/campaign/campaigns/<id>/archive` with `{"archived": true}`.
 
 ## Directing a clip — two rules from operator review
 

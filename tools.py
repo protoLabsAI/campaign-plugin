@@ -386,7 +386,9 @@ def build_tools(registry):
     @tool
     def campaign_list(include_archived: bool = False) -> str:
         """List campaigns with their ids, status, launch window and asset progress. Start here
-        when the operator refers to 'the launch' or 'the campaign' without an id."""
+        when the operator refers to 'the launch' or 'the campaign' without an id. Archived
+        campaigns (collections set aside with campaign_archive) are left out unless
+        include_archived is true."""
         rows = store.list_campaigns(include_archived=include_archived)
         if not rows:
             return "No campaigns yet. Create one with campaign_create."
@@ -399,6 +401,53 @@ def build_tools(registry):
                 f"{approved}/{len(assets)} assets approved"
             )
         return "\n".join(out)
+
+    @tool
+    def campaign_archive(campaign_id: int, archived: bool = True) -> str:
+        """Archive a campaign — it disappears from campaign_list and the gallery's campaign picker
+        (both can still show archived ones), with every asset, file and approval left exactly as
+        it is — or bring it back (archived=false) to the status it had before. Use it when the
+        operator wants a fresh start: collect the keepers into a new campaign
+        (campaign_collect), then archive the old one."""
+        try:
+            c = store.set_archived(campaign_id, archived)
+        except ValueError as e:
+            return f"Not changed — {e}"
+        _emit("campaign_changed", {"campaign_id": c["id"], "status": c["status"]})
+        return f"Campaign #{c['id']} {c['name']!r} is now {c['status']}."
+
+    @tool
+    def campaign_collect(
+        target_campaign_id: int,
+        asset_ids: list[int],
+        mode: str = "move",
+        lineage: bool = True,
+        dry_run: bool = True,
+    ) -> str:
+        """Gather assets into another campaign (a collection) — e.g. the best takes of a launch
+        into a fresh campaign. mode='move' re-homes the rows (same ids, same files, same status);
+        mode='copy' duplicates them, copying their files into the target's folder. lineage=true
+        (default) brings everything they were made from too (the take a render was cut from, a
+        montage's inputs), so the chain still reads and retention keeps it. dry_run=true (the
+        default) only lists what would move/copy, with sizes — show the operator that list and
+        get their OK first. APPROVED assets: the agent can't move them (the operator's route
+        can), and the agent's copy of one lands as ready_for_review for the operator to
+        re-approve. Create the target first with campaign_create."""
+        from . import library
+
+        try:
+            ids = [int(str(i).lstrip("#")) for i in (asset_ids or [])]
+            if dry_run:
+                out = library.plan(ids, target_campaign_id, mode=mode, lineage=lineage)
+            else:
+                out = library.run(ids, target_campaign_id, mode=mode, lineage=lineage)
+        except ValueError as e:
+            return f"Not collected — {e}"
+        if not dry_run:
+            _emit("campaign_changed", {"campaign_id": target_campaign_id})
+        return library.summary(out) + (
+            "\n\n(dry run — nothing moved; call again with dry_run=false)" if dry_run else ""
+        )
 
     @tool
     def campaign_get(campaign_id: int) -> str:
@@ -1513,6 +1562,8 @@ def build_tools(registry):
         campaign_produce_video,
         campaign_video_status,
         campaign_prune,
+        campaign_archive,
+        campaign_collect,
     ]
 
 

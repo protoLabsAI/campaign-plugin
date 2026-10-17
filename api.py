@@ -115,9 +115,9 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         return datetime.now(UTC)
 
     @router.get("/campaigns")
-    def _campaigns() -> JSONResponse:
+    def _campaigns(include_archived: bool = False) -> JSONResponse:
         rows = []
-        for c in store.list_campaigns(include_archived=True):
+        for c in store.list_campaigns(include_archived=include_archived):
             if not isinstance(c, dict) or not c.get("id"):
                 continue  # (rows are NOT NULL columns; belt and braces for the listing)
             every = store.list_assets(c["id"])
@@ -134,9 +134,53 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
                     "approved": sum(1 for a in assets if a["status"] == "approved"),
                     "superseded": sum(1 for a in every if a["status"] in store.RETIRED_STATUSES),
                     "pruned": sum(1 for a in every if store.is_pruned(a) and a["status"] not in store.RETIRED_STATUSES),
+                    "archived": c.get("status") == "archived",
                 }
             )
-        return JSONResponse({"campaigns": rows})
+        hidden = 0 if include_archived else len(store.list_campaigns(include_archived=True)) - len(rows)
+        return JSONResponse({"campaigns": rows, "archived_hidden": hidden})
+
+    # Collections (library.py): the operator's archive switch, and move/copy with lineage. This is
+    # the route that may move an APPROVED asset or land an approved copy — the agent's tool can't.
+    class Archive(BaseModel):
+        archived: bool = True
+
+    class Collect(BaseModel):
+        asset_ids: list[int]
+        mode: Literal["move", "copy"] = "move"
+        lineage: bool = True
+        dry_run: bool = True
+
+    @router.post("/campaigns/{campaign_id}/archive")
+    def _archive(campaign_id: int, body: Archive) -> JSONResponse:
+        try:
+            c = store.set_archived(campaign_id, body.archived)
+        except ValueError as e:
+            raise HTTPException(404, str(e)) from None
+        if emit:
+            try:
+                emit("campaign_changed", {"campaign_id": c["id"], "status": c["status"]})
+            except Exception:  # noqa: BLE001 — the bus is chrome
+                pass
+        return JSONResponse({"campaign": {"id": c["id"], "name": c["name"], "status": c["status"]}})
+
+    @router.post("/campaigns/{campaign_id}/collect")
+    async def _collect(campaign_id: int, body: Collect) -> JSONResponse:
+        from . import library
+
+        try:
+            if body.dry_run:
+                out = library.plan(body.asset_ids, campaign_id, mode=body.mode, lineage=body.lineage, operator=True)
+            else:
+                out = library.run(body.asset_ids, campaign_id, mode=body.mode, lineage=body.lineage, operator=True)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        if emit and not body.dry_run:
+            try:
+                emit("campaign_changed", {"campaign_id": campaign_id, "collected": len(out.get("done") or [])})
+            except Exception:  # noqa: BLE001 — the bus is chrome
+                pass
+        return JSONResponse({**out, "dry_run": body.dry_run})
 
     @router.get("/campaigns/{campaign_id}/assets")
     def _assets(campaign_id: int) -> JSONResponse:

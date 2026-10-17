@@ -90,6 +90,8 @@ PAGE = r"""<!doctype html>
     </select>
     <label class="toggle" title="Takes a retake replaced, and rows whose file retention pruned — out of the review queue and the counts">
       <input type="checkbox" id="show-superseded"> Show superseded <span id="sup-n"></span></label>
+    <label class="toggle" title="Campaigns set aside with campaign_archive — their assets are untouched">
+      <input type="checkbox" id="show-archived"> Show archived <span id="arch-n"></span></label>
     <span class="spacer"></span>
     <button id="refresh" title="Reload">Refresh</button>
   </header>
@@ -106,7 +108,7 @@ PAGE = r"""<!doctype html>
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
     (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
   const fmtBytes = (n) => !n ? "" : n < 1e6 ? (n/1e3).toFixed(0) + " KB" : (n/1e6).toFixed(2) + " MB";
-  const state = { campaign: "", lane: "", kind: "", status: "", sort: "newest", showSuperseded: false, data: null };
+  const state = { campaign: "", lane: "", kind: "", status: "", sort: "newest", showSuperseded: false, showArchived: false, data: null };
   // ── time ── made_at = when the FILE was produced (shot/render folder stamp, else mtime);
   // created_at = when the row was planned. Sort and "x ago" use made_at, falling back to created_at.
   const ts = (iso) => (iso ? Date.parse(iso) : NaN);
@@ -153,13 +155,16 @@ PAGE = r"""<!doctype html>
   function showErr(msg){ const e = document.getElementById("err"); e.hidden = !msg; e.textContent = msg || ""; }
 
   async function loadCampaigns(){
-    const { campaigns } = await api("/campaigns").then(r => r.json());
+    const { campaigns, archived_hidden } = await api(`/campaigns${state.showArchived ? "?include_archived=true" : ""}`).then(r => r.json());
+    document.getElementById("arch-n").textContent = archived_hidden ? `(${archived_hidden})` : "";
     const sel = document.getElementById("campaign");
     sel.innerHTML = campaigns.map(c =>
-      `<option value="${c.id}">${esc(c.name)} — ${c.approved}/${c.assets} approved${c.review ? ` · ${c.review} to review` : ""}</option>`).join("");
+      `<option value="${c.id}">${c.archived ? "[archived] " : ""}${esc(c.name)} — ${c.approved}/${c.assets} approved${c.review ? ` · ${c.review} to review` : ""}</option>`).join("");
     if (!campaigns.length) {
+      state.data = null; document.getElementById("grid").innerHTML = ""; document.getElementById("chips").innerHTML = "";
       document.getElementById("empty").hidden = false;
-      document.getElementById("empty").textContent = "No campaigns yet. Ask the agent to plan one.";
+      document.getElementById("empty").textContent = archived_hidden
+        ? "Every campaign is archived — tick Show archived to browse them." : "No campaigns yet. Ask the agent to plan one.";
       return;
     }
     if (!state.campaign || !campaigns.some(c => String(c.id) === state.campaign)) state.campaign = String(campaigns[0].id);
@@ -331,6 +336,8 @@ PAGE = r"""<!doctype html>
   // Keep "x min ago" honest while the page sits open.
   setInterval(() => { for (const el of document.querySelectorAll(".when[data-ts]"))
     el.textContent = el.dataset.pre + relTime(Number(el.dataset.ts)); }, 60000);
+  document.getElementById("show-archived").addEventListener("change", (ev) => {
+    state.showArchived = ev.target.checked; loadCampaigns().catch(e => showErr("Could not load campaigns: " + e.message)); });
   document.getElementById("show-superseded").addEventListener("change", (ev) => {
     state.showSuperseded = ev.target.checked; render(); });
   document.getElementById("lane").addEventListener("change", (ev) => { state.lane = ev.target.value; render(); });
