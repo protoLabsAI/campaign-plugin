@@ -544,6 +544,27 @@ def test_the_gallery_flags_stale_and_pruned_rows(client, c):
     assert camp["superseded"] == 1 and camp["review"] == 2
 
 
+def test_the_gallery_badges_an_asset_backed_up_to_protocontent(client, c):
+    done = _asset(c, "renders/d/d.mp4", "approved", days=0)
+    half = _asset(c, "renders/h/h.mp4", "approved", days=0)
+    none = _asset(c, "renders/x/x.mp4", "approved", days=0)
+    rec = {
+        "url": "https://example.invalid/a",
+        "sha256": "0" * 64,
+        "at": "2026-10-17T10:00:00+00:00",
+        "release_tag": "media/launch",
+        "release_asset_id": 7,
+        "cataloged_in": ["launch"],
+    }
+    store.set_archive_meta(done["id"], rec)
+    store.set_archive_meta(half["id"], {**rec, "cataloged_in": []})  # uploaded, catalog PR not yet
+    rows = {a["id"]: a for a in client.get(f"/api/plugins/campaign/campaigns/{c['id']}/assets").json()["assets"]}
+    assert rows[done["id"]]["archived"] == {"at": "2026-10-17T10:00:00+00:00", "release_tag": "media/launch"}
+    assert rows[half["id"]]["archived"] is None and rows[none["id"]]["archived"] is None
+    page = client.get("/plugins/campaign/view").text
+    assert 'class="st archived"' in page and "backed up" in page
+
+
 def test_api_and_view_never_drop_the_manifest_setting():
     import yaml
     from pathlib import Path

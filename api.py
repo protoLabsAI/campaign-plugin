@@ -99,6 +99,14 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         out["pruned"] = store.is_pruned(a)
         age = retention.age_days(_utcnow(), a.get("updated"), a.get("created"))
         out["stale"] = a.get("status") == "ready_for_review" and age is not None and age >= retention.STALE_REVIEW_DAYS
+        # Backed up to protoContent (archive.py): the file is on the release and the catalog lists
+        # it. Only the display fields — never the repo URL or the release asset id.
+        arch = (a.get("meta") or {}).get("archive") if isinstance(a.get("meta"), dict) else None
+        out["archived"] = (
+            {"at": arch.get("at") or "", "release_tag": arch.get("release_tag") or ""}
+            if isinstance(arch, dict) and arch.get("url") and arch.get("cataloged_in")
+            else None
+        )
         return out
 
     def _safe_public(a: dict[str, Any]) -> dict[str, Any] | None:
