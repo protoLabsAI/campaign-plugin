@@ -229,7 +229,8 @@ PAGE = r"""<!doctype html>
           `${dur ? `<span>${dur}</span>` : ""}${a.size_bytes ? `<span>${fmtBytes(a.size_bytes)}</span>` : ""}` +
           `${a.limit_id ? `<span title="hard limit">≤ ${esc(a.limit_id)}</span>` : ""}</div>` +
         (a.notes ? `<div class="${violated ? "warn" : "note"}">${esc(a.notes)}</div>` : "") +
-        (retired(a) ? `<div class="note">Superseded${supBy ? ` by ${esc(supBy)}` : ""}</div>` : "") +
+        (a.status === "superseded" ? `<div class="note">Superseded${supBy ? ` by ${esc(supBy)}` : ""}${a.pruned ? " · file pruned" : ""}</div>` : "") +
+        (a.pruned && a.status !== "superseded" ? `<div class="note">File pruned by retention — the row stays because another asset names it</div>` : "") +
         (replaces ? `<div class="note">Replaces ${esc(replaces)}</div>` : "") +
         (a.review_note ? `<div class="note">Review: ${esc(a.review_note)}</div>` : "") +
         `<div class="actions">` +
