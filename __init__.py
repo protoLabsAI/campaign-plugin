@@ -120,7 +120,7 @@ def register(registry) -> None:
     try:
         from . import surface
 
-        def _live_cfg():
+        def _live_cfg():  # the ONE live-config reader: tools, routes and the surface all use it
             fn = getattr(registry, "live_config", None)
             live = fn() if callable(fn) else None
             return live if isinstance(live, dict) else (registry.config or {})

@@ -72,7 +72,7 @@ def mode(cfg: dict[str, Any] | None) -> str:
 
 
 # ── time ──────────────────────────────────────────────────────────────────────
-def _parse(ts: str) -> datetime | None:
+def parse_ts(ts: str) -> datetime | None:
     try:
         d = datetime.fromisoformat(str(ts or "").strip())
     except ValueError:
@@ -80,9 +80,9 @@ def _parse(ts: str) -> datetime | None:
     return d if d.tzinfo else d.replace(tzinfo=UTC)
 
 
-def _age_days(now: datetime, *stamps: str) -> float | None:
+def age_days(now: datetime, *stamps: str) -> float | None:
     """Days since the LATEST of ``stamps`` (None when none parse — an unknown age never prunes)."""
-    ds = [d for d in (_parse(s) for s in stamps) if d]
+    ds = [d for d in (parse_ts(s) for s in stamps) if d]
     if not ds:
         return None
     return (now - max(ds)).total_seconds() / 86400
@@ -209,15 +209,15 @@ def plan(now: datetime | None = None, campaign_id: int = 0) -> dict[str, Any]:
             continue
         has_file = bool(a.get("path"))
         if a["status"] == "superseded" and has_file:
-            age = _age_days(now, a.get("updated"), a.get("reviewed_at"))
+            age = age_days(now, a.get("updated"), a.get("reviewed_at"))
             if age is not None and age >= SUPERSEDED_DAYS:
                 cand[a["id"]] = "superseded_file"
         elif a["status"] in INTERMEDIATE_STATUSES:
-            age = _age_days(now, a.get("updated"), a.get("created"))
+            age = age_days(now, a.get("updated"), a.get("created"))
             if age is not None and age >= INTERMEDIATE_DAYS:
                 cand[a["id"]] = "intermediate"
         elif a["status"] == "planned" and not has_file:
-            age = _age_days(now, a.get("updated"), a.get("created"))
+            age = age_days(now, a.get("updated"), a.get("created"))
             if age is not None and age >= PLANNED_DAYS:
                 cand[a["id"]] = "planned_empty"
 
@@ -286,7 +286,7 @@ def plan(now: datetime | None = None, campaign_id: int = 0) -> dict[str, Any]:
     stale = []
     for a in rows:
         if a["status"] == "ready_for_review":
-            age = _age_days(now, a.get("updated"), a.get("created"))
+            age = age_days(now, a.get("updated"), a.get("created"))
             if age is not None and age >= STALE_REVIEW_DAYS:
                 stale.append({"asset_id": a["id"], "title": a.get("title") or "", "days": round(age, 1),
                               "campaign_id": a["campaign_id"]})  # fmt: skip

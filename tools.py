@@ -653,11 +653,9 @@ def build_tools(registry):
         return deps.brief()
 
     def _live_cfg() -> dict:
-        fn = getattr(registry, "live_config", None)
-        try:
-            return dict((fn() if callable(fn) else None) or getattr(registry, "config", None) or {})
-        except Exception:  # noqa: BLE001
-            return dict(getattr(registry, "config", None) or {})
+        from . import surface  # register() points it at registry.live_config()
+
+        return surface.config()
 
     @tool
     def campaign_prune(campaign_id: int = 0, dry_run: bool = True) -> str:

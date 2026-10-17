@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 import campaign
 import pytest
-from campaign import api, paths, retention, store, surface
+from campaign import paths, retention, store, surface
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -471,4 +471,18 @@ def test_api_and_view_never_drop_the_manifest_setting():
     assert m["config"]["retention_mode"] == "report", "report-only until Josh flips it"
     (row,) = [s for s in m["settings"] if s["key"] == "retention_mode"]
     assert row["options"] == ["report", "prune", "disabled"] and row.get("spawns") is True
-    assert api is not None
+
+
+def test_a_pruned_tombstone_serves_no_file(client, c):
+    old = _asset(c, "renders/o/o.mp4", "rendered", days=3650)
+    keep = _asset(c, "renders/k/k.mp4", "rendered", days=0)
+    s = store.update_asset(old["id"], status="superseded", superseded_by=[keep["id"]])
+    _age(s["id"], 3650)
+    client.post("/api/plugins/campaign/retention/prune", json={"dry_run": False})
+    assert client.get(f"/api/plugins/campaign/file/{old['id']}").status_code == 404
+    assert client.get(f"/api/plugins/campaign/file/{keep['id']}").status_code == 200
+    assert (
+        client.get(f"/api/plugins/campaign/file/{old['id']}")
+        .headers.get("content-type", "")
+        .startswith("application/json")
+    )

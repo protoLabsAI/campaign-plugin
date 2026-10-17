@@ -39,7 +39,9 @@ def configure(get_cfg: Callable[[], dict[str, Any]]) -> None:
     _cfg = get_cfg
 
 
-def _config() -> dict[str, Any]:
+def config() -> dict[str, Any]:
+    """The plugin's LIVE config (what register() handed :func:`configure`) — the one helper the
+    tools, routes and the surface all read it through."""
     try:
         return dict(_cfg() or {})
     except Exception:  # noqa: BLE001 — a host hiccup reads as defaults (report-only: safe)
@@ -55,14 +57,14 @@ def retention_due(cfg: dict[str, Any], now: datetime) -> bool:
         return True
     if last.get("mode") != m:
         return True
-    at = retention._parse(last.get("generated_at") or "")
+    at = retention.parse_ts(last.get("generated_at") or "")
     return at is None or (now - at).total_seconds() >= RETENTION_EVERY_S
 
 
 def tick(now: datetime | None = None) -> dict[str, Any]:
     """One pass. Returns what ran (for tests and the log)."""
     now = now or datetime.now(UTC)
-    cfg = _config()
+    cfg = config()
     ran: dict[str, Any] = {}
     try:
         if retention_due(cfg, now):

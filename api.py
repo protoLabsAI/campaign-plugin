@@ -97,7 +97,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         from . import retention
 
         out["pruned"] = store.is_pruned(a)
-        age = retention._age_days(_utcnow(), a.get("updated"), a.get("created"))
+        age = retention.age_days(_utcnow(), a.get("updated"), a.get("created"))
         out["stale"] = a.get("status") == "ready_for_review" and age is not None and age >= retention.STALE_REVIEW_DAYS
         return out
 
@@ -178,19 +178,20 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
 
     # Retention (retention.py): the last scheduled report, a fresh dry run, and the operator's
     # own real run — which works whatever retention_mode says (the operator IS the authority the
-    # mode stands in for). Never touches an approved or ready-for-review asset.
+    # mode stands in for). Never touches an approved or ready-for-review asset. Sync routes: the
+    # plan stats every file and the prune unlinks, so they run on FastAPI's threadpool.
     class Prune(BaseModel):
         dry_run: bool = True
         campaign_id: int = 0
 
     @router.get("/retention")
-    async def _retention(campaign_id: int = 0) -> JSONResponse:
+    def _retention(campaign_id: int = 0) -> JSONResponse:
         from . import retention
 
         return JSONResponse({"last": retention.last_report(), "plan": retention.plan(campaign_id=campaign_id)})
 
     @router.post("/retention/prune")
-    async def _prune(body: Prune) -> JSONResponse:
+    def _prune(body: Prune) -> JSONResponse:
         from . import retention
 
         if body.dry_run:

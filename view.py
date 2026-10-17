@@ -274,6 +274,7 @@ PAGE = r"""<!doctype html>
     const btn = ev.target.closest("button"); if (!btn) return;
     const act = btn.dataset.act;
     if (act === "copy") {
+      if (!navigator.clipboard) { btn.textContent = a.path; return; }  // no clipboard off a secure origin: show it
       navigator.clipboard.writeText(a.path).then(() => { btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy path", 1200); },
         () => { btn.textContent = "Copy failed"; });
       return;
