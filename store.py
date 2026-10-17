@@ -445,8 +445,54 @@ ASSET_UPDATABLE = (
 
 
 def is_retired(asset: dict[str, Any]) -> bool:
-    """Out of play (superseded): hidden from the review queue and progress counts."""
-    return asset.get("status") in RETIRED_STATUSES
+    """Out of play (superseded, or a pruned tombstone): hidden from the review queue and counts."""
+    return asset.get("status") in RETIRED_STATUSES or is_pruned(asset)
+
+
+def is_pruned(asset: dict[str, Any]) -> bool:
+    """A tombstone the retention prune left: the row stays (a chain still names it), the file went.
+    A row given a file again is NOT a tombstone, whatever its meta still says."""
+    meta = asset.get("meta") or {}
+    return isinstance(meta, dict) and bool(meta.get("pruned")) and not asset.get("path")
+
+
+def _ints(value: Any) -> list[int]:
+    out = []
+    for v in value if isinstance(value, list) else [value]:
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, int):
+            out.append(v)
+        elif isinstance(v, str) and v.isascii() and v.isdigit():  # '²'.isdigit() is True; int('²') isn't
+            out.append(int(v))
+    return out
+
+
+def scan_ids(obj: Any, keys: tuple[str, ...] = ("asset_id", "clip")) -> set[int]:
+    """Asset ids anywhere under ``obj`` held by one of ``keys`` (a montage's sequence/timeline)."""
+    found: set[int] = set()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in keys:
+                found.update(_ints(v))
+            else:
+                found |= scan_ids(v, keys)
+    elif isinstance(obj, list):
+        for v in obj:
+            found |= scan_ids(v, keys)
+    return found
+
+
+def depends_on(asset: dict[str, Any]) -> set[int]:
+    """The assets ``asset`` was made FROM — what must outlive it: its ``parent_id`` chain link, a
+    montage's ``meta.inputs``, and the clip ids in its sequence/timeline."""
+    meta = asset.get("meta") if isinstance(asset.get("meta"), dict) else {}
+    deps = set(_ints(asset.get("parent_id") or 0)) - {0}
+    deps.update(_ints(meta.get("inputs") or []))
+    for key in ("sequence", "timeline"):
+        deps |= scan_ids(meta.get(key))
+    deps.discard(int(asset.get("id") or 0))
+    return deps
 
 
 def _superseded_by_ids(value: Any) -> list[int]:
@@ -532,6 +578,9 @@ def update_asset(asset_id: int, *, allow_failed_take: bool = False, **fields: An
                     f"asset #{asset_id} is approved — the agent can't change its {', '.join(frozen)}. "
                     "Register the new take as a new asset instead of changing what was approved"
                 )
+        if changes.get("path") and is_pruned({**row, "path": ""}) and "meta" not in changes:
+            # a tombstone given a file again is back in play: drop the prune record
+            changes["meta"] = json.dumps({k: v for k, v in (row.get("meta") or {}).items() if k != "pruned"})
         if changes.get("status") == "superseded":
             _check_replacements(conn, row, replacements)
             changes["superseded_by"] = json.dumps(replacements)
@@ -567,6 +616,95 @@ def delete_assets(asset_ids: list[int]) -> int:
             f"DELETE FROM assets WHERE status != 'approved' AND id IN ({', '.join('?' * len(ids))})", ids
         )
         return cur.rowcount
+
+
+# Never pruned, whatever a plan says: the operator's approval, and what waits on their review.
+PRUNE_PROTECTED = ("approved", "ready_for_review")
+
+
+def _path_refs(conn: sqlite3.Connection, path: str, exclude_id: int) -> list[sqlite3.Row]:
+    """Rows OTHER than ``exclude_id`` that name ``path`` — as their file, or anywhere in their meta
+    (a bookended clip's raw master, a take's stills, its timing log). A tombstone's meta doesn't
+    count: it names files that are already gone."""
+    needle = json.dumps(path)[1:-1]  # the path as it appears inside the meta JSON
+    return conn.execute(
+        "SELECT id, status, path = ? AS path_hit FROM assets WHERE id != ? AND (path = ? OR (instr(meta, ?) > 0"
+        " AND (path != '' OR (CASE WHEN json_valid(meta) THEN json_extract(meta, '$.pruned') END) IS NULL)))",
+        (path, int(exclude_id), path, needle),
+    ).fetchall()
+
+
+def prune_asset(asset_id: int, *, expect_status: str, expect_path: str, mode: str, record: dict[str, Any],
+                pending: frozenset[int] | set[int] = frozenset()) -> tuple[str, str]:  # fmt: skip
+    """The retention prune's ONE write: tombstone a row (keep it, clear its file) or delete it.
+
+    Every check runs on the live table INSIDE the write lock, so a plan made a moment ago can't
+    act on anything that changed since:
+
+    * the row's status and file must still be what the plan saw; approved or ready-for-review
+      is refused outright;
+    * nothing live may depend on it — a row (not a tombstone) whose parent chain, montage inputs
+      or sequence names it, or a lane that made it its hero. An approval of a CHILD landing
+      mid-run therefore protects the parent too (execute() goes children-first, so the child is
+      decided before its parent is touched);
+    * its file may not be another row's file, nor named in a live row's meta (a raw master, a
+      take's stills) — except by a row still ``pending`` in this same run (a take whose stills go
+      first; two rows sharing one file — the file is then left for the LAST of them to unlink);
+    * ``delete`` becomes ``tombstone`` while any other row still names it (parent_id,
+      superseded_by, inputs), so no chain is left dangling — whichever campaign it is in.
+
+    Returns ``(path the caller may now unlink — '' for none, the mode actually used)``.
+    Raises ValueError when the row may not be pruned."""
+    if mode not in ("tombstone", "delete"):
+        raise ValueError(f"mode must be tombstone or delete — got {mode!r}")
+    aid = int(asset_id)
+    with _write() as conn:
+        cur = conn.execute("SELECT * FROM assets WHERE id = ?", (aid,)).fetchone()
+        if cur is None:
+            raise ValueError(f"asset #{asset_id} is gone")
+        row = _row(cur)
+        if row["status"] in PRUNE_PROTECTED:
+            raise ValueError(f"asset #{asset_id} is {row['status']} — never pruned")
+        if row["status"] != expect_status or str(row.get("path") or "") != str(expect_path or ""):
+            raise ValueError(f"asset #{asset_id} changed since the plan was made — left alone")
+        hero = conn.execute("SELECT id FROM lanes WHERE hero_asset_id = ?", (aid,)).fetchone()
+        if hero is not None:
+            raise ValueError(f"asset #{asset_id} is lane {hero['id']}'s hero — left alone")
+        # Who names this id at all (a cheap superset; depends_on decides).
+        named = [
+            _row(r)
+            for r in conn.execute(
+                "SELECT * FROM assets WHERE id != ? AND (parent_id = ? OR instr(meta, ?) > 0 OR instr(superseded_by, ?) > 0)",
+                (aid, aid, str(aid), str(aid)),
+            )
+        ]
+        for o in named:
+            if aid in depends_on(o) and not is_pruned(o):
+                raise ValueError(f"#{o['id']} ({o['status']}) depends on asset #{asset_id} — left alone")
+        path = str(row.get("path") or "")
+        unlink = path
+        if path:
+            refs = _path_refs(conn, path, aid)
+            others = [r for r in refs if r["id"] not in pending]
+            if others:
+                raise ValueError(f"asset #{asset_id}'s file is still named by #{others[0]['id']} — left alone")
+            if any(r["path_hit"] for r in refs):
+                # the same FILE is another pending row's too: prune this row, leave the file for the
+                # last row that names it — a file is deleted only once nothing names it
+                unlink = ""
+        if mode == "delete" and any(aid in depends_on(o) or aid in _ints(o.get("superseded_by") or []) for o in named):
+            mode = "tombstone"
+        if mode == "delete":
+            conn.execute("DELETE FROM assets WHERE id = ? AND status NOT IN ('approved', 'ready_for_review')", (aid,))
+        else:
+            meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+            meta = {**meta, "pruned": record}
+            conn.execute(
+                "UPDATE assets SET path = '', meta = ?, updated = ? WHERE id = ?"
+                " AND status NOT IN ('approved', 'ready_for_review')",
+                (json.dumps(meta), _now(), aid),
+            )
+    return unlink, mode
 
 
 def review_gate(asset: dict[str, Any]) -> list[str]:
@@ -863,10 +1001,13 @@ def status_summary(campaign_id: int, today: str = "") -> dict[str, Any]:
     assets = list_assets(campaign_id)
     lane_names = {ln["id"]: ln["name"] for ln in lanes(campaign_id)}
     counts = {s: 0 for s in ASSET_STATUSES if s not in RETIRED_STATUSES}
-    superseded = 0
+    superseded = pruned = 0
     for a in assets:
-        if is_retired(a):
-            superseded += 1
+        if is_retired(a):  # superseded, or a pruned tombstone — counted apart, never as the other
+            if a["status"] in RETIRED_STATUSES:
+                superseded += 1
+            else:
+                pruned += 1
         else:
             counts[a["status"]] = counts.get(a["status"], 0) + 1
 
@@ -908,6 +1049,7 @@ def status_summary(campaign_id: int, today: str = "") -> dict[str, Any]:
         "counts": counts,
         "progress": {"approved": done, "total": total},
         "superseded": superseded,
+        "pruned": pruned,
         "on_operator": on_operator,
         "on_agent": on_agent,
     }

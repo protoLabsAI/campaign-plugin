@@ -92,42 +92,70 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         # or just the file name for anything outside it.
         out["path"] = _rel_path(a.get("path") or "")
         out["can_review"] = a.get("status") in ("ready_for_review", "approved", "rejected")
+        # Retention: a pruned tombstone (its file went; the row stays so a chain still reads), and
+        # a ready-for-review asset nobody has looked at in STALE_REVIEW_DAYS (never auto-deleted).
+        from . import retention
+
+        out["pruned"] = store.is_pruned(a)
+        age = retention.age_days(_utcnow(), a.get("updated"), a.get("created"))
+        out["stale"] = a.get("status") == "ready_for_review" and age is not None and age >= retention.STALE_REVIEW_DAYS
         return out
 
+    def _safe_public(a: dict[str, Any]) -> dict[str, Any] | None:
+        """One malformed row is skipped (and logged), never a 500 for the whole gallery."""
+        try:
+            return _public_asset(a)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[campaign] skipping asset #%s in the gallery listing: %s", a.get("id"), e)
+            return None
+
+    def _utcnow():
+        from datetime import UTC, datetime
+
+        return datetime.now(UTC)
+
     @router.get("/campaigns")
-    async def _campaigns() -> JSONResponse:
+    def _campaigns() -> JSONResponse:
         rows = []
         for c in store.list_campaigns(include_archived=True):
+            if not isinstance(c, dict) or not c.get("id"):
+                continue  # (rows are NOT NULL columns; belt and braces for the listing)
             every = store.list_assets(c["id"])
+            every = [a for a in every if isinstance(a, dict) and a.get("status")]  # a malformed row never 500s
             assets = [a for a in every if not store.is_retired(a)]  # superseded takes don't count
             rows.append(
                 {
                     "id": c["id"],
-                    "name": c["name"],
-                    "status": c["status"],
-                    "launch_window": c["launch_window"],
+                    "name": c.get("name") or "",
+                    "status": c.get("status") or "",
+                    "launch_window": c.get("launch_window") or "",
                     "assets": len(assets),
                     "review": sum(1 for a in assets if a["status"] == "ready_for_review"),
                     "approved": sum(1 for a in assets if a["status"] == "approved"),
-                    "superseded": len(every) - len(assets),
+                    "superseded": sum(1 for a in every if a["status"] in store.RETIRED_STATUSES),
+                    "pruned": sum(1 for a in every if store.is_pruned(a) and a["status"] not in store.RETIRED_STATUSES),
                 }
             )
         return JSONResponse({"campaigns": rows})
 
     @router.get("/campaigns/{campaign_id}/assets")
-    async def _assets(campaign_id: int) -> JSONResponse:
+    def _assets(campaign_id: int) -> JSONResponse:
         if store.get_campaign(campaign_id) is None:
             raise HTTPException(404, "no such campaign")
         return JSONResponse(
             {
-                "lanes": [{"id": ln["id"], "name": ln["name"]} for ln in store.lanes(campaign_id)],
-                "assets": [_public_asset(a) for a in store.list_assets(campaign_id)],
+                "lanes": [
+                    {"id": ln.get("id"), "name": ln.get("name") or ""}
+                    for ln in store.lanes(campaign_id)
+                    if isinstance(ln, dict) and ln.get("id")
+                ],
+                "assets": [p for p in (_safe_public(a) for a in store.list_assets(campaign_id)) if p],
                 "statuses": list(store.ASSET_STATUSES),
             }
         )
 
     @router.get("/file/{asset_id}")
-    async def _file(asset_id: int):
+    def _file(asset_id: int):
         a = store.get_asset(asset_id)
         if a is None or not a.get("path"):
             raise HTTPException(404, "no file for this asset")
@@ -152,7 +180,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         return FileResponse(p, media_type=media, headers=SAFE_HEADERS)
 
     @router.post("/assets/{asset_id}/review")
-    async def _review(asset_id: int, body: Review) -> JSONResponse:
+    def _review(asset_id: int, body: Review) -> JSONResponse:
         try:
             a = store.review(asset_id, body.decision, body.note, body.superseded_by)
         except ValueError as e:
@@ -162,12 +190,50 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
                 emit("asset_reviewed", {"campaign_id": a["campaign_id"], "asset_id": a["id"], "status": a["status"]})
             except Exception:  # noqa: BLE001 — the bus is chrome
                 pass
-        return JSONResponse({"asset": _public_asset(a)})
+        return JSONResponse({"asset": _safe_public(a) or {"id": a.get("id"), "status": a.get("status")}})
+
+    # Retention (retention.py): the last scheduled report, a fresh dry run, and the operator's
+    # own real run — which works whatever retention_mode says (the operator IS the authority the
+    # mode stands in for). Never touches an approved or ready-for-review asset. Sync routes: the
+    # plan stats every file and the prune unlinks, so they run on FastAPI's threadpool.
+    class Prune(BaseModel):
+        dry_run: bool = True
+        campaign_id: int = 0
+
+    @router.get("/retention")
+    def _retention(campaign_id: int = 0) -> JSONResponse:
+        from . import retention
+
+        try:
+            return JSONResponse({"last": retention.last_report(), "plan": retention.plan(campaign_id=campaign_id)})
+        except Exception:  # noqa: BLE001 — say so plainly; the details are in the log
+            log.exception("[campaign] retention plan failed")
+            raise HTTPException(500, "the retention plan failed — see the agent log") from None
+
+    @router.post("/retention/prune")
+    def _prune(body: Prune) -> JSONResponse:
+        from . import retention
+
+        try:
+            if body.dry_run:
+                return JSONResponse({**retention.plan(campaign_id=body.campaign_id), "dry_run": True})
+            report = retention.execute(campaign_id=body.campaign_id)
+        except Exception as e:  # noqa: BLE001 — a failed plan (e.g. unreadable job records) deletes nothing
+            log.exception("[campaign] retention prune failed")
+            raise HTTPException(
+                500, f"prune failed ({type(e).__name__}) — nothing further was deleted; see the agent log"
+            ) from None
+        if emit:
+            try:
+                emit("campaign_changed", {"campaign_id": body.campaign_id, "pruned": len(report["done"])})
+            except Exception:  # noqa: BLE001 — the bus is chrome
+                pass
+        return JSONResponse(report)
 
     # Video jobs (campaign_produce_video): progress + gates + where the files are, for a
     # dashboard or an API caller polling a job it started. Files download through /file/{id}.
     @router.get("/videos")
-    async def _videos() -> JSONResponse:
+    def _videos() -> JSONResponse:
         from . import produce
 
         # A malformed record is skipped (and logged) rather than 500-ing the whole listing.
@@ -182,7 +248,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         return JSONResponse({"jobs": jobs})
 
     @router.get("/videos/{job_id}")
-    async def _video(job_id: str) -> JSONResponse:
+    def _video(job_id: str) -> JSONResponse:
         from . import produce
 
         job = produce.load(job_id)
@@ -213,7 +279,8 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
             "downloads": {
                 k: f"/api/plugins/campaign/file/{int(aid)}"
                 for k, aid in (d.get("assets") or {}).items()
-                if (isinstance(aid, int) and not isinstance(aid, bool)) or (isinstance(aid, str) and aid.isdigit())
+                if (isinstance(aid, int) and not isinstance(aid, bool))
+                or (isinstance(aid, str) and aid.isascii() and aid.isdigit())
             },
             "links": d.get("links") or {},
             "created": job.get("created"),
