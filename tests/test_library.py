@@ -340,3 +340,11 @@ def test_a_failed_copy_leaves_no_half_copied_files_and_no_rows(client, src, best
     assert r.status_code == 500 and "OSError" in r.json()["detail"]
     assert store.list_assets(best["id"]) == []
     assert not [p for p in paths.campaign_dir(best["id"], best["name"]).rglob("*") if p.is_file()]
+
+
+def test_a_copy_never_points_a_chain_into_another_campaign(src, best):
+    old = _row(src, "renders/old.mp4")
+    new = _row(src, "renders/new.mp4", "ready_for_review")
+    store.update_asset(old["id"], status="superseded", superseded_by=[new["id"]])
+    out = library.copy_assets([old["id"]], best["id"], lineage=False)
+    assert store.get_asset(out["map"][str(old["id"])])["superseded_by"] == []

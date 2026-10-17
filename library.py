@@ -255,7 +255,8 @@ def copy_assets(asset_ids: list[int], target_campaign_id: int, *, lineage: bool 
     # 4. Chains that point FORWARD (superseded_by names a newer take) — now every copy has an id.
     for a in todo:
         if a.get("superseded_by"):
-            store.set_meta_paths(imap[a["id"]], superseded_by=[imap.get(i, i) for i in a["superseded_by"]])
+            # only replacements that came along: a chain never points into another campaign
+            store.set_meta_paths(imap[a["id"]], superseded_by=[imap[i] for i in a["superseded_by"] if i in imap])
 
     return {**p, "done": made, "map": {str(k): v for k, v in imap.items() if k in {x["asset_id"] for x in p["items"]}},
             "files_copied": len(copied), "no_file": skipped, "already_copied": sorted(existing.keys() & {a["id"] for a in rows})}  # fmt: skip

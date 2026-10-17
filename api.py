@@ -119,10 +119,13 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         rows = []
         every_campaign = store.list_campaigns(include_archived=True)
         shown = [c for c in every_campaign if include_archived or c.get("status") != "archived"]
+        by_campaign: dict[int, list] = {}
+        for a in store.list_assets():  # one query, grouped — not one per campaign
+            by_campaign.setdefault(a["campaign_id"], []).append(a)
         for c in shown:
             if not isinstance(c, dict) or not c.get("id"):
                 continue  # (rows are NOT NULL columns; belt and braces for the listing)
-            every = store.list_assets(c["id"])
+            every = by_campaign.get(c["id"], [])
             every = [a for a in every if isinstance(a, dict) and a.get("status")]  # a malformed row never 500s
             assets = [a for a in every if not store.is_retired(a)]  # superseded takes don't count
             rows.append(
@@ -187,6 +190,9 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
             raise HTTPException(
                 500, f"collect failed ({type(e).__name__}) — nothing was changed; see the agent log"
             ) from None
+        except Exception as e:  # noqa: BLE001 — e.g. a locked database: a clear 500, details in the log
+            log.exception("[campaign] collect into campaign %s failed", campaign_id)
+            raise HTTPException(500, f"collect failed ({type(e).__name__}) — see the agent log") from None
         if emit and not body.dry_run:
             try:
                 emit("campaign_changed", {"campaign_id": campaign_id, "collected": len(out.get("done") or [])})
@@ -246,7 +252,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
                 emit("asset_reviewed", {"campaign_id": a["campaign_id"], "asset_id": a["id"], "status": a["status"]})
             except Exception:  # noqa: BLE001 — the bus is chrome
                 pass
-        return JSONResponse({"asset": _safe_public(a) or {"id": a.get("id"), "status": a.get("status")}})
+        return JSONResponse({"asset": _safe_public(a) or {"id": asset_id, "status": (a or {}).get("status")}})
 
     # Retention (retention.py): the last scheduled report, a fresh dry run, and the operator's
     # own real run — which works whatever retention_mode says (the operator IS the authority the
