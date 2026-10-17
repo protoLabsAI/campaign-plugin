@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/protoLabsAI/studio-brand/schemas/media/catalog.schema.json",
   "title": "Media catalog",
-  "description": "The catalog of one campaign's APPROVED media, archived by the brandLaunch agent's Campaign Studio plugin (protoLabsAI/campaign-plugin). The files themselves are GitHub release assets on this repo (release tag 'media/<slug>'), never committed to git; this file is the committed index. Append/update only: one entry per approved asset, upserted by its id. Owner of writes: the campaign plugin, through a PR per batch.",
+  "description": "The catalog of one campaign's APPROVED media, archived by the brandLaunch agent's Campaign Studio plugin (protoLabsAI/campaign-plugin). The files themselves are GitHub release assets on this repo (release tag 'media/<slug>'), never committed to git; this file is the committed index. Append/update only: one entry per approved asset, upserted by its sha256 (the content identity, so two agent instances sharing a slug never overwrite each other). Owner of writes: the campaign plugin, through a PR per batch.",
   "type": "object",
   "additionalProperties": false,
   "required": ["slug", "campaign", "release_tag", "source", "updated_at", "assets"],

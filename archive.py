@@ -58,6 +58,8 @@ BATCH = 25  # assets per drain — a drain stays bounded; the next tick takes th
 BACKOFF_S = (60, 300, 1800, 7200, 21600)
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$")  # protoContent's slug pattern
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+TOKEN_RE = re.compile(r"^[A-Za-z0-9_]{20,255}$")  # GitHub tokens: no spaces, newlines or quotes
+PARK_AFTER = 10  # attempts; then it waits for a backfill / re-approval instead of retrying forever
 
 
 class ArchiveError(RuntimeError):
@@ -91,6 +93,8 @@ def problems(s: dict[str, Any]) -> list[str]:
         out.append("archive_enabled is off")
     if not s["token"]:
         out.append("no archive_token is set")
+    elif not TOKEN_RE.fullmatch(s["token"]):
+        out.append("archive_token isn't a GitHub token (letters, digits and _ only) — re-paste it")
     if not REPO_RE.fullmatch(s["repo"]):
         out.append(f"archive_repo {s['repo']!r} isn't owner/name")
     if not s["catalog_dir"] or ".." in s["catalog_dir"].split("/"):
@@ -128,8 +132,11 @@ class GitHub:
                 status, raw = r.status, r.read()
         except urllib.error.HTTPError as e:
             status, raw = e.code, (e.read() or b"")
-        except (urllib.error.URLError, OSError, TimeoutError) as e:
-            raise ArchiveError(_redact(f"{method} {urllib.parse.urlsplit(url).path}: {e}", self._token)) from None
+        except Exception as e:  # noqa: BLE001 — URLError, OSError, http.client errors, a bad header…
+            # …any of which may echo the request (the header carries the token): redact, re-raise ours
+            raise ArchiveError(
+                _redact(f"{method} {urllib.parse.urlsplit(url).path}: {type(e).__name__}: {e}", self._token)
+            ) from None
         if status in none_on:
             return None
         if status not in ok:
@@ -198,8 +205,12 @@ class GitHub:
             return None
         import base64
 
+        content = r.get("content") or ""
+        if not content and int(r.get("size") or 0) > 0 and r.get("sha"):
+            # the Contents API leaves `content` empty past 1 MB — the blob API serves up to 100 MB
+            content = (self._req("GET", self._r(f"/git/blobs/{r['sha']}")) or {}).get("content") or ""
         try:
-            return json.loads(base64.b64decode(r.get("content") or "")), r.get("sha") or ""
+            return json.loads(base64.b64decode(content)), r.get("sha") or ""
         except ValueError:
             raise ArchiveError(f"{path} on {ref} isn't valid JSON — fix it by hand before the next archive") from None
 
@@ -335,19 +346,24 @@ def entry(a: dict[str, Any], c: dict[str, Any], slug: str) -> dict[str, Any]:
 
 def catalog_doc(prev: dict[str, Any] | None, c: dict[str, Any], slug: str, entries: list[dict[str, Any]],
                 now: datetime) -> dict[str, Any]:  # fmt: skip
-    """Append/update only: every entry already in the file stays; ours upsert by id."""
+    """Append/update only: every entry already in the file stays; ours upsert by sha256 — the
+    content's identity, so two agent instances (each with its own asset ids) sharing a campaign
+    slug never overwrite each other's entries."""
     from . import __version__
 
-    keep = {int(e["id"]): e for e in ((prev or {}).get("assets") or []) if isinstance(e, dict) and "id" in e}
+    def k(e: dict[str, Any]) -> str:
+        return str(e.get("sha256") or f"id:{e.get('id')}")
+
+    keep = {k(e): e for e in ((prev or {}).get("assets") or []) if isinstance(e, dict)}
     for e in entries:
-        keep[int(e["id"])] = e
+        keep[k(e)] = e
     return {
         "slug": slug,
         "campaign": {"id": c["id"], "name": c["name"]},
         "release_tag": TAG_PREFIX + slug,
         "source": {"plugin": "campaign", "plugin_version": __version__},
         "updated_at": now.isoformat(timespec="seconds"),
-        "assets": [keep[k] for k in sorted(keep)],
+        "assets": sorted(keep.values(), key=lambda e: (int(e.get("id") or 0), k(e))),
     }
 
 
@@ -375,11 +391,15 @@ def commit_catalog(gh: GitHub, c: dict[str, Any], slug: str, catalog_path: str, 
     got = gh.get_file(catalog_path, branch)
     prev, blob = got if got else (None, "")
     doc = catalog_doc(prev, c, slug, mine, now)
-    if prev and {**prev, "updated_at": ""} == {**doc, "updated_at": ""}:
+
+    def _same(x: dict[str, Any] | None) -> dict[str, Any]:  # what counts as a change: the entries
+        return {k: v for k, v in (x or {}).items() if k not in ("updated_at", "source")}
+
+    if prev and _same(prev) == _same(doc):
         changed = False
     else:
         changed = True
-        n_new = len({e["id"] for e in doc["assets"]} - {e.get("id") for e in (prev or {}).get("assets") or []})
+        n_new = len(doc["assets"]) - len((prev or {}).get("assets") or [])
         gh.put_file(catalog_path, branch, json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
                     f"media: catalog {slug} ({len(doc['assets'])} assets, +{n_new})", blob)  # fmt: skip
     if pr is None and changed:
@@ -450,15 +470,17 @@ def _drain(cfg: dict[str, Any] | None, *, gh: GitHub | None, now: datetime | Non
 
     def _fail(aid: int, q: dict[str, Any], err: str) -> None:
         n = int(q["attempts"]) + 1
-        store.update_archive_queue(
-            aid, attempts=n, last_error=_redact(err, s["token"])[:500],
-            next_at=(now + timedelta(seconds=_backoff(n))).isoformat(timespec="seconds"),
-        )  # fmt: skip
+        nxt = (
+            "9999-12-31T00:00:00+00:00"
+            if n >= PARK_AFTER
+            else (now + timedelta(seconds=_backoff(n))).isoformat(timespec="seconds")
+        )
+        store.update_archive_queue(aid, attempts=n, last_error=_redact(err, s["token"])[:500], next_at=nxt)
         out["errors"].append({"asset_id": aid, "error": _redact(err, s["token"])})
 
     try:
         base = gh.default_branch()
-    except ArchiveError as e:
+    except Exception as e:  # noqa: BLE001 — never let a client error (and what it echoes) escape
         for q in due:
             _fail(q["asset_id"], q, str(e))
         return out
@@ -494,13 +516,15 @@ def _drain(cfg: dict[str, Any] | None, *, gh: GitHub | None, now: datetime | Non
             _fail(aid, q, str(e))
         except OSError as e:
             _fail(aid, q, f"reading the file: {e}")
+        except Exception as e:  # noqa: BLE001 — one asset never takes the pass (or the token) down
+            _fail(aid, q, f"{type(e).__name__}: {e}")
 
     for cid, qs in touched.items():
         c = store.require_campaign(cid)
         slug = campaign_slug(c)
         try:
             res = commit_catalog(gh, c, slug, f"{s['catalog_dir']}/{slug}.json", base, now)
-        except ArchiveError as e:
+        except Exception as e:  # noqa: BLE001 — ArchiveError or anything else: redacted, retried
             for q in qs:
                 _fail(q["asset_id"], q, f"catalog: {e}")
             continue

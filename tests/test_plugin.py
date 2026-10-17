@@ -86,7 +86,7 @@ def test_settings_that_name_a_program_to_run_are_marked_spawns():
     # and archive_repo / archive_catalog_dir decide where approved media goes with his token.
     assert spawns == {
         "ffmpeg_path", "interpreter", "upload_dirs", "outro", "intro", "retention_mode", "archive_repo",
-        "archive_catalog_dir",
+        "archive_catalog_dir", "archive_enabled",
     }  # fmt: skip
 
 

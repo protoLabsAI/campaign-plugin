@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import urllib.error
 from datetime import UTC, datetime, timedelta
@@ -549,3 +550,94 @@ def test_the_backup_tool_reports_and_backfills(registry, c):
     registry.config.update(CFG)
     assert "Running: every minute → protoLabsAI/protoContent" in t.invoke({})
     assert TOKEN not in t.invoke({})
+
+
+# ── adversarial-review regressions ────────────────────────────────────────────
+def test_a_malformed_token_is_refused_before_any_request(c, gh, caplog):
+    _approved(c)
+    bad = TOKEN[:20] + "\n" + TOKEN[20:]
+    caplog.set_level(logging.DEBUG)
+    out = archive.drain({**CFG, "archive_token": bad}, gh=gh, now=NOW)
+    assert "isn't a GitHub token" in out["skipped"] and gh.calls == []
+    assert TOKEN[20:] not in caplog.text and TOKEN[20:] not in json.dumps(out)
+
+
+def test_any_client_exception_is_redacted_and_retried(c, caplog):
+    def opener(req, timeout):
+        raise ValueError(f"Invalid header value b'Bearer {TOKEN}'")  # what http.client says for a bad header
+
+    g = archive.GitHub(TOKEN, "o/r", opener=opener)
+    with pytest.raises(archive.ArchiveError) as ei:
+        g.default_branch()
+    assert TOKEN not in str(ei.value) and "ValueError" in str(ei.value)
+    _approved(c)
+    caplog.set_level(logging.DEBUG)
+    out = archive.drain(CFG, gh=g, now=NOW)
+    assert out["errors"] and store.archive_queue()[0]["attempts"] == 1
+    assert TOKEN not in caplog.text + json.dumps(out) + json.dumps(store.archive_queue())
+
+
+def test_an_unexpected_error_on_one_asset_never_stops_the_pass(c, gh):
+    a = _approved(c, "a.mp4")
+    b = _approved(c, "b.mp4")
+    real = gh.upload_asset
+
+    def flaky(release_id, name, path, ctype):
+        if "a.mp4" in name:
+            raise KeyError(f"boom {TOKEN}")
+        return real(release_id, name, path, ctype)
+
+    gh.upload_asset = flaky
+    out = archive.drain(CFG, gh=gh, now=NOW)
+    assert out["uploaded"] == [b["id"]] and [e["asset_id"] for e in out["errors"]] == [a["id"]]
+    assert TOKEN not in json.dumps(out) and TOKEN not in store.archive_queue()[0]["last_error"]
+
+
+def test_a_hopeless_asset_is_parked_not_retried_forever(c, gh):
+    a = _approved(c)
+    os.unlink(a["path"])
+    t = NOW
+    for _ in range(archive.PARK_AFTER):
+        archive.drain(CFG, gh=gh, now=t)
+        t += timedelta(days=1)
+    (q,) = store.archive_queue()
+    assert q["attempts"] == archive.PARK_AFTER and q["next_at"].startswith("9999")
+    assert archive.drain(CFG, gh=gh, now=t)["uploaded"] == []
+    archive.backfill()  # the operator's backfill un-parks it
+    assert store.archive_queue()[0]["next_at"] == ""
+
+
+def test_catalog_entries_from_two_instances_with_the_same_ids_never_collide(c, gh):
+    slug = "protoagent-github-trending-launch-oct-13"
+    a = _approved(c)
+    theirs = {"id": a["id"], "title": "the dev instance's asset with the SAME local id", "sha256": "e" * 64}
+    gh.branches["main"][f"specs/media/catalog/{slug}.json"] = json.dumps({"assets": [theirs]})
+    archive.drain(CFG, gh=gh, now=NOW)
+    doc = _catalog(gh, gh.prs[0]["head"])
+    assert {e["sha256"] for e in doc["assets"]} == {"e" * 64, store.get_asset(a["id"])["meta"]["archive"]["sha256"]}
+
+
+def test_a_plugin_version_bump_alone_is_not_a_catalog_change(c, gh, monkeypatch):
+    _approved(c)
+    archive.drain(CFG, gh=gh, now=NOW)
+    gh.merge(gh.prs[0])
+    monkeypatch.setattr(campaign, "__version__", "9.9.9")
+    archive.backfill()
+    archive.drain(CFG, gh=gh, now=NOW + timedelta(days=1))
+    assert len(gh.prs) == 1 and len(gh.commits) == 1
+
+
+def test_a_catalog_over_1mb_is_read_through_the_blob_api():
+    import base64
+
+    doc = {"assets": [{"id": 1, "sha256": "a" * 64}]}
+    calls = []
+
+    def opener(req, timeout):
+        calls.append(req.full_url)
+        if "/contents/" in req.full_url:
+            return _Resp(200, {"content": "", "encoding": "none", "size": 2_000_000, "sha": "blobsha"})
+        return _Resp(200, {"content": base64.b64encode(json.dumps(doc).encode()).decode()})
+
+    got = archive.GitHub(TOKEN, "o/r", opener=opener).get_file("specs/media/catalog/x.json", "b")
+    assert got == (doc, "blobsha") and calls[-1].endswith("/git/blobs/blobsha")
