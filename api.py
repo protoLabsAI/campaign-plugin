@@ -118,15 +118,17 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
     def _campaigns() -> JSONResponse:
         rows = []
         for c in store.list_campaigns(include_archived=True):
+            if not isinstance(c, dict) or not c.get("id"):
+                continue  # (rows are NOT NULL columns; belt and braces for the listing)
             every = store.list_assets(c["id"])
             every = [a for a in every if isinstance(a, dict) and a.get("status")]  # a malformed row never 500s
             assets = [a for a in every if not store.is_retired(a)]  # superseded takes don't count
             rows.append(
                 {
                     "id": c["id"],
-                    "name": c["name"],
-                    "status": c["status"],
-                    "launch_window": c["launch_window"],
+                    "name": c.get("name") or "",
+                    "status": c.get("status") or "",
+                    "launch_window": c.get("launch_window") or "",
                     "assets": len(assets),
                     "review": sum(1 for a in assets if a["status"] == "ready_for_review"),
                     "approved": sum(1 for a in assets if a["status"] == "approved"),
@@ -142,7 +144,11 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
             raise HTTPException(404, "no such campaign")
         return JSONResponse(
             {
-                "lanes": [{"id": ln["id"], "name": ln["name"]} for ln in store.lanes(campaign_id)],
+                "lanes": [
+                    {"id": ln.get("id"), "name": ln.get("name") or ""}
+                    for ln in store.lanes(campaign_id)
+                    if isinstance(ln, dict) and ln.get("id")
+                ],
                 "assets": [p for p in (_safe_public(a) for a in store.list_assets(campaign_id)) if p],
                 "statuses": list(store.ASSET_STATUSES),
             }
