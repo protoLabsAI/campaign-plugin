@@ -110,8 +110,11 @@ def test_declared_capabilities_match_reality():
     # that is "*", not "no network". (v0.1.0 declared [] and under-stated the blast radius.)
     assert MANIFEST["capabilities"] == {"network": ["*"], "filesystem": "scoped"}
     sources = "\n".join(p.read_text(encoding="utf-8") for p in [*ROOT.glob("*.py"), *ROOT.glob("worker/*.py")])
-    for client in ("import httpx", "import requests", "urllib.request", "aiohttp"):
-        assert client not in sources, f"the plugin's Python makes no outbound calls of its own ({client})"
+    for client in ("httpx", "requests", "urllib.request", "urllib3", "aiohttp", "http.client", "socket"):
+        pattern = rf"^\s*(import|from)\s+{re.escape(client)}\b"
+        assert not re.search(pattern, sources, re.M), (
+            f"the plugin's Python makes no outbound calls of its own ({client})"
+        )
 
 
 def test_no_cross_plugin_imports():

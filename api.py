@@ -119,6 +119,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         rows = []
         for c in store.list_campaigns(include_archived=True):
             every = store.list_assets(c["id"])
+            every = [a for a in every if isinstance(a, dict) and a.get("status")]  # a malformed row never 500s
             assets = [a for a in every if not store.is_retired(a)]  # superseded takes don't count
             rows.append(
                 {
@@ -148,7 +149,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         )
 
     @router.get("/file/{asset_id}")
-    async def _file(asset_id: int):
+    def _file(asset_id: int):
         a = store.get_asset(asset_id)
         if a is None or not a.get("path"):
             raise HTTPException(404, "no file for this asset")
@@ -173,7 +174,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         return FileResponse(p, media_type=media, headers=SAFE_HEADERS)
 
     @router.post("/assets/{asset_id}/review")
-    async def _review(asset_id: int, body: Review) -> JSONResponse:
+    def _review(asset_id: int, body: Review) -> JSONResponse:
         try:
             a = store.review(asset_id, body.decision, body.note, body.superseded_by)
         except ValueError as e:
@@ -183,7 +184,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
                 emit("asset_reviewed", {"campaign_id": a["campaign_id"], "asset_id": a["id"], "status": a["status"]})
             except Exception:  # noqa: BLE001 — the bus is chrome
                 pass
-        return JSONResponse({"asset": _public_asset(a)})
+        return JSONResponse({"asset": _safe_public(a) or {"id": a.get("id"), "status": a.get("status")}})
 
     # Retention (retention.py): the last scheduled report, a fresh dry run, and the operator's
     # own real run — which works whatever retention_mode says (the operator IS the authority the
@@ -226,7 +227,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
     # Video jobs (campaign_produce_video): progress + gates + where the files are, for a
     # dashboard or an API caller polling a job it started. Files download through /file/{id}.
     @router.get("/videos")
-    async def _videos() -> JSONResponse:
+    def _videos() -> JSONResponse:
         from . import produce
 
         # A malformed record is skipped (and logged) rather than 500-ing the whole listing.
@@ -241,7 +242,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         return JSONResponse({"jobs": jobs})
 
     @router.get("/videos/{job_id}")
-    async def _video(job_id: str) -> JSONResponse:
+    def _video(job_id: str) -> JSONResponse:
         from . import produce
 
         job = produce.load(job_id)
