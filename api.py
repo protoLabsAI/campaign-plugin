@@ -115,7 +115,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         return datetime.now(UTC)
 
     @router.get("/campaigns")
-    async def _campaigns() -> JSONResponse:
+    def _campaigns() -> JSONResponse:
         rows = []
         for c in store.list_campaigns(include_archived=True):
             every = store.list_assets(c["id"])
@@ -136,7 +136,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         return JSONResponse({"campaigns": rows})
 
     @router.get("/campaigns/{campaign_id}/assets")
-    async def _assets(campaign_id: int) -> JSONResponse:
+    def _assets(campaign_id: int) -> JSONResponse:
         if store.get_campaign(campaign_id) is None:
             raise HTTPException(404, "no such campaign")
         return JSONResponse(
@@ -272,7 +272,8 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
             "downloads": {
                 k: f"/api/plugins/campaign/file/{int(aid)}"
                 for k, aid in (d.get("assets") or {}).items()
-                if (isinstance(aid, int) and not isinstance(aid, bool)) or (isinstance(aid, str) and aid.isdigit())
+                if (isinstance(aid, int) and not isinstance(aid, bool))
+                or (isinstance(aid, str) and aid.isascii() and aid.isdigit())
             },
             "links": d.get("links") or {},
             "created": job.get("created"),

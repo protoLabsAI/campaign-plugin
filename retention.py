@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -312,6 +313,18 @@ def execute(now: datetime | None = None, campaign_id: int = 0, report: dict[str,
     still before its take, a bookended clip before its render), so a child that
     became protected since the plan was made is refused first and then protects its parent.
     Returns the plan with ``done`` / ``errors`` filled in."""
+    if not _RUN_LOCK.acquire(blocking=False):
+        raise RuntimeError("another prune is already running")
+    try:
+        return _execute(now, campaign_id, report)
+    finally:
+        _RUN_LOCK.release()
+
+
+_RUN_LOCK = threading.Lock()
+
+
+def _execute(now: datetime | None, campaign_id: int, report: dict[str, Any] | None) -> dict[str, Any]:
     now = now or datetime.now(UTC)
     report = dict(report) if report is not None else plan(now, campaign_id)
     done, errors, freed = [], [], 0

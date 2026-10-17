@@ -335,7 +335,9 @@ PAGE = r"""<!doctype html>
     state.showSuperseded = ev.target.checked; render(); });
   document.getElementById("lane").addEventListener("change", (ev) => { state.lane = ev.target.value; render(); });
   document.getElementById("kind").addEventListener("change", (ev) => { state.kind = ev.target.value; render(); });
-  document.getElementById("refresh").addEventListener("click", () => loadCampaigns().catch(e => showErr(String(e))));
+  document.getElementById("refresh").addEventListener("click", () => {
+    for (const u of blobs.values()) URL.revokeObjectURL(u); blobs.clear();  // a re-render or prune changes files
+    loadCampaigns().catch(e => showErr(String(e))); });
 
   let booted = false;
   function boot(){ if (booted) return; booted = true;

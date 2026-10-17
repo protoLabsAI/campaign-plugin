@@ -649,7 +649,7 @@ def prune_asset(asset_id: int, *, expect_status: str, expect_path: str, mode: st
       decided before its parent is touched);
     * its file may not be another row's file, nor named in a live row's meta (a raw master, a
       take's stills) — except by a row still ``pending`` in this same run (a take whose stills go
-      first);
+      first; two rows sharing one file — the file is then left for the LAST of them to unlink);
     * ``delete`` becomes ``tombstone`` while any other row still names it (parent_id,
       superseded_by, inputs), so no chain is left dangling — whichever campaign it is in.
 
@@ -682,10 +682,16 @@ def prune_asset(asset_id: int, *, expect_status: str, expect_path: str, mode: st
             if aid in depends_on(o) and not is_pruned(o):
                 raise ValueError(f"#{o['id']} ({o['status']}) depends on asset #{asset_id} — left alone")
         path = str(row.get("path") or "")
+        unlink = path
         if path:
-            others = [r for r in _path_refs(conn, path, aid) if r["id"] not in pending or r["path_hit"]]
+            refs = _path_refs(conn, path, aid)
+            others = [r for r in refs if r["id"] not in pending]
             if others:
                 raise ValueError(f"asset #{asset_id}'s file is still named by #{others[0]['id']} — left alone")
+            if any(r["path_hit"] for r in refs):
+                # the same FILE is another pending row's too: prune this row, leave the file for the
+                # last row that names it — a file is deleted only once nothing names it
+                unlink = ""
         if mode == "delete" and any(aid in depends_on(o) or aid in _ints(o.get("superseded_by") or []) for o in named):
             mode = "tombstone"
         if mode == "delete":
@@ -698,7 +704,7 @@ def prune_asset(asset_id: int, *, expect_status: str, expect_path: str, mode: st
                 " AND status NOT IN ('approved', 'ready_for_review')",
                 (json.dumps(meta), _now(), aid),
             )
-    return path, mode
+    return unlink, mode
 
 
 def review_gate(asset: dict[str, Any]) -> list[str]:

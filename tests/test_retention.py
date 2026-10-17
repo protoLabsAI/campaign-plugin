@@ -252,7 +252,8 @@ def test_a_pruned_take_lets_its_stills_go_too(c):
 
 def test_a_shared_file_is_kept_while_any_keeper_names_it(c):
     a = _asset(c, "renders/a/x.mp4", "rendered", days=30)
-    store.add_asset(c["id"], "clip", "dup", path=a["path"], status="captured")  # young: a keeper
+    dup = store.add_asset(c["id"], "clip", "dup", path=a["path"], status="captured")
+    _age(dup["id"], 1)  # young: a keeper
     r = retention.execute(NOW)
     assert a["id"] not in r["done"] and os.path.exists(a["path"])
 
@@ -619,3 +620,30 @@ def test_the_file_route_never_serves_outside_the_media_root(client, c, tmp_path,
     a = store.add_asset(c["id"], "clip", how, path=p, status="captured")
     r = client.get(f"/api/plugins/campaign/file/{a['id']}")
     assert r.status_code in (403, 404) and b"secret" not in r.content
+
+
+def test_two_old_rows_sharing_one_file_both_go_and_the_file_goes_last(c):
+    a = _asset(c, "renders/a/x.mp4", "rendered", days=30)
+    b = store.add_asset(c["id"], "clip", "dup", path=a["path"], status="captured")
+    _age(b["id"], 30)
+    r = retention.execute(NOW)
+    assert r["errors"] == [] and set(r["done"]) == {a["id"], b["id"]} and not os.path.exists(a["path"])
+
+
+def test_a_shared_file_stays_when_one_of_its_rows_is_refused(c):
+    a = _asset(c, "renders/a/x.mp4", "rendered", days=30)
+    b = store.add_asset(c["id"], "clip", "dup", path=a["path"], status="captured")
+    _age(b["id"], 30)
+    stale = retention.plan(NOW)
+    store.update_asset(a["id"], status="ready_for_review")  # the lower id — processed LAST
+    r = retention.execute(NOW, report=stale)
+    assert b["id"] in r["done"] and a["id"] not in r["done"] and os.path.exists(a["path"])
+
+
+def test_two_prunes_never_run_at_once(c):
+    retention._RUN_LOCK.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="already running"):
+            retention.execute(NOW)
+    finally:
+        retention._RUN_LOCK.release()
