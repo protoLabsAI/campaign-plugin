@@ -687,3 +687,24 @@ def test_a_slow_tick_keeps_its_slot_across_stop_and_start(monkeypatch):
     assert surface._thread is first, "no second loop beside the one still mid-pass"
     release.set()
     surface._stop.set()
+
+
+def test_a_foreign_entry_with_an_odd_id_never_breaks_the_catalog(c, gh):
+    slug = "protoagent-github-trending-launch-oct-13"
+    odd = [{"id": "abc", "sha256": "1" * 64}, {"id": None, "sha256": "2" * 64}, {"sha256": "3" * 64}]
+    gh.branches["main"][f"specs/media/catalog/{slug}.json"] = json.dumps({"assets": odd})
+    a = _approved(c)
+    out = archive.drain(CFG, gh=gh, now=NOW)
+    assert out["errors"] == [] and out["cataloged"] == [a["id"]]
+    assert len(_catalog(gh, gh.prs[0]["head"])["assets"]) == 4
+
+
+def test_a_pass_takes_at_most_a_batch_and_the_next_takes_the_rest(c, gh, monkeypatch):
+    monkeypatch.setattr(archive, "BATCH", 2)
+    ids = [_approved(c, f"c{i}.mp4")["id"] for i in range(5)]
+    first = archive.drain(CFG, gh=gh, now=NOW, limit=archive.BATCH)
+    assert len(first["uploaded"]) == 2 and len(store.archive_queue()) == 3
+    archive.drain(CFG, gh=gh, now=NOW, limit=archive.BATCH)
+    archive.drain(CFG, gh=gh, now=NOW, limit=archive.BATCH)
+    assert store.archive_queue() == [] and len(gh.prs) == 1
+    assert [e["id"] for e in _catalog(gh, gh.prs[0]["head"])["assets"]] == ids

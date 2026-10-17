@@ -346,6 +346,14 @@ def entry(a: dict[str, Any], c: dict[str, Any], slug: str) -> dict[str, Any]:
     }
 
 
+def _id_key(v: Any) -> int:
+    """A sortable id for any entry — a foreign entry's id may be anything (never a crash)."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
 def catalog_doc(prev: dict[str, Any] | None, c: dict[str, Any], slug: str, entries: list[dict[str, Any]],
                 now: datetime) -> dict[str, Any]:  # fmt: skip
     """Append/update only: every entry already in the file stays; ours upsert by sha256 — the
@@ -365,7 +373,7 @@ def catalog_doc(prev: dict[str, Any] | None, c: dict[str, Any], slug: str, entri
         "release_tag": TAG_PREFIX + slug,
         "source": {"plugin": "campaign", "plugin_version": __version__},
         "updated_at": now.isoformat(timespec="seconds"),
-        "assets": sorted(keep.values(), key=lambda e: (int(e.get("id") or 0), k(e))),
+        "assets": sorted(keep.values(), key=lambda e: (_id_key(e.get("id")), k(e))),
     }
 
 
