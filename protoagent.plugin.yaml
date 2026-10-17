@@ -11,7 +11,10 @@ description: >-
   cut many short themed beats + tagline/end cards into one launch video with colour-wipe
   transitions (landscape, vertical, square), reviewed first as a storyboard. Adds a background
   producer subagent, four skills, and an asset gallery for approving what ships.
-  Draft-only: it never posts, holds no platform credentials, and only the operator approves.
+  Draft-only: it never posts to a social platform, holds no platform credentials, and only the
+  operator approves. Approved media can be backed up to protoContent (GitHub release assets +
+  a catalog PR) with an operator-set token. Daily retention prunes old intermediates
+  (report-only until the operator turns it on); collections gather keepers into a campaign.
   Copy is Social Studio's job and browsing is agent_browser's — referenced by name, never
   imported.
 # Provenance (ADR 0027) — shown in the install review when added by git URL.
@@ -21,9 +24,11 @@ guide_url: "https://github.com/protoLabsAI/campaign-plugin#quick-start"
 # current core so the gallery's DS kit, sdk.plugin_store and the install_deps action are all there.
 min_protoagent_version: "0.188.0"
 
-# Declarative posture (ADR 0071). The plugin's Python makes no outbound calls and holds no
-# credentials — but its recording browser (Playwright) loads whatever `base_url` / `goto` URLs a
-# shot script names, and that page pulls in whatever it links to. So, like agent_browser: "*".
+# Declarative posture (ADR 0071). The plugin's Python makes ONE kind of outbound call: archive.py
+# backs approved media up to GitHub (api.github.com / uploads.github.com only — refused for any
+# other host) with the operator's `archive_token`, and only while `archive_enabled` is on. Its
+# recording browser (Playwright) loads whatever `base_url` / `goto` URLs a shot script names, and
+# that page pulls in whatever it links to. So, like agent_browser: "*".
 # Guards (enforced inside the out-of-process browser worker): the browser never reaches this
 # plugin's own data API (no self-approval), and a script's bearer goes only to its base_url
 # origin, read only from CAMPAIGN_* / `bearer_envs` env vars and handed to the worker on stdin.
@@ -63,6 +68,11 @@ config:
   outro: ""                 # YAML: the brand outro a montage appends with {outro: true} — beat, bumper, CTA card
   intro: ""                 # YAML: the brand intro a montage prepends with {intro: true} — bumper, title card, crossfade
   retention_mode: report    # report (daily dry run, the default) | prune (delete per policy) | disabled
+  archive_enabled: false    # back approved media up to protoContent (release assets + a catalog PR)
+  archive_repo: "protoLabsAI/protoContent"
+  archive_catalog_dir: "specs/media/catalog"
+  archive_token: ""         # SECRET — fine-grained PAT on archive_repo only: Contents RW + Pull requests RW
+secrets: [archive_token]    # → secrets.yaml, redacted in the UI; never logged
 # `spawns: true` marks a setting that names a program this plugin RUNS, so the agent's own
 # set_config tool refuses to write it (protoAgent ADR 0019 §3b) — the operator sets it from
 # Settings. `interpreter` is also fenced by name; `ffmpeg_path` is fenced only by the marker.
@@ -71,6 +81,8 @@ config:
 # the agent must never widen it itself; `outro` likewise, because its bumper names a local file the
 # montage reads. `retention_mode` carries it too: flipping it to `prune` is what lets files be
 # DELETED, and that switch is the operator's — the agent must never turn deletion on for itself.
+# `archive_enabled` / `archive_repo` / `archive_catalog_dir` carry it because they decide WHETHER
+# and WHERE approved media is sent with the operator's token.
 # The marker is core's only per-key operator-only fence.
 # Older cores ignore the field.
 settings:
@@ -88,6 +100,10 @@ settings:
   - { key: bearer_envs, label: "Shot-script bearer env vars", type: string, group: "Campaign Studio", description: "Comma-separated environment variable NAMES a shot script may send as its bearer token (auth.bearer_env), besides any CAMPAIGN_* variable. The token goes only to the script's base_url origin. The host's own operator/fleet tokens are always refused." }
   - { key: upload_dirs, label: "Upload folders", type: string, spawns: true, group: "Campaign Studio", description: "Comma- or newline-separated absolute folders a shot script's upload step may hand files from (symlinks resolved, regular files only, 50 MB each). Blank refuses every upload. Key/credential files, credential dirs (.ssh, .aws, …) and the agent's home (~/.protoagent) are refused even inside these; the filesystem root, your home dir or a parent of it, and the agent's home are ignored as too broad. Point it at a folder of demo files the agent can't write into. Operator-only: marked so the agent can't widen it itself." }
   - { key: retention_mode, label: "Retention", type: select, options: [report, prune, disabled], spawns: true, group: "Library", description: "What the daily retention pass does. report (default) = a dry run only: it lists what would go, with sizes, and deletes nothing. prune = delete per policy: superseded files after 7 days (row kept as a tombstone), rendered/captured intermediates after 7 days unless an approved or ready-for-review asset depends on them, planned rows with no file after 30 days. Approved and ready-for-review assets are never deleted; ready-for-review ones idle 14+ days are flagged stale. disabled = no pass." }
+  - { key: archive_enabled, label: "Back up approved media", type: bool, spawns: true, group: "Library", description: "Upload every asset you approve to the archive repo — the file as a release asset (release media/<campaign>, never 'latest'), plus an entry in the campaign's catalog JSON, committed on one open PR per campaign that you merge. Same file = uploaded once. Needs the archive token." }
+  - { key: archive_repo, label: "Archive repo", type: string, spawns: true, group: "Library", description: "owner/name of the repo approved media is backed up to. Operator-only: it decides where your media is sent." }
+  - { key: archive_catalog_dir, label: "Catalog folder", type: string, spawns: true, group: "Library", description: "Folder in the archive repo for the per-campaign catalog JSON (<folder>/<campaign-slug>.json). protoContent's convention: specs/media/catalog, validating against schemas/media/catalog.schema.json." }
+  - { key: archive_token, label: "Archive GitHub token", type: secret, group: "Library", description: "A fine-grained personal access token with access to the archive repo ONLY and these repository permissions: Contents — read and write (releases, release assets, the catalog branch and commit); Pull requests — read and write (open the catalog PR). Metadata — read is included automatically. Stored in secrets.yaml; never logged." }
   - { key: producer_model, label: "Producer model", type: string, group: "Crew models", description: "Model override for the campaign_producer subagent. Blank rides the host's aux-model routing." }
 
 # Console rail view (ADR 0026) — browsing only: every asset of a campaign, playable, with

@@ -20,6 +20,15 @@
   status on the way back. The agent can't move an approved asset and its copy of one lands for
   review; the operator's `POST /campaigns/{id}/collect` and `/archive` routes do both.
   `GET /campaigns` now leaves archived campaigns out unless `include_archived=true`.
+- **Approved media is backed up to protoContent.** Approving an asset queues it; a background
+  pass uploads the file as a release asset (release `media/<campaign>`, never "latest",
+  content-addressed so the same bytes upload once), records `meta.archive = {url, sha256, at}`,
+  and batches the campaign's catalog (`specs/media/catalog/<slug>.json`) onto ONE open PR per
+  campaign in protoContent — never merged by the plugin. Retries with backoff; idempotent by
+  sha256; `campaign_backup(backfill=true)` / `POST /archive/backfill` queue every approved asset.
+  New settings `archive_enabled`, `archive_repo`, `archive_catalog_dir`, and the secret
+  `archive_token` (fine-grained PAT on protoContent only: Contents RW + Pull requests RW). The
+  gallery marks backed-up assets.
 
 ## 0.4.3
 

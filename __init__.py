@@ -6,8 +6,9 @@ shot scripts recorded by headless Chromium, ffmpeg cuts under hard size limits, 
 cards. Copy belongs to Social Studio (``social``) and browser exploration to the core
 ``agent_browser`` plugin — both referenced by tool NAME only, never imported (ADR 0039).
 
-Draft-only: nothing here posts anywhere or holds a platform credential, and only the
-operator approves an asset.
+Draft-only: nothing here posts to a social platform or holds a platform credential, and only
+the operator approves an asset. Its one optional credential is the operator's GitHub token
+(``archive_token``) for backing approved media up to protoContent (``archive.py``).
 
 ``register(registry)`` is the only place plugin code runs (ADR 0018). Host-only imports stay
 inside functions so the suite runs with no protoAgent, and each contribution group is
@@ -113,6 +114,12 @@ def register(registry) -> None:
         registry.register_router(build_data_router(getattr(registry, "emit", None)), prefix="/api/plugins/campaign")
     except Exception:
         log.exception("[campaign] mounting routers failed")
+    try:  # the protoContent archive's operator routes — their own router, same gated prefix
+        from .archive_api import build_archive_router
+
+        registry.register_router(build_archive_router(), prefix="/api/plugins/campaign")
+    except Exception:
+        log.exception("[campaign] mounting the archive routes failed")
 
     # The library surface: the daily retention pass (report-only until the operator flips
     # retention_mode). Module-level start/stop, so a config reload's re-register is the SAME

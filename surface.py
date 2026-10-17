@@ -1,6 +1,10 @@
 """The library's background surface — one daemon thread that keeps the gallery tidy.
 
-Every ``TICK_S`` it runs :func:`tick`, which today does one job:
+Every ``TICK_S`` it runs :func:`tick`, which does two jobs:
+
+* **the archive, every tick** — :func:`archive.drain` uploads what the operator approved to
+  protoContent and batches the catalog onto one PR per campaign (only while
+  ``archive_enabled`` is on and ``archive_token`` is set; a failure backs off and retries).
 
 * **retention, daily** — :func:`retention.run_scheduled` in the ``retention_mode`` the operator
   set (``report`` by default: a dry run whose report is saved for the gallery and
@@ -20,7 +24,7 @@ import threading
 from datetime import UTC, datetime
 from typing import Any, Callable
 
-from . import retention
+from . import archive, retention
 
 log = logging.getLogger("protoagent.plugins.campaign")
 
@@ -67,6 +71,12 @@ def tick(now: datetime | None = None) -> dict[str, Any]:
     cfg = config()
     ran: dict[str, Any] = {}
     try:
+        if archive.settings(cfg)["enabled"]:  # the pass reconciles first; no GitHub call unless work is due
+            ran["archive"] = archive.drain(cfg, now=now)
+    except Exception:  # noqa: BLE001 — one bad pass never kills the loop
+        log.exception("[campaign] archive pass failed")
+        ran["archive"] = "error"
+    try:
         if retention_due(cfg, now):
             report = retention.run_scheduled(cfg, now)
             ran["retention"] = retention.mode(cfg) if report is not None else "disabled"
@@ -99,9 +109,14 @@ def stop() -> None:
     global _thread
     with _lock:
         _stop.set()
-        t, _thread = _thread, None
+        t = _thread
     if t is not None:
         t.join(timeout=5)
+    with _lock:
+        # A tick still mid-pass (a big upload) keeps its slot: start() sees it alive and won't
+        # spawn a second loop beside it; it exits on its own once the pass ends (_stop is set).
+        if _thread is t and (t is None or not t.is_alive()):
+            _thread = None
 
 
 def reload(_cfg_obj: Any = None) -> None:

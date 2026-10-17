@@ -705,6 +705,34 @@ def build_tools(registry):
         return surface.config()
 
     @tool
+    def campaign_backup(backfill: bool = False, campaign_id: int = 0) -> str:
+        """The protoContent backup of APPROVED media: how many approved assets are archived, how
+        many wait in the queue, and any that are retrying (with the error). Every approval the
+        operator makes is queued automatically; backfill=true also queues every approved asset
+        that is already there (campaign_id 0 = all campaigns) — already-archived files are
+        recognised by their sha256 and never upload twice. Files go up as GitHub release assets on
+        protoContent and each campaign's catalog is batched onto ONE open PR there, which the
+        operator merges. Runs in the background while the operator has archive_enabled on and an
+        archive_token set; this tool never uploads anything itself."""
+        from . import archive
+
+        s = archive.settings(_live_cfg())
+        queued = archive.backfill(campaign_id) if backfill else []
+        st = archive.status()
+        out = [f"Archived: {st['archived']} of {st['approved']} approved asset(s); {st['queued']} queued."]
+        if backfill:
+            out.append(f"Queued {len(queued)} approved asset(s) for the backup.")
+        for r in st["waiting_retry"][:20]:
+            out.append(f"- #{r['asset_id']}: retry {r['attempts']} at {r['next_at']} — {r['last_error']}")
+        why = archive.problems(s)
+        out.append(
+            f"Not running: {'; '.join(why)} — the operator sets these in Settings ▸ Campaign Studio ▸ Library."
+            if why
+            else f"Running: every minute → {s['repo']} (release media/<campaign>, catalog in {s['catalog_dir']}/)."
+        )
+        return "\n".join(out)
+
+    @tool
     def campaign_prune(campaign_id: int = 0, dry_run: bool = True) -> str:
         """Retention for the asset gallery: list what the prune would delete, with sizes, by
         rule — superseded files after 7 days (the row stays as a tombstone), rendered/captured
@@ -1562,6 +1590,7 @@ def build_tools(registry):
         campaign_prune,
         campaign_archive,
         campaign_collect,
+        campaign_backup,
     ]
 
 

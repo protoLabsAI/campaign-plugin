@@ -1,0 +1,83 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/protoLabsAI/studio-brand/schemas/media/catalog.schema.json",
+  "title": "Media catalog",
+  "description": "The catalog of one campaign's APPROVED media, archived by the brandLaunch agent's Campaign Studio plugin (protoLabsAI/campaign-plugin). The files themselves are GitHub release assets on this repo (release tag 'media/<slug>'), never committed to git; this file is the committed index. Append/update only: one entry per approved asset, upserted by its sha256 (the content identity, so two agent instances sharing a slug never overwrite each other). Owner of writes: the campaign plugin, through a PR per batch.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["slug", "campaign", "release_tag", "source", "updated_at", "assets"],
+  "properties": {
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$",
+      "description": "The campaign's archive slug — the file name and the release tag suffix. Pinned at first archive, so a renamed campaign keeps its slug."
+    },
+    "campaign": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "integer", "minimum": 1, "description": "The campaign's id in the agent's own campaign database." },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "release_tag": {
+      "type": "string",
+      "pattern": "^media/[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$",
+      "description": "The release holding this campaign's files: 'media/<slug>'. Never marked latest; not a software release."
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plugin", "plugin_version"],
+      "properties": {
+        "plugin": { "type": "string", "const": "campaign" },
+        "plugin_version": { "type": "string" }
+      }
+    },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "assets": {
+      "type": "array",
+      "description": "One entry per approved asset, sorted by id.",
+      "items": { "$ref": "#/definitions/asset" }
+    }
+  },
+  "definitions": {
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "title", "lane", "kind", "width", "height", "duration_s", "size_bytes", "sha256", "file_name",
+        "approved_at", "review_note", "url", "release_tag", "release_asset_name", "archived_at", "source_campaign"
+      ],
+      "properties": {
+        "id": { "type": "integer", "minimum": 1, "description": "The asset's id in the agent's campaign database (stable for the asset's life; a copy into another campaign gets a new id)." },
+        "title": { "type": "string" },
+        "lane": { "type": "string", "description": "The lane (message) the asset belongs to; '' when none." },
+        "kind": { "type": "string", "enum": ["clip", "gif", "still", "card", "copy_ref", "montage"] },
+        "width": { "type": "integer", "minimum": 0 },
+        "height": { "type": "integer", "minimum": 0 },
+        "duration_s": { "type": "number", "minimum": 0, "description": "Seconds; 0 for a still or card." },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The file's SHA-256 — the archive's identity: the same bytes are uploaded once." },
+        "file_name": { "type": "string", "description": "The file's name as produced." },
+        "approved_at": { "type": "string", "description": "When the operator approved it (ISO-8601 UTC)." },
+        "review_note": { "type": "string", "description": "The operator's note at approval ('' when none)." },
+        "url": { "type": "string", "format": "uri", "description": "The release asset's download URL (needs repo access — the repo is private)." },
+        "release_tag": { "type": "string", "description": "The release the file lives on — usually this campaign's, or the campaign it was first archived from for a collected copy." },
+        "release_asset_name": { "type": "string", "description": "'<sha256[:12]>-<file name>' on that release." },
+        "archived_at": { "type": "string", "description": "When the file was uploaded (ISO-8601 UTC)." },
+        "source_campaign": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "name", "slug"],
+          "properties": {
+            "id": { "type": "integer", "minimum": 1 },
+            "name": { "type": "string" },
+            "slug": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}
