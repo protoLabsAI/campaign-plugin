@@ -589,6 +589,16 @@ def test_a_failed_prune_is_a_clear_500_and_deletes_nothing(client, c, monkeypatc
     assert r.status_code == 500 and "ZeroDivisionError" in r.json()["detail"] and os.path.exists(a["path"])
     assert "division" not in r.json()["detail"], "the type, not the message (paths stay in the log)"
     assert client.get("/api/plugins/campaign/retention").status_code == 500
+    assert client.post("/api/plugins/campaign/retention/prune", json={}).status_code == 500, "the dry run too"
+
+
+def test_one_malformed_row_never_500s_the_gallery(client, c, monkeypatch):
+    good = _asset(c, "renders/g/g.mp4", "rendered", days=0)
+    bad = _asset(c, "renders/b/b.mp4", "rendered", days=0)
+    real = store.asset_times
+    monkeypatch.setattr(store, "asset_times", lambda a: 1 / 0 if a["id"] == bad["id"] else real(a))
+    r = client.get(f"/api/plugins/campaign/campaigns/{c['id']}/assets")
+    assert r.status_code == 200 and [a["id"] for a in r.json()["assets"]] == [good["id"]]
 
 
 # The file route is the containment boundary the prune relies on too: a tombstone, a row that

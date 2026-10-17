@@ -101,6 +101,14 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         out["stale"] = a.get("status") == "ready_for_review" and age is not None and age >= retention.STALE_REVIEW_DAYS
         return out
 
+    def _safe_public(a: dict[str, Any]) -> dict[str, Any] | None:
+        """One malformed row is skipped (and logged), never a 500 for the whole gallery."""
+        try:
+            return _public_asset(a)
+        except Exception as e:  # noqa: BLE001
+            log.warning("[campaign] skipping asset #%s in the gallery listing: %s", a.get("id"), e)
+            return None
+
     def _utcnow():
         from datetime import UTC, datetime
 
@@ -134,7 +142,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         return JSONResponse(
             {
                 "lanes": [{"id": ln["id"], "name": ln["name"]} for ln in store.lanes(campaign_id)],
-                "assets": [_public_asset(a) for a in store.list_assets(campaign_id)],
+                "assets": [p for p in (_safe_public(a) for a in store.list_assets(campaign_id)) if p],
                 "statuses": list(store.ASSET_STATUSES),
             }
         )
@@ -190,19 +198,18 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         from . import retention
 
         try:
-            fresh = retention.plan(campaign_id=campaign_id)
+            return JSONResponse({"last": retention.last_report(), "plan": retention.plan(campaign_id=campaign_id)})
         except Exception:  # noqa: BLE001 — say so plainly; the details are in the log
             log.exception("[campaign] retention plan failed")
             raise HTTPException(500, "the retention plan failed — see the agent log") from None
-        return JSONResponse({"last": retention.last_report(), "plan": fresh})
 
     @router.post("/retention/prune")
     def _prune(body: Prune) -> JSONResponse:
         from . import retention
 
-        if body.dry_run:
-            return JSONResponse({**retention.plan(campaign_id=body.campaign_id), "dry_run": True})
         try:
+            if body.dry_run:
+                return JSONResponse({**retention.plan(campaign_id=body.campaign_id), "dry_run": True})
             report = retention.execute(campaign_id=body.campaign_id)
         except Exception as e:  # noqa: BLE001 — a failed plan (e.g. unreadable job records) deletes nothing
             log.exception("[campaign] retention prune failed")
