@@ -24,6 +24,7 @@ writes; additive ``ALTER TABLE`` migrations on connect.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -149,6 +150,7 @@ CREATE TABLE IF NOT EXISTS scripts (
 # so a new status value needs no migration — old rows keep theirs.
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "assets": {"superseded_by": "TEXT NOT NULL DEFAULT '[]'"},  # v0.3.3
+    "campaigns": {"archived_from": "TEXT NOT NULL DEFAULT ''"},  # v0.5.0 — the status to restore
 }
 
 _WRITE_LOCK = threading.Lock()
@@ -289,6 +291,26 @@ def list_campaigns(include_archived: bool = False) -> list[dict[str, Any]]:
     if not include_archived:
         sql += " WHERE status != 'archived'"
     return _read(sql + " ORDER BY id DESC")
+
+
+def set_archived(campaign_id: int, archived: bool = True) -> dict[str, Any]:
+    """Archive a campaign (hidden from lists and the gallery picker by default) or bring it back
+    to the status it had before. Its assets, files and approvals are untouched either way."""
+    c = require_campaign(campaign_id)
+    with _write() as conn:
+        if archived and c["status"] != "archived":
+            conn.execute(
+                "UPDATE campaigns SET archived_from = ?, status = 'archived', updated = ? WHERE id = ?",
+                (c["status"], _now(), int(campaign_id)),
+            )
+        elif not archived and c["status"] == "archived":
+            back = c.get("archived_from") or "paused"
+            back = back if back in CAMPAIGN_STATUSES and back != "archived" else "paused"
+            conn.execute(
+                "UPDATE campaigns SET status = ?, archived_from = '', updated = ? WHERE id = ?",
+                (back, _now(), int(campaign_id)),
+            )
+    return get_campaign(campaign_id)  # type: ignore[return-value]
 
 
 def require_campaign(campaign_id: int) -> dict[str, Any]:
@@ -707,6 +729,89 @@ def prune_asset(asset_id: int, *, expect_status: str, expect_path: str, mode: st
     return unlink, mode
 
 
+# ── collections: moving and copying assets between campaigns (library.py) ────
+def move_rows(moves: dict[int, int], campaign_id: int, *, allow_approved: bool = False) -> int:
+    """Re-home asset rows ``{asset_id: lane_id}`` in ``campaign_id`` — one transaction. The rows
+    keep their ids (so every chain that names them still reads), their files and their status.
+    An APPROVED row moves only when ``allow_approved`` (the operator's route): checked under the
+    lock, so an approval landing mid-plan can't be moved by the agent."""
+    if not moves:
+        return 0
+    require_campaign(campaign_id)
+    now = _now()
+    with _write() as conn:
+        for aid in moves:
+            r = conn.execute("SELECT status FROM assets WHERE id = ?", (int(aid),)).fetchone()
+            if r is None:
+                raise ValueError(f"no asset with id {aid}")
+            if r["status"] == "approved" and not allow_approved:
+                raise ValueError(f"asset #{aid} is approved — only the operator moves an approved asset")
+        for aid, lane in moves.items():
+            conn.execute(
+                "UPDATE assets SET campaign_id = ?, lane_id = ?, updated = ? WHERE id = ?",
+                (int(campaign_id), int(lane or 0), now, int(aid)),
+            )
+    return len(moves)
+
+
+_CLONE_COLS = (
+    "kind", "title", "spec", "owner", "status", "path", "size_bytes", "width", "height", "duration_s",
+    "limit_id", "parent_id", "script_id", "meta", "notes", "review_note", "reviewed_at", "superseded_by",
+)  # fmt: skip
+
+
+def clone_asset(row: dict[str, Any], campaign_id: int, lane_id: int, *, allow_approved: bool = False) -> dict[str, Any]:
+    """Insert a COPY of ``row`` (an asset dict, already re-pointed by the caller) into
+    ``campaign_id``. Only the operator's route may land an ``approved`` copy; the agent's copy of
+    an approved asset is refused here — the caller demotes it to ready_for_review first."""
+    require_campaign(campaign_id)
+    status = _choice(row.get("status") or "planned", ASSET_STATUSES, "status")
+    if status in ("approved", "rejected") and not allow_approved:
+        raise ValueError(f"only the operator lands an {status} copy — copy it as ready_for_review")
+    vals = {k: row.get(k) for k in _CLONE_COLS}
+    vals["status"] = status
+    vals["spec"] = _spec_text(vals.get("spec"))
+    vals["meta"] = json.dumps(vals.get("meta") or {})
+    vals["superseded_by"] = json.dumps(list(vals.get("superseded_by") or []))
+    for k in ("title", "path", "limit_id", "notes", "review_note", "reviewed_at"):
+        vals[k] = str(vals.get(k) or "")
+    for k in ("size_bytes", "width", "height", "parent_id", "script_id"):
+        vals[k] = int(vals.get(k) or 0)
+    vals["duration_s"] = float(vals.get("duration_s") or 0)
+    vals["owner"] = _choice(vals.get("owner") or "agent", OWNERS, "owner")
+    now = _now()
+    cols = ["campaign_id", "lane_id", "created", "updated", *vals]
+    with _write() as conn:
+        cur = conn.execute(
+            f"INSERT INTO assets ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+            (int(campaign_id), int(lane_id or 0), now, now, *vals.values()),
+        )
+        aid = cur.lastrowid
+    return get_asset(aid)  # type: ignore[return-value]
+
+
+def set_meta_paths(asset_id: int, *, path: str | None = None, meta: dict[str, Any] | None = None, **ints: Any) -> None:
+    """Library-internal: re-point a freshly copied row (its file, meta paths, remapped ids)."""
+    sets, args = [], []
+    if path is not None:
+        sets.append("path = ?")
+        args.append(path)
+    if meta is not None:
+        sets.append("meta = ?")
+        args.append(json.dumps(meta))
+    for k in ("parent_id",):
+        if k in ints:
+            sets.append(f"{k} = ?")
+            args.append(int(ints[k] or 0))
+    if "superseded_by" in ints:
+        sets.append("superseded_by = ?")
+        args.append(json.dumps(list(ints["superseded_by"] or [])))
+    if not sets:
+        return
+    with _write() as conn:
+        conn.execute(f"UPDATE assets SET {', '.join(sets)} WHERE id = ?", (*args, int(asset_id)))
+
+
 def review_gate(asset: dict[str, Any]) -> list[str]:
     """Why an asset can't be offered for review ([] = it can)."""
     if asset.get("kind") == "copy_ref":
@@ -779,6 +884,31 @@ def review(asset_id: int, decision: str, note: str = "", superseded_by: Any = No
 def get_asset(asset_id: int) -> dict[str, Any] | None:
     rows = _read("SELECT * FROM assets WHERE id = ?", (int(asset_id),))
     return rows[0] if rows else None
+
+
+def children(parent_id: int, kind: str = "") -> list[dict[str, Any]]:
+    """Rows whose ``parent_id`` is ``parent_id`` — in EVERY campaign (a move can split a family)."""
+    sql, args = "SELECT * FROM assets WHERE parent_id = ?", [int(parent_id)]
+    if kind:
+        sql += " AND kind = ?"
+        args.append(kind)
+    return _read(sql + " ORDER BY id", tuple(args))
+
+
+def any_file_under(folder: str) -> bool:
+    """True when any row, in any campaign, has its file somewhere under ``folder``."""
+    # the platform's separator (a Windows desktop stores C:\\…\\); LIKE is case-blind for ASCII,
+    # which can only over-match — i.e. keep a folder — never under-match
+    prefix = str(Path(folder)).rstrip("/\\") + os.sep
+    esc = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    conn = connect()
+    try:
+        return (
+            conn.execute("SELECT 1 FROM assets WHERE path LIKE ? ESCAPE '\\' LIMIT 1", (esc + "%",)).fetchone()
+            is not None
+        )
+    finally:
+        conn.close()
 
 
 def list_assets(campaign_id: int = 0, *, status: str = "", lane_id: int = 0, kind: str = "") -> list[dict[str, Any]]:

@@ -57,7 +57,7 @@ def build_view_router():
 def build_data_router(emit: Callable[[str, dict], Any] | None = None):
     from fastapi import APIRouter, HTTPException
     from fastapi.responses import FileResponse, JSONResponse
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
 
     from . import paths, store
 
@@ -115,12 +115,17 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         return datetime.now(UTC)
 
     @router.get("/campaigns")
-    def _campaigns() -> JSONResponse:
+    def _campaigns(include_archived: bool = False) -> JSONResponse:
         rows = []
-        for c in store.list_campaigns(include_archived=True):
+        every_campaign = store.list_campaigns(include_archived=True)
+        shown = [c for c in every_campaign if include_archived or c.get("status") != "archived"]
+        by_campaign: dict[int, list] = {}
+        for a in store.list_assets():  # one query, grouped — not one per campaign
+            by_campaign.setdefault(a["campaign_id"], []).append(a)
+        for c in shown:
             if not isinstance(c, dict) or not c.get("id"):
                 continue  # (rows are NOT NULL columns; belt and braces for the listing)
-            every = store.list_assets(c["id"])
+            every = by_campaign.get(c["id"], [])
             every = [a for a in every if isinstance(a, dict) and a.get("status")]  # a malformed row never 500s
             assets = [a for a in every if not store.is_retired(a)]  # superseded takes don't count
             rows.append(
@@ -134,9 +139,66 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
                     "approved": sum(1 for a in assets if a["status"] == "approved"),
                     "superseded": sum(1 for a in every if a["status"] in store.RETIRED_STATUSES),
                     "pruned": sum(1 for a in every if store.is_pruned(a) and a["status"] not in store.RETIRED_STATUSES),
+                    "archived": c.get("status") == "archived",
                 }
             )
-        return JSONResponse({"campaigns": rows})
+        hidden = len(every_campaign) - len(shown)
+        return JSONResponse({"campaigns": rows, "archived_hidden": hidden})
+
+    # Collections (library.py): the operator's archive switch, and move/copy with lineage. This is
+    # the route that may move an APPROVED asset or land an approved copy — the agent's tool can't.
+    class Archive(BaseModel):
+        archived: bool = True
+
+    class Collect(BaseModel):
+        asset_ids: list[int] = Field(min_length=1, max_length=2000)  # a whole campaign is ~1k assets
+        mode: Literal["move", "copy"] = "move"
+        lineage: bool = True
+        dry_run: bool = True
+
+    @router.post("/campaigns/{campaign_id}/archive")
+    def _archive(campaign_id: int, body: Archive) -> JSONResponse:
+        try:
+            c = store.set_archived(campaign_id, body.archived)
+        except ValueError as e:
+            raise HTTPException(404, str(e)) from None
+        except Exception as e:  # noqa: BLE001 — e.g. a locked database: a clear 500, details in the log
+            log.exception("[campaign] archiving campaign %s failed", campaign_id)
+            raise HTTPException(500, f"archive failed ({type(e).__name__}) — see the agent log") from None
+        if emit:
+            try:
+                emit("campaign_changed", {"campaign_id": c["id"], "status": c["status"]})
+            except Exception:  # noqa: BLE001 — the bus is chrome
+                pass
+        return JSONResponse({"campaign": {"id": c["id"], "name": c["name"], "status": c["status"]}})
+
+    @router.post("/campaigns/{campaign_id}/collect")
+    def _collect(campaign_id: int, body: Collect) -> JSONResponse:  # sync: a copy copies files
+        from . import library
+
+        if store.get_campaign(campaign_id) is None:
+            raise HTTPException(404, "no such campaign")
+        try:
+            if body.dry_run:
+                out = library.plan(body.asset_ids, campaign_id, mode=body.mode, lineage=body.lineage, operator=True)
+            else:
+                out = library.run(body.asset_ids, campaign_id, mode=body.mode, lineage=body.lineage, operator=True)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        except OSError as e:  # disk full, a permission — a copy rolls its files back first
+            log.exception("[campaign] collect into campaign %s failed", campaign_id)
+            raise HTTPException(
+                500, f"collect failed ({type(e).__name__}) — nothing was changed; see the agent log"
+            ) from None
+        except Exception as e:  # noqa: BLE001 — e.g. a locked database: a clear 500, details in the log
+            log.exception("[campaign] collect into campaign %s failed", campaign_id)
+            raise HTTPException(500, f"collect failed ({type(e).__name__}) — see the agent log") from None
+        if emit and not body.dry_run:
+            try:
+                emit("campaign_changed", {"campaign_id": campaign_id, "collected": len(out.get("done") or [])})
+            except Exception:  # noqa: BLE001 — the bus is chrome
+                pass
+        return JSONResponse({**out, "dry_run": body.dry_run})
 
     @router.get("/campaigns/{campaign_id}/assets")
     def _assets(campaign_id: int) -> JSONResponse:

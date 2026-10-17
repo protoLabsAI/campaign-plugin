@@ -12,6 +12,14 @@
   keeps. New setting `retention_mode` (`report` default · `prune` · `disabled`, operator-only),
   new tool `campaign_prune` (dry run by default), and operator routes `GET /retention` /
   `POST /retention/prune`.
+- **Collections — gather the keepers, start fresh.** `campaign_collect` moves or copies assets
+  into another campaign **with their lineage** (the takes and renders they were made from, a
+  montage's inputs), dry run first. Move keeps ids, files and approvals; copy duplicates the
+  files into the target's folder and re-points every id and path. `campaign_archive` hides a
+  campaign from `campaign_list` and the gallery picker (**Show archived**) and restores its old
+  status on the way back. The agent can't move an approved asset and its copy of one lands for
+  review; the operator's `POST /campaigns/{id}/collect` and `/archive` routes do both.
+  `GET /campaigns` now leaves archived campaigns out unless `include_archived=true`.
 
 ## 0.4.3
 
