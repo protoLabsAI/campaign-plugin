@@ -285,13 +285,93 @@ def test_an_intermediate_named_by_a_surviving_row_becomes_a_tombstone(c):
     assert store.get_asset(b["id"])["path"] == b["path"]
 
 
-def test_a_video_job_naming_an_asset_keeps_its_row(c, monkeypatch):
+@pytest.mark.parametrize(("status", "kept"), [("done", False), ("failed", False), ("needs_review", True),
+                                              ("rendering", True), (None, True)])  # fmt: skip
+def test_a_video_job_naming_an_asset_protects_it_while_unfinished(c, monkeypatch, status, kept):
     from campaign import produce
 
     a = _asset(c, "renders/a/a.mp4", "rendered", days=30)
-    monkeypatch.setattr(produce, "list_jobs", lambda n=20: [{"id": "vid-0", "delivery": {"assets": {"gh": a["id"]}}}])
-    (x,) = retention.plan(NOW)["actions"]
-    assert x["asset_id"] == a["id"] and x["row"] == "tombstone"
+    job = {"id": "vid-0", "delivery": {"assets": {"gh": a["id"]}}, **({"status": status} if status else {})}
+    monkeypatch.setattr(produce, "list_jobs", lambda n=20: [job])
+    r = retention.plan(NOW)
+    if kept:
+        assert not r["actions"] and "unfinished video job" in r["kept"][0]["why"]
+    else:
+        (x,) = r["actions"]
+        assert x["asset_id"] == a["id"] and x["row"] == "tombstone", "a finished job keeps the row it names"
+
+
+def test_unreadable_jobs_abort_the_plan(c, monkeypatch):
+    from campaign import produce
+
+    _asset(c, "renders/a/a.mp4", "rendered", days=30)
+    monkeypatch.setattr(produce, "list_jobs", lambda n=20: 1 / 0)
+    with pytest.raises(ZeroDivisionError):
+        retention.plan(NOW)
+
+
+# ── races: the live table wins over a stale plan ──────────────────────────────
+def test_a_child_approved_mid_run_protects_its_parent(c):
+    take = _asset(c, "shots/t/take.webm", "captured", days=30)
+    render = _asset(c, "renders/t/r.mp4", "rendered", days=30, parent_id=take["id"])
+    stale = retention.plan(NOW)
+    assert _ids(stale) == {take["id"], render["id"]}
+    store.update_asset(render["id"], status="ready_for_review")
+    store.review(render["id"], "approve")
+    r = retention.execute(NOW, report=stale)
+    assert r["done"] == [] and os.path.exists(take["path"]) and os.path.exists(render["path"])
+    assert {e["asset_id"] for e in r["errors"]} == {take["id"], render["id"]}
+
+
+def test_a_new_child_made_mid_run_protects_its_parent(c):
+    take = _asset(c, "shots/t/take.webm", "captured", days=30)
+    stale = retention.plan(NOW)
+    _asset(c, "renders/t/new.mp4", "rendered", days=0, parent_id=take["id"])
+    r = retention.execute(NOW, report=stale)
+    assert take["id"] not in r["done"] and os.path.exists(take["path"])
+
+
+def test_a_hero_set_mid_run_is_kept(c):
+    a = _asset(c, "renders/a/a.mp4", "rendered", days=30)
+    stale = retention.plan(NOW)
+    store.upsert_lane(c["id"], "Hero lane", hero_asset_id=a["id"])
+    r = retention.execute(NOW, report=stale)
+    assert r["done"] == [] and "hero" in r["errors"][0]["error"] and os.path.exists(a["path"])
+
+
+def test_a_campaign_scoped_prune_never_breaks_another_campaigns_chain(c):
+    other = store.create_campaign("Other")
+    x = _asset(c, "renders/x/x.mp4", "rendered", days=30)
+    y = _asset(other, "renders/y/y.mp4", "rendered", days=30, parent_id=x["id"])
+    r = retention.execute(NOW, campaign_id=c["id"])
+    assert x["id"] not in r["done"] and os.path.exists(x["path"]), "y keeps its file this run, so x stays"
+    assert store.get_asset(y["id"])["parent_id"] == x["id"]
+    r = retention.execute(NOW)
+    assert set(r["done"]) == {x["id"], y["id"]} and store.get_asset(x["id"]) is None
+
+
+def test_delete_becomes_tombstone_while_another_row_names_it(c):
+    a = _asset(c, "renders/a/a.mp4", "rendered", days=30)
+    b = _asset(c, "renders/b/b.mp4", "rendered", days=30)
+    x = next(x for x in retention.plan(NOW)["actions"] if x["asset_id"] == a["id"])
+    assert x["row"] == "delete"
+    store.update_asset(b["id"], status="superseded", superseded_by=[a["id"]])  # names a, now
+    _, used = store.prune_asset(a["id"], expect_status="rendered", expect_path=a["path"], mode="delete", record={})
+    assert used == "tombstone" and store.get_asset(a["id"]) is not None
+
+
+def test_a_tombstone_given_a_file_again_is_back_in_play(c):
+    take = _asset(c, "shots/t/take.webm", "captured", days=30)
+    r = _asset(c, "renders/t/r.mp4", "rendered", days=30, parent_id=take["id"])
+    s = _asset(c, "renders/s/s.mp4", "rendered", days=30)
+    store.update_asset(s["id"], status="superseded", superseded_by=[r["id"]])  # keeps r's row: a tombstone
+    _age(s["id"], 2)
+    retention.execute(NOW)
+    assert store.is_pruned(store.get_asset(r["id"]))
+    p = _file(c, "renders/t/r2.mp4")
+    back = store.update_asset(r["id"], path=str(p), status="ready_for_review")
+    assert not store.is_pruned(back) and "pruned" not in back["meta"]
+    assert take["id"] not in _ids(retention.plan(NOW + timedelta(days=60))), "its take is a dependency again"
 
 
 # ── invariant 4: nothing outside the media root ───────────────────────────────

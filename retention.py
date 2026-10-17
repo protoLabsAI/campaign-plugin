@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -89,42 +90,8 @@ def age_days(now: datetime, *stamps: str) -> float | None:
 
 
 # ── the graph ─────────────────────────────────────────────────────────────────
-def _ints(value: Any) -> list[int]:
-    out = []
-    for v in value if isinstance(value, list) else [value]:
-        if isinstance(v, bool):
-            continue
-        if isinstance(v, int):
-            out.append(v)
-        elif isinstance(v, str) and v.isdigit():
-            out.append(int(v))
-    return out
-
-
-def _scan_ids(obj: Any, keys: tuple[str, ...] = ("asset_id", "clip")) -> set[int]:
-    """Asset ids anywhere under ``obj`` held by one of ``keys`` (a montage's sequence/timeline)."""
-    found: set[int] = set()
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if k in keys:
-                found.update(_ints(v))
-            else:
-                found |= _scan_ids(v, keys)
-    elif isinstance(obj, list):
-        for v in obj:
-            found |= _scan_ids(v, keys)
-    return found
-
-
-def depends_on(asset: dict[str, Any]) -> set[int]:
-    """The assets ``asset`` was made FROM — what must outlive it."""
-    meta = asset.get("meta") if isinstance(asset.get("meta"), dict) else {}
-    deps = set(_ints(asset.get("parent_id") or 0)) - {0}
-    deps.update(_ints(meta.get("inputs") or []))
-    for key in ("sequence", "timeline"):
-        deps |= _scan_ids(meta.get(key))
-    deps.discard(int(asset.get("id") or 0))
-    return deps
+_ints = store._ints
+depends_on = store.depends_on  # the parent chain, montage inputs, sequence/timeline clip ids
 
 
 def named_files(asset: dict[str, Any]) -> set[str]:
@@ -151,19 +118,23 @@ def _key(p: str) -> str:
         return str(p)
 
 
-def _job_refs() -> set[int]:
-    try:
-        from . import produce
+def _job_refs() -> tuple[set[int], set[int]]:
+    """``(ids an UNFINISHED video job names, ids any job names)``. An unfinished job (running, or
+    one a retry may resume) may still read those files, so they are kept outright; a finished
+    job's ids keep only their rows. Reading the jobs failing aborts the plan (fail closed)."""
+    from . import produce
 
-        jobs = produce.list_jobs(100000)
-    except Exception:  # noqa: BLE001 — no jobs dir yet
-        return set()
-    ids: set[int] = set()
-    for j in jobs:
-        ids |= _scan_ids(j, ("asset_id",))
-        d = (j.get("delivery") or {}) if isinstance(j, dict) else {}
-        ids.update(_ints(list((d.get("assets") or {}).values())))
-    return ids
+    active: set[int] = set()
+    every: set[int] = set()
+    for j in produce.list_jobs(100000):
+        if not isinstance(j, dict):
+            continue
+        ids = store.scan_ids(j, ("asset_id",))
+        ids.update(_ints(list(((j.get("delivery") or {}).get("assets") or {}).values())))
+        every |= ids
+        if j.get("status") not in ("done", "failed"):
+            active |= ids
+    return active, every
 
 
 def _size(p: str) -> int:
@@ -221,14 +192,23 @@ def plan(now: datetime | None = None, campaign_id: int = 0) -> dict[str, Any]:
             if age is not None and age >= PLANNED_DAYS:
                 cand[a["id"]] = "planned_empty"
 
+    # A scoped run (one campaign) leaves every other campaign's rows alone — they keep their
+    # files this run, so they are keepers whose dependencies stay, whichever campaign those are in.
+    if campaign_id:
+        cand = {k: v for k, v in cand.items() if by_id[k]["campaign_id"] == int(campaign_id)}
+
     # 2. Protection: everything that keeps its file is a root; what a root depends on is kept,
     #    and so is what THAT depends on (a breadth-first closure).
+    active_jobs, job_named = _job_refs()
     kept: dict[int, str] = {}
     roots = [a for a in rows if a["id"] not in cand and not store.is_pruned(a)]
     queue = [(a, a) for a in roots]
-    for h in hero:
-        if h in cand:
-            kept[h] = "it is a lane's hero asset"
+    for h, why in [
+        *((h, "it is a lane's hero asset") for h in hero),
+        *((j, "an unfinished video job uses it") for j in active_jobs),
+    ]:
+        if h in cand and h not in kept:
+            kept[h] = why
             queue.append((by_id[h], by_id[h]))
     while queue:
         a, root = queue.pop()
@@ -270,7 +250,7 @@ def plan(now: datetime | None = None, campaign_id: int = 0) -> dict[str, Any]:
     for a in rows:
         for t in {*depends_on(a), *_ints(a.get("superseded_by") or [])}:
             referrers.setdefault(t, set()).add(a["id"])
-    named_elsewhere = hero | _job_refs()
+    named_elsewhere = hero | job_named
     deletable = {x["asset_id"] for x in actions if x["rule"] != "superseded_file"}
     deletable -= named_elsewhere
     changed = True
@@ -292,9 +272,7 @@ def plan(now: datetime | None = None, campaign_id: int = 0) -> dict[str, Any]:
                               "campaign_id": a["campaign_id"]})  # fmt: skip
 
     if campaign_id:
-        actions = [x for x in actions if x["campaign_id"] == int(campaign_id)]
         stale = [s for s in stale if s["campaign_id"] == int(campaign_id)]
-        kept = {k: v for k, v in kept.items() if by_id[k]["campaign_id"] == int(campaign_id)}
 
     by_rule = {r: {"count": 0, "bytes": 0, "rows_deleted": 0, "tombstones": 0} for r in RULES}
     for x in actions:
@@ -327,22 +305,30 @@ def _tidy_dirs(f: Path) -> None:
         d = d.parent
 
 
-def execute(now: datetime | None = None, campaign_id: int = 0) -> dict[str, Any]:
-    """Prune for real: plan, then act on each row through :func:`store.prune_asset` (which
-    re-checks it under the write lock) and only THEN unlink its file. Returns the plan with
-    ``done`` / ``errors`` filled in."""
+def execute(now: datetime | None = None, campaign_id: int = 0, report: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Prune for real: plan (or take ``report``, a plan made earlier), then act on each row
+    through :func:`store.prune_asset` — which re-checks it against the LIVE table under the write
+    lock — and only THEN unlink its file. Children before parents (descending id: a render or a
+    still before its take, a bookended clip before its render), so a child that
+    became protected since the plan was made is refused first and then protects its parent.
+    Returns the plan with ``done`` / ``errors`` filled in."""
     now = now or datetime.now(UTC)
-    report = plan(now, campaign_id)
+    report = dict(report) if report is not None else plan(now, campaign_id)
     done, errors, freed = [], [], 0
-    for x in report["actions"]:  # ascending id: a take before its stills (their files are in its meta)
+    order = sorted(report["actions"], key=lambda x: -x["asset_id"])
+    pending = {x["asset_id"] for x in order}
+    for x in order:
+        pending.discard(x["asset_id"])
         record = {"at": now.isoformat(timespec="seconds"), "rule": x["rule"], "path": x["path"], "bytes": x["bytes"]}
         try:
-            gone = store.prune_asset(
-                x["asset_id"], expect_status=x["status"], expect_path=x["path"], mode=x["row"], record=record
-            )
-        except ValueError as e:
+            gone, used = store.prune_asset(
+                x["asset_id"], expect_status=x["status"], expect_path=x["path"], mode=x["row"], record=record,
+                pending=frozenset(pending),
+            )  # fmt: skip
+        except (ValueError, sqlite3.Error) as e:
             errors.append({"asset_id": x["asset_id"], "error": str(e)})
             continue
+        x["row"] = used
         if gone:
             why = _contained_file(gone)
             if why == "missing":
@@ -358,7 +344,7 @@ def execute(now: datetime | None = None, campaign_id: int = 0) -> dict[str, Any]
                 except OSError as e:
                     errors.append({"asset_id": x["asset_id"], "error": f"row pruned, file not deleted: {e}"})
         done.append(x["asset_id"])
-    report.update(dry_run=False, done=done, errors=errors, freed_bytes=freed)
+    report.update(dry_run=False, done=sorted(done), errors=errors, freed_bytes=freed)
     return report
 
 
