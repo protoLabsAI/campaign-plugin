@@ -152,10 +152,60 @@ def test_the_agents_copy_of_an_approved_asset_lands_for_review(src, best):
     out = library.copy_assets([hero["id"]], best["id"], lineage=False)
     cp = store.get_asset(out["map"][str(hero["id"])])
     assert cp["status"] == "ready_for_review" and cp["review_note"] == "" and cp["reviewed_at"] == ""
-    assert "approved there" in cp["notes"]
+    assert "approved there — landed ready_for_review here" in cp["notes"]
     assert store.get_asset(hero["id"])["status"] == "approved"
     with pytest.raises(ValueError, match="only the operator lands"):
         store.clone_asset({**hero}, best["id"], 0)
+
+
+def test_the_agent_cannot_launder_a_rejected_asset_into_review(src, best):
+    r = _row(src, "renders/r.mp4", "rejected")
+    out = library.copy_assets([r["id"]], best["id"])
+    assert store.get_asset(out["map"][str(r["id"])])["status"] == "rendered"
+    assert store.get_asset(r["id"])["status"] == "rejected"
+
+
+def test_a_copy_that_cant_bring_its_file_never_waits_for_review(src, best, tmp_path):
+    outside = tmp_path / "o.mp4"
+    outside.write_bytes(b"x")
+    a = store.add_asset(src["id"], "clip", "o", path=str(outside), status="captured")
+    conn = store.connect()
+    with conn:
+        conn.execute("UPDATE assets SET status = 'approved' WHERE id = ?", (a["id"],))
+    conn.close()
+    for operator in (False, True):
+        tgt = store.create_campaign(f"t{operator}")
+        out = library.copy_assets([a["id"]], tgt["id"], operator=operator)
+        assert store.get_asset(out["map"][str(a["id"])])["status"] == "planned"
+        assert [x["lands_as"] for x in out["items"]] == ["planned"]
+
+
+def test_a_reshoot_after_a_move_never_deletes_a_still_left_in_the_old_campaign(src, best):
+    """B3: the take moves to the collection; its APPROVED still stays behind in the old campaign.
+    Re-recording the take must not rmtree the folder that still holds that approved still."""
+    from campaign import tools
+
+    take = _row(src, "shots/t-20261002-010000/take.webm", "captured")
+    still = _row(src, "shots/t-20261002-010000/frame.png", "approved", kind="still", parent_id=take["id"])
+    store.update_asset(take["id"], meta={"take_dir": str(Path(take["path"]).parent)})
+    library.move_assets([take["id"]], best["id"], lineage=False)
+    moved = store.get_asset(take["id"])
+    new_dir = paths.campaign_dir(best["id"], best["name"]) / "shots" / "t-new"
+    new_dir.mkdir(parents=True)
+    notes = tools._supersede_take(moved, str(new_dir))
+    assert os.path.exists(still["path"]) and store.get_asset(still["id"])["status"] == "approved"
+    assert any("APPROVED" in n for n in notes)
+
+
+def test_a_reshoot_after_a_move_keeps_a_folder_another_campaign_still_uses(src, best):
+    from campaign import tools
+
+    take = _row(src, "shots/t-20261002-010000/take.webm", "captured")
+    other = _row(src, "shots/t-20261002-010000/other.png", "rendered", kind="still")  # not the take's still
+    store.update_asset(take["id"], meta={"take_dir": str(Path(take["path"]).parent)})
+    library.move_assets([take["id"]], best["id"], lineage=False)
+    tools._supersede_take(store.get_asset(take["id"]), str(paths.media_root() / "elsewhere"))
+    assert os.path.exists(other["path"])
 
 
 def test_copying_twice_is_idempotent(src, best):

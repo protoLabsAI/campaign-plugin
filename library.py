@@ -78,8 +78,10 @@ def plan(asset_ids: list[int], target_campaign_id: int, *, mode: str = "move", l
     items = []
     for a in rows:
         status = a["status"]
-        if mode == "copy" and status in ("approved", "rejected") and not operator:
-            status = "ready_for_review"
+        if mode == "copy" and not operator and status in ("approved", "rejected"):
+            # the agent's copy of an approved asset goes back to the operator's queue; of a REJECTED
+            # one, back to production — never laundered into the review queue
+            status = "ready_for_review" if status == "approved" else "rendered"
         items.append({"asset_id": a["id"], "from_campaign": a["campaign_id"], "status": a["status"],
                       "lands_as": status, "kind": a["kind"], "title": a.get("title") or "",
                       "selected": a["id"] in ids, "bytes": retention._size(a.get("path") or "")})  # fmt: skip
@@ -215,12 +217,17 @@ def copy_assets(asset_ids: list[int], target_campaign_id: int, *, lineage: bool 
     stamp = datetime.now(UTC).isoformat(timespec="seconds")
     made = []
     for a in todo:
-        status = next(x["lands_as"] for x in p["items"] if x["asset_id"] == a["id"])
+        item = next(x for x in p["items"] if x["asset_id"] == a["id"])
+        status = item["lands_as"]
         meta = _remap(a.get("meta") or {}, pmap, imap)
         meta["copied_from"] = {"asset_id": a["id"], "campaign_id": a["campaign_id"], "at": stamp}
         new_path = pmap.get(a.get("path") or "", "")
         if a.get("path") and not new_path:
             skipped.append(a["id"])
+        if status in ("ready_for_review", "approved") and store.review_gate({**a, "path": new_path}):
+            # a copy that couldn't bring its file (or breaks its limit) can't wait for review
+            status = "rendered" if new_path else "planned"
+        item["lands_as"] = status
         demoted = status != a["status"]
         row = {
             **a,
@@ -232,7 +239,7 @@ def copy_assets(asset_ids: list[int], target_campaign_id: int, *, lineage: bool 
             "review_note": "" if demoted else a.get("review_note"),
             "reviewed_at": "" if demoted else a.get("reviewed_at"),
             "notes": (a.get("notes") or "")
-            + (f"\n[copied from #{a['id']}, approved there — review it here]" if demoted else ""),
+            + (f"\n[copied from #{a['id']}, {a['status']} there — landed {status} here]" if demoted else ""),
         }
         new = store.clone_asset(row, target["id"], lanes.get((a["campaign_id"], int(a.get("lane_id") or 0)), 0),
                                 allow_approved=operator)  # fmt: skip
