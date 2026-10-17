@@ -204,13 +204,19 @@ def copy_assets(asset_ids: list[int], target_campaign_id: int, *, lineage: bool 
 
     # 2. Copy the files (a row whose file can't be copied lands with no file — and says so).
     copied, skipped = [], []
-    for src, dst in pmap.items():
-        s = Path(src)
-        if not s.is_file():
-            continue  # a take_dir mapping, not a file
-        Path(dst).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(s, dst)
-        copied.append(dst)
+    try:
+        for src, dst in pmap.items():
+            s = Path(src)
+            if not s.is_file():
+                continue  # a take_dir mapping, not a file
+            Path(dst).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(s, dst)
+            copied.append(dst)
+    except OSError:
+        # all or nothing: no orphaned half-copy (no row was written yet), then re-raise
+        for dst in copied:
+            Path(dst).unlink(missing_ok=True)
+        raise
 
     # 3. Insert the copies, parents first, ids and paths re-pointed.
     lanes = _lane_map(todo, target["id"])

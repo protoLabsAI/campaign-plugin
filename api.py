@@ -179,6 +179,11 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
                 out = library.run(body.asset_ids, campaign_id, mode=body.mode, lineage=body.lineage, operator=True)
         except ValueError as e:
             raise HTTPException(400, str(e)) from None
+        except OSError as e:  # disk full, a permission — a copy rolls its files back first
+            log.exception("[campaign] collect into campaign %s failed", campaign_id)
+            raise HTTPException(
+                500, f"collect failed ({type(e).__name__}) — nothing was changed; see the agent log"
+            ) from None
         if emit and not body.dry_run:
             try:
                 emit("campaign_changed", {"campaign_id": campaign_id, "collected": len(out.get("done") or [])})

@@ -321,3 +321,22 @@ def test_any_file_under_matches_folders_not_name_prefixes(src):
     assert store.any_file_under(d) and store.any_file_under(d + "/")
     assert not store.any_file_under(d[:-1]), "t_ is not a wildcard, and t_ isn't t_1"
     assert not store.any_file_under(d + "x")
+
+
+def test_a_failed_copy_leaves_no_half_copied_files_and_no_rows(client, src, best, monkeypatch):
+    take, _, render, hero, _ = _chain(src)
+    real = library.shutil.copy2
+    calls = []
+
+    def flaky(s, d):
+        calls.append(d)
+        if len(calls) == 3:
+            raise OSError(28, "No space left on device")
+        return real(s, d)
+
+    monkeypatch.setattr(library.shutil, "copy2", flaky)
+    r = client.post(f"/api/plugins/campaign/campaigns/{best['id']}/collect",
+                    json={"asset_ids": [hero["id"]], "mode": "copy", "dry_run": False})  # fmt: skip
+    assert r.status_code == 500 and "OSError" in r.json()["detail"]
+    assert store.list_assets(best["id"]) == []
+    assert not [p for p in paths.campaign_dir(best["id"], best["name"]).rglob("*") if p.is_file()]
