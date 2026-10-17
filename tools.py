@@ -652,6 +652,40 @@ def build_tools(registry):
         deps.recheck(lambda: deps.report(registry))
         return deps.brief()
 
+    def _live_cfg() -> dict:
+        fn = getattr(registry, "live_config", None)
+        try:
+            return dict((fn() if callable(fn) else None) or getattr(registry, "config", None) or {})
+        except Exception:  # noqa: BLE001
+            return dict(getattr(registry, "config", None) or {})
+
+    @tool
+    def campaign_prune(campaign_id: int = 0, dry_run: bool = True) -> str:
+        """Retention for the asset gallery: list what the prune would delete, with sizes, by
+        rule — superseded files after 7 days (the row stays as a tombstone), rendered/captured
+        intermediates after 7 days unless something kept depends on them, planned rows with no
+        file after 30 days — plus ready-for-review assets gone stale (14+ days, never deleted).
+        APPROVED and READY-FOR-REVIEW assets are never pruned. campaign_id 0 = every campaign.
+        dry_run=true (the default) touches nothing. dry_run=false deletes for real, and only works
+        once the operator has set retention_mode to 'prune' in Settings; until then a daily
+        report-only run is all that happens. Use it to answer 'how much space would cleanup
+        free' or to clean up after the operator has turned pruning on."""
+        from . import retention
+
+        if dry_run:
+            return retention.summary({**retention.plan(campaign_id=campaign_id), "dry_run": True})
+        m = retention.mode(_live_cfg())
+        if m != "prune":
+            return (
+                f"Not pruned — retention_mode is {m!r}. Deleting is the operator's switch: they set "
+                "retention_mode to 'prune' in Settings ▸ Campaign Studio (or prune from the gallery's "
+                "operator route). Here is what it WOULD do:\n\n"
+                + retention.summary({**retention.plan(campaign_id=campaign_id), "dry_run": True})
+            )
+        report = retention.execute(campaign_id=campaign_id)
+        _emit("campaign_changed", {"campaign_id": campaign_id, "pruned": len(report["done"])})
+        return retention.summary(report)
+
     # ── looking at the media ─────────────────────────────────────────────────
     @tool
     def campaign_view(
@@ -1480,6 +1514,7 @@ def build_tools(registry):
         campaign_storyboard,
         campaign_produce_video,
         campaign_video_status,
+        campaign_prune,
     ]
 
 

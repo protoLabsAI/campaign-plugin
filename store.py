@@ -445,8 +445,14 @@ ASSET_UPDATABLE = (
 
 
 def is_retired(asset: dict[str, Any]) -> bool:
-    """Out of play (superseded): hidden from the review queue and progress counts."""
-    return asset.get("status") in RETIRED_STATUSES
+    """Out of play (superseded, or a pruned tombstone): hidden from the review queue and counts."""
+    return asset.get("status") in RETIRED_STATUSES or is_pruned(asset)
+
+
+def is_pruned(asset: dict[str, Any]) -> bool:
+    """A tombstone the retention prune left: the row stays (a chain still names it), the file went."""
+    meta = asset.get("meta") or {}
+    return isinstance(meta, dict) and bool(meta.get("pruned"))
 
 
 def _superseded_by_ids(value: Any) -> list[int]:
@@ -567,6 +573,61 @@ def delete_assets(asset_ids: list[int]) -> int:
             f"DELETE FROM assets WHERE status != 'approved' AND id IN ({', '.join('?' * len(ids))})", ids
         )
         return cur.rowcount
+
+
+# Never pruned, whatever a plan says: the operator's approval, and what waits on their review.
+PRUNE_PROTECTED = ("approved", "ready_for_review")
+
+
+def _path_refs(conn: sqlite3.Connection, path: str, exclude_id: int) -> list[sqlite3.Row]:
+    """Rows OTHER than ``exclude_id`` that name ``path`` — as their file, or anywhere in their meta
+    (a bookended clip's raw master, a take's stills, its timing log). A tombstone's meta doesn't
+    count: it names files that are already gone."""
+    needle = json.dumps(path)[1:-1]  # the path as it appears inside the meta JSON
+    return conn.execute(
+        "SELECT id, status FROM assets WHERE id != ? AND (path = ? OR (instr(meta, ?) > 0"
+        " AND (CASE WHEN json_valid(meta) THEN json_extract(meta, '$.pruned') END) IS NULL))",
+        (int(exclude_id), path, needle),
+    ).fetchall()
+
+
+def prune_asset(asset_id: int, *, expect_status: str, expect_path: str, mode: str, record: dict[str, Any]) -> str:
+    """The retention prune's ONE write: tombstone a row (keep it, clear its file) or delete it.
+
+    Every check runs on the row as it is INSIDE the write lock, so a plan made a moment ago can't
+    act on a row that changed since: the status and the file must still be what the plan saw, an
+    approved or ready-for-review row is refused outright, and a file another row still names is
+    refused too. Returns the path the caller may now unlink ('' = nothing to unlink).
+    Raises ValueError when the row may not be pruned."""
+    if mode not in ("tombstone", "delete"):
+        raise ValueError(f"mode must be tombstone or delete — got {mode!r}")
+    with _write() as conn:
+        cur = conn.execute("SELECT * FROM assets WHERE id = ?", (int(asset_id),)).fetchone()
+        if cur is None:
+            raise ValueError(f"asset #{asset_id} is gone")
+        row = _row(cur)
+        if row["status"] in PRUNE_PROTECTED:
+            raise ValueError(f"asset #{asset_id} is {row['status']} — never pruned")
+        if row["status"] != expect_status or str(row.get("path") or "") != str(expect_path or ""):
+            raise ValueError(f"asset #{asset_id} changed since the plan was made — left alone")
+        path = str(row.get("path") or "")
+        if path:
+            others = _path_refs(conn, path, row["id"])
+            if others:
+                raise ValueError(f"asset #{asset_id}'s file is still named by #{others[0]['id']} — left alone")
+        if mode == "delete":
+            conn.execute(
+                "DELETE FROM assets WHERE id = ? AND status NOT IN ('approved', 'ready_for_review')", (row["id"],)
+            )
+        else:
+            meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
+            meta = {**meta, "pruned": record}
+            conn.execute(
+                "UPDATE assets SET path = '', meta = ?, updated = ? WHERE id = ?"
+                " AND status NOT IN ('approved', 'ready_for_review')",
+                (json.dumps(meta), _now(), row["id"]),
+            )
+    return path
 
 
 def review_gate(asset: dict[str, Any]) -> list[str]:

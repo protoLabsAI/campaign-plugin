@@ -114,5 +114,23 @@ def register(registry) -> None:
     except Exception:
         log.exception("[campaign] mounting routers failed")
 
+    # The library surface: the daily retention pass (report-only until the operator flips
+    # retention_mode). Module-level start/stop, so a config reload's re-register is the SAME
+    # surface; config is read live each tick.
+    try:
+        from . import surface
+
+        def _live_cfg():
+            fn = getattr(registry, "live_config", None)
+            live = fn() if callable(fn) else None
+            return live if isinstance(live, dict) else (registry.config or {})
+
+        surface.configure(_live_cfg)
+        add_surface = getattr(registry, "register_surface", None)
+        if callable(add_surface):
+            add_surface(surface.start, stop=surface.stop, name="campaign-library", reload=surface.reload)
+    except Exception:
+        log.exception("[campaign] registering the library surface failed")
+
     # skills/ is auto-discovered (ADR 0027) — no register call.
-    log.info("[campaign] registered: tools, producer, gallery")
+    log.info("[campaign] registered: tools, producer, gallery, library surface")

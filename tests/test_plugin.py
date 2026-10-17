@@ -45,6 +45,7 @@ TOOLS = {
     "campaign_storyboard",
     "campaign_produce_video",
     "campaign_video_status",
+    "campaign_prune",
 }
 
 
@@ -78,7 +79,8 @@ def test_settings_that_name_a_program_to_run_are_marked_spawns():
     agent that could widen it could upload anything it can read — and `outro`, whose bumper names
     a local video file the montage reads (only the operator may point it at one)."""
     spawns = {s["key"] for s in MANIFEST["settings"] if s.get("spawns") is True}
-    assert spawns == {"ffmpeg_path", "interpreter", "upload_dirs", "outro", "intro"}
+    # retention_mode too: `prune` is the switch that lets files be deleted, and it is Josh's.
+    assert spawns == {"ffmpeg_path", "interpreter", "upload_dirs", "outro", "intro", "retention_mode"}
 
 
 def test_playwright_is_declared_runtime_scoped_and_optional():

@@ -92,7 +92,19 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         # or just the file name for anything outside it.
         out["path"] = _rel_path(a.get("path") or "")
         out["can_review"] = a.get("status") in ("ready_for_review", "approved", "rejected")
+        # Retention: a pruned tombstone (its file went; the row stays so a chain still reads), and
+        # a ready-for-review asset nobody has looked at in STALE_REVIEW_DAYS (never auto-deleted).
+        from . import retention
+
+        out["pruned"] = store.is_pruned(a)
+        age = retention._age_days(_utcnow(), a.get("updated"), a.get("created"))
+        out["stale"] = a.get("status") == "ready_for_review" and age is not None and age >= retention.STALE_REVIEW_DAYS
         return out
+
+    def _utcnow():
+        from datetime import UTC, datetime
+
+        return datetime.now(UTC)
 
     @router.get("/campaigns")
     async def _campaigns() -> JSONResponse:
@@ -163,6 +175,33 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
             except Exception:  # noqa: BLE001 — the bus is chrome
                 pass
         return JSONResponse({"asset": _public_asset(a)})
+
+    # Retention (retention.py): the last scheduled report, a fresh dry run, and the operator's
+    # own real run — which works whatever retention_mode says (the operator IS the authority the
+    # mode stands in for). Never touches an approved or ready-for-review asset.
+    class Prune(BaseModel):
+        dry_run: bool = True
+        campaign_id: int = 0
+
+    @router.get("/retention")
+    async def _retention(campaign_id: int = 0) -> JSONResponse:
+        from . import retention
+
+        return JSONResponse({"last": retention.last_report(), "plan": retention.plan(campaign_id=campaign_id)})
+
+    @router.post("/retention/prune")
+    async def _prune(body: Prune) -> JSONResponse:
+        from . import retention
+
+        if body.dry_run:
+            return JSONResponse({**retention.plan(campaign_id=body.campaign_id), "dry_run": True})
+        report = retention.execute(campaign_id=body.campaign_id)
+        if emit:
+            try:
+                emit("campaign_changed", {"campaign_id": body.campaign_id, "pruned": len(report["done"])})
+            except Exception:  # noqa: BLE001 — the bus is chrome
+                pass
+        return JSONResponse(report)
 
     # Video jobs (campaign_produce_video): progress + gates + where the files are, for a
     # dashboard or an API caller polling a job it started. Files download through /file/{id}.

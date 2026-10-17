@@ -123,6 +123,7 @@ loads nothing from the network at all.
 | `campaign_video_status` | A video job's stage, progress, gate table, files and links; `wait_s` blocks until it ends |
 | `campaign_limits` | The hard-limit table, each row with its source URL and as-of date |
 | `campaign_setup` | What's installed and how to fix what isn't |
+| `campaign_prune` | Retention: what the prune would delete, with sizes, by rule (dry run by default); `dry_run=false` deletes only once the operator set `retention_mode: prune` (see **Retention**) |
 
 Plus: skills `campaign-planning`, `shot-scripting`, `asset-review`, `montage-editing`,
 `produce-walkthrough-video`; the `campaign_producer`
@@ -254,6 +255,38 @@ older databases need no migration; the `superseded_by` column is added on first 
 
 Then: `campaign_render(asset_id, outputs=[{name: hero, format: mp4, start: start, end: end,
 speed: [{from: start, to: plugins, factor: 2, ease: true}], limit: github_attachment_video_free}, …])`.
+
+## Retention
+
+The gallery keeps what matters and lets intermediates go (operator policy, 2026-10-16):
+
+| Status | What happens |
+|---|---|
+| `approved` | **Never deleted.** |
+| `ready_for_review` | **Never deleted**; flagged **stale** (gallery badge + report) after 14 days untouched |
+| `superseded` | The FILE is deleted 7 days after it was superseded; the row stays as a tombstone so "Superseded by #N" still reads |
+| `rendered` / `captured` | Deleted after 7 days untouched — unless anything kept depends on it. The row goes too, unless another row still names it (then it is a tombstone) |
+| `planned`, no file | The row is dropped after 30 days untouched |
+
+"Depends on" is a closure over everything that keeps its file (approved, ready for review,
+rejected, scripted, and anything younger than its rule): the `parent_id` chain (render →
+take, bookended clip → render, poster → render), a montage's `meta.inputs` and the clips in
+its sequence, and lane hero assets. A file any keeper names — its own path, a bookended
+clip's raw master (`meta.unbookended`), a take's stills or timing log — is never deleted,
+whichever row it belongs to. Dependencies cross campaigns. When in doubt, it keeps.
+
+The prune never deletes outside the campaign media root, never a symlink or a directory (it
+only removes folders it emptied, never a campaign's own), and re-checks each row under the
+database write lock right before acting — an approval that lands after the plan was made
+wins. Tombstones are hidden in the gallery like superseded takes (**Show superseded**).
+
+A background surface runs it **daily** in the `retention_mode` setting's mode: `report` (the
+default — a dry run; nothing is deleted, the report is saved), `prune`, or `disabled`.
+`retention_mode` is operator-only (core's `spawns` fence): the agent can never turn deletion
+on for itself. `campaign_prune` shows the dry run any time; the operator routes are
+`GET /api/plugins/campaign/retention` (the last saved report + a fresh plan) and
+`POST /api/plugins/campaign/retention/prune` (`{"dry_run": false}` prunes now, whatever the
+mode).
 
 ## Directing a clip — two rules from operator review
 
@@ -560,7 +593,8 @@ named so core's agent self-config fence refuses agent writes to it), `brand_kit_
 names a shot script may use as its bearer), `upload_dirs` (folders an `upload` step may read
 files from; blank refuses uploads; operator-only), `outro` (the brand outro — see **The brand
 outro**; operator-only), `intro` (the brand intro — see **The brand intro**; operator-only),
-`producer_model`.
+`producer_model`, `retention_mode` (`report` | `prune` | `disabled` — see **Retention**;
+operator-only).
 
 ## Development
 

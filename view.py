@@ -51,6 +51,7 @@ PAGE = r"""<!doctype html>
   .st.ready_for_review{color:var(--pl-color-warning,#f5a524);border-color:var(--pl-color-warning,#f5a524)}
   .st.approved{color:var(--pl-color-success,#30a46c);border-color:var(--pl-color-success,#30a46c)}
   .st.rejected{color:var(--pl-color-danger,#e5484d);border-color:var(--pl-color-danger,#e5484d)}
+  .st.stale{color:var(--pl-color-danger,#e5484d);border-color:var(--pl-color-danger,#e5484d);border-style:dashed}
   .st.superseded{color:var(--pl-color-fg-muted,#999);border-style:dashed;text-decoration:line-through}
   .card.superseded{opacity:.55}
   .toggle{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--pl-color-fg-muted,#999);cursor:pointer}
@@ -87,7 +88,7 @@ PAGE = r"""<!doctype html>
       <option value="newest">Newest first</option><option value="oldest">Oldest first</option>
       <option value="id">Asset #</option>
     </select>
-    <label class="toggle" title="Takes a retake replaced — out of the review queue and the counts">
+    <label class="toggle" title="Takes a retake replaced, and rows whose file retention pruned — out of the review queue and the counts">
       <input type="checkbox" id="show-superseded"> Show superseded <span id="sup-n"></span></label>
     <span class="spacer"></span>
     <button id="refresh" title="Reload">Refresh</button>
@@ -138,7 +139,9 @@ PAGE = r"""<!doctype html>
   }
   // Superseded takes (a retake replaced them) are hidden unless the toggle is on, and never
   // count toward the review queue or the totals.
-  const retired = (a) => a.status === "superseded";
+  // Pruned tombstones (retention deleted the file; the row stays so the chain still reads) are
+  // out of play the same way.
+  const retired = (a) => a.status === "superseded" || a.pruned;
   const blobs = new Map();   // asset id → object URL (revoked on campaign switch)
 
   async function api(path, init){
@@ -189,8 +192,9 @@ PAGE = r"""<!doctype html>
   function chips(){
     const all = (state.data?.assets || []).filter(a =>
       (!state.lane || String(a.lane_id) === state.lane) && (!state.kind || a.kind === state.kind));
-    const counts = {}; for (const a of all) counts[a.status] = (counts[a.status] || 0) + 1;
-    const nSup = counts.superseded || 0;
+    const counts = {};
+    for (const a of all) if (state.showSuperseded || !retired(a) || a.status === "superseded") counts[a.status] = (counts[a.status] || 0) + 1;
+    const nSup = all.filter(retired).length;
     document.getElementById("sup-n").textContent = nSup ? `(${nSup})` : "";
     const statuses = state.data.statuses.filter(s => s !== "superseded" || state.showSuperseded);
     if (!state.showSuperseded && state.status === "superseded") state.status = "";
@@ -216,10 +220,11 @@ PAGE = r"""<!doctype html>
     const dur = a.duration_s ? `${a.duration_s.toFixed(1)}s` : "";
     const violated = /^(VIOLATES|DRAFT INPUTS)/.test(a.notes || "");
     el.innerHTML =
-      `<div class="prev">${a.has_file ? "loading…" : (a.path ? "file unavailable" : "no file yet")}</div>` +
+      `<div class="prev">${a.has_file ? "loading…" : a.pruned ? "file pruned (retention)" : (a.path ? "file unavailable" : "no file yet")}</div>` +
       `<div class="body">` +
         `<div class="title">${esc(a.title || "(untitled)")}</div>` +
         `<div class="meta"><span class="st ${esc(a.status)}">${esc(a.status.replace(/_/g, " "))}</span>` +
+          (a.stale ? `<span class="st stale" title="Waiting for review 14+ days — never auto-deleted">stale</span>` : "") +
           `${when}<span>${esc(a.kind)}</span><span>#${a.id}</span>${dims ? `<span>${dims}</span>` : ""}` +
           `${dur ? `<span>${dur}</span>` : ""}${a.size_bytes ? `<span>${fmtBytes(a.size_bytes)}</span>` : ""}` +
           `${a.limit_id ? `<span title="hard limit">≤ ${esc(a.limit_id)}</span>` : ""}</div>` +

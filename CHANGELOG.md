@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Retention — the gallery prunes its intermediates (report-only until you flip it).** A
+  daily background pass applies the policy: superseded files go 7 days after they were
+  superseded (the row stays as a tombstone, so the retake chain still reads); rendered and
+  captured intermediates go after 7 days unless something kept depends on them; planned rows
+  with no file drop after 30 days. **Approved and ready-for-review assets are never deleted**;
+  ready-for-review ones idle 14+ days get a **stale** badge. Dependencies are a closure over the
+  parent chain, montage inputs, bookended raw masters and a take's stills — when in doubt, it
+  keeps. New setting `retention_mode` (`report` default · `prune` · `disabled`, operator-only),
+  new tool `campaign_prune` (dry run by default), and operator routes `GET /retention` /
+  `POST /retention/prune`.
+
 ## 0.4.3
 
 - **Gallery timestamps — see when a clip was made** (#27). Each card shows a relative time
