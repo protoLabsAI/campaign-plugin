@@ -20,14 +20,14 @@ log = logging.getLogger("protoagent.plugins.campaign")
 def build_archive_router():
     from fastapi import APIRouter, HTTPException
     from fastapi.responses import JSONResponse
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
 
     from . import archive, surface
 
     router = APIRouter()
 
     class Backfill(BaseModel):
-        campaign_id: int = 0
+        campaign_id: int = Field(0, ge=0)  # 0 = every campaign
 
     def _guarded(what: str, fn):
         try:

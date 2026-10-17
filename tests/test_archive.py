@@ -662,3 +662,28 @@ def test_the_archive_routes_fail_plainly(client, monkeypatch, method, path, fn):
     kw = {"json": {}} if method == "post" else {}
     r = getattr(client, method)(f"/api/plugins/campaign{path}", **kw)
     assert r.status_code == 500 and TOKEN not in r.text and "RuntimeError" not in r.text and "agent log" in r.text
+
+
+def test_backfill_rejects_a_negative_campaign(client):
+    assert client.post("/api/plugins/campaign/archive/backfill", json={"campaign_id": -1}).status_code == 422
+
+
+def test_a_slow_tick_keeps_its_slot_across_stop_and_start(monkeypatch):
+    import threading
+
+    release = threading.Event()
+    started = []
+    monkeypatch.setattr(surface, "FIRST_DELAY_S", 0)
+    monkeypatch.setattr(surface, "tick", lambda now=None: started.append(1) or release.wait(10))
+    monkeypatch.setattr(threading.Thread, "join", lambda self, timeout=None: None)  # stop() gives up at once
+    surface.start()
+    for _ in range(200):
+        if started:
+            break
+        threading.Event().wait(0.01)
+    first = surface._thread
+    surface.stop()
+    surface.start()
+    assert surface._thread is first, "no second loop beside the one still mid-pass"
+    release.set()
+    surface._stop.set()

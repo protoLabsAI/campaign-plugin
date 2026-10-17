@@ -109,9 +109,14 @@ def stop() -> None:
     global _thread
     with _lock:
         _stop.set()
-        t, _thread = _thread, None
+        t = _thread
     if t is not None:
         t.join(timeout=5)
+    with _lock:
+        # A tick still mid-pass (a big upload) keeps its slot: start() sees it alive and won't
+        # spawn a second loop beside it; it exits on its own once the pass ends (_stop is set).
+        if _thread is t and (t is None or not t.is_alive()):
+            _thread = None
 
 
 def reload(_cfg_obj: Any = None) -> None:
