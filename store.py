@@ -134,6 +134,15 @@ CREATE TABLE IF NOT EXISTS decisions (
     answer         TEXT NOT NULL DEFAULT '',
     answered_at    TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS archive_queue (
+    asset_id      INTEGER PRIMARY KEY,
+    campaign_id   INTEGER NOT NULL DEFAULT 0,
+    queued_at     TEXT NOT NULL,
+    stage         TEXT NOT NULL DEFAULT 'upload',
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    next_at       TEXT NOT NULL DEFAULT '',
+    last_error    TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS scripts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     campaign_id   INTEGER NOT NULL,
@@ -150,7 +159,10 @@ CREATE TABLE IF NOT EXISTS scripts (
 # so a new status value needs no migration — old rows keep theirs.
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "assets": {"superseded_by": "TEXT NOT NULL DEFAULT '[]'"},  # v0.3.3
-    "campaigns": {"archived_from": "TEXT NOT NULL DEFAULT ''"},  # v0.5.0 — the status to restore
+    "campaigns": {
+        "archived_from": "TEXT NOT NULL DEFAULT ''",  # v0.5.0 — the status an un-archive restores
+        "archive_slug": "TEXT NOT NULL DEFAULT ''",  # v0.5.0 — pinned at first archive: the release tag + catalog name
+    },
 }
 
 _WRITE_LOCK = threading.Lock()
@@ -727,6 +739,64 @@ def prune_asset(asset_id: int, *, expect_status: str, expect_path: str, mode: st
                 (json.dumps(meta), _now(), aid),
             )
     return unlink, mode
+
+
+# ── the archive queue (archive.py) ───────────────────────────────────────────
+def enqueue_archive(asset_id: int, campaign_id: int = 0, stage: str = "upload") -> None:
+    """Queue an APPROVED asset for the protoContent archive. Re-queuing resets its retry clock
+    (an operator's re-approve or a backfill is a fresh attempt); the stage only moves forward."""
+    with _write() as conn:
+        conn.execute(
+            "INSERT INTO archive_queue (asset_id, campaign_id, queued_at, stage, attempts, next_at, last_error)"
+            " VALUES (?, ?, ?, ?, 0, '', '') ON CONFLICT(asset_id) DO UPDATE SET campaign_id = excluded.campaign_id,"
+            " attempts = 0, next_at = '', last_error = ''",
+            (int(asset_id), int(campaign_id or 0), _now(), stage),
+        )
+
+
+def archive_queue() -> list[dict[str, Any]]:
+    return _read("SELECT * FROM archive_queue ORDER BY asset_id")
+
+
+def update_archive_queue(asset_id: int, **fields: Any) -> None:
+    keys = [k for k in fields if k in ("stage", "attempts", "next_at", "last_error", "campaign_id")]
+    if not keys:
+        return
+    with _write() as conn:
+        conn.execute(
+            f"UPDATE archive_queue SET {', '.join(f'{k} = ?' for k in keys)} WHERE asset_id = ?",
+            (*[fields[k] for k in keys], int(asset_id)),
+        )
+
+
+def dequeue_archive(asset_ids: list[int]) -> None:
+    ids = [int(i) for i in asset_ids]
+    if ids:
+        with _write() as conn:
+            conn.execute(f"DELETE FROM archive_queue WHERE asset_id IN ({', '.join('?' * len(ids))})", ids)
+
+
+def set_archive_meta(asset_id: int, record: dict[str, Any]) -> dict[str, Any]:
+    """Record ``meta.archive`` on an asset — the ONE meta key the archive writes, approved rows
+    included (the agent's update_asset can't touch an approved row; this isn't an agent path).
+    Everything else on the row stays exactly as approved."""
+    with _write() as conn:
+        cur = conn.execute("SELECT meta FROM assets WHERE id = ?", (int(asset_id),)).fetchone()
+        if cur is None:
+            raise ValueError(f"no asset with id {asset_id}")
+        try:
+            meta = json.loads(cur["meta"] or "{}")
+        except json.JSONDecodeError:
+            meta = {}
+        meta = meta if isinstance(meta, dict) else {}
+        meta["archive"] = record
+        conn.execute("UPDATE assets SET meta = ? WHERE id = ?", (json.dumps(meta), int(asset_id)))
+    return get_asset(asset_id)  # type: ignore[return-value]
+
+
+def set_archive_slug(campaign_id: int, slug: str) -> None:
+    with _write() as conn:
+        conn.execute("UPDATE campaigns SET archive_slug = ? WHERE id = ?", (slug, int(campaign_id)))
 
 
 # ── collections: moving and copying assets between campaigns (library.py) ────

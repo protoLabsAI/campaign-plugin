@@ -1,6 +1,10 @@
 """The library's background surface — one daemon thread that keeps the gallery tidy.
 
-Every ``TICK_S`` it runs :func:`tick`, which today does one job:
+Every ``TICK_S`` it runs :func:`tick`, which does two jobs:
+
+* **the archive, every tick** — :func:`archive.drain` uploads what the operator approved to
+  protoContent and batches the catalog onto one PR per campaign (only while
+  ``archive_enabled`` is on and ``archive_token`` is set; a failure backs off and retries).
 
 * **retention, daily** — :func:`retention.run_scheduled` in the ``retention_mode`` the operator
   set (``report`` by default: a dry run whose report is saved for the gallery and
@@ -20,7 +24,7 @@ import threading
 from datetime import UTC, datetime
 from typing import Any, Callable
 
-from . import retention
+from . import archive, retention
 
 log = logging.getLogger("protoagent.plugins.campaign")
 
@@ -61,11 +65,23 @@ def retention_due(cfg: dict[str, Any], now: datetime) -> bool:
     return at is None or (now - at).total_seconds() >= RETENTION_EVERY_S
 
 
+def store_queue_nonempty() -> bool:
+    from . import store
+
+    return bool(store.archive_queue())
+
+
 def tick(now: datetime | None = None) -> dict[str, Any]:
     """One pass. Returns what ran (for tests and the log)."""
     now = now or datetime.now(UTC)
     cfg = config()
     ran: dict[str, Any] = {}
+    try:
+        if archive.settings(cfg)["enabled"] and store_queue_nonempty():
+            ran["archive"] = archive.drain(cfg, now=now)
+    except Exception:  # noqa: BLE001 — one bad pass never kills the loop
+        log.exception("[campaign] archive pass failed")
+        ran["archive"] = "error"
     try:
         if retention_due(cfg, now):
             report = retention.run_scheduled(cfg, now)

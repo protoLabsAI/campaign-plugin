@@ -6,8 +6,9 @@ shot scripts recorded by headless Chromium, ffmpeg cuts under hard size limits, 
 cards. Copy belongs to Social Studio (``social``) and browser exploration to the core
 ``agent_browser`` plugin — both referenced by tool NAME only, never imported (ADR 0039).
 
-Draft-only: nothing here posts anywhere or holds a platform credential, and only the
-operator approves an asset.
+Draft-only: nothing here posts to a social platform or holds a platform credential, and only
+the operator approves an asset. Its one optional credential is the operator's GitHub token
+(``archive_token``) for backing approved media up to protoContent (``archive.py``).
 
 ``register(registry)`` is the only place plugin code runs (ADR 0018). Host-only imports stay
 inside functions so the suite runs with no protoAgent, and each contribution group is

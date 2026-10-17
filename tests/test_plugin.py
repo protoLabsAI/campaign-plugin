@@ -48,6 +48,7 @@ TOOLS = {
     "campaign_prune",
     "campaign_archive",
     "campaign_collect",
+    "campaign_backup",
 }
 
 
@@ -81,8 +82,12 @@ def test_settings_that_name_a_program_to_run_are_marked_spawns():
     agent that could widen it could upload anything it can read — and `outro`, whose bumper names
     a local video file the montage reads (only the operator may point it at one)."""
     spawns = {s["key"] for s in MANIFEST["settings"] if s.get("spawns") is True}
-    # retention_mode too: `prune` is the switch that lets files be deleted, and it is Josh's.
-    assert spawns == {"ffmpeg_path", "interpreter", "upload_dirs", "outro", "intro", "retention_mode"}
+    # retention_mode too: `prune` is the switch that lets files be deleted, and it is Josh's —
+    # and archive_repo / archive_catalog_dir decide where approved media goes with his token.
+    assert spawns == {
+        "ffmpeg_path", "interpreter", "upload_dirs", "outro", "intro", "retention_mode", "archive_repo",
+        "archive_catalog_dir",
+    }  # fmt: skip
 
 
 def test_playwright_is_declared_runtime_scoped_and_optional():
@@ -111,12 +116,16 @@ def test_declared_capabilities_match_reality():
     # The recording browser navigates to whatever a shot script names — like agent_browser,
     # that is "*", not "no network". (v0.1.0 declared [] and under-stated the blast radius.)
     assert MANIFEST["capabilities"] == {"network": ["*"], "filesystem": "scoped"}
-    sources = "\n".join(p.read_text(encoding="utf-8") for p in [*ROOT.glob("*.py"), *ROOT.glob("worker/*.py")])
+    # The ONE outbound caller is archive.py (GitHub's API, the operator's token, opt-in); every
+    # other module makes no outbound calls of its own.
+    files = [p for p in [*ROOT.glob("*.py"), *ROOT.glob("worker/*.py")] if p.name != "archive.py"]
+    sources = "\n".join(p.read_text(encoding="utf-8") for p in files)
     for client in ("httpx", "requests", "urllib.request", "urllib3", "aiohttp", "http.client", "socket"):
         pattern = rf"^\s*(import|from)\s+{re.escape(client)}\b"
-        assert not re.search(pattern, sources, re.M), (
-            f"the plugin's Python makes no outbound calls of its own ({client})"
-        )
+        assert not re.search(pattern, sources, re.M), f"only archive.py makes outbound calls ({client})"
+    arch = (ROOT / "archive.py").read_text(encoding="utf-8")
+    assert 'API = "https://api.github.com"' in arch and 'UPLOADS = "https://uploads.github.com"' in arch
+    assert MANIFEST["secrets"] == ["archive_token"]
 
 
 def test_no_cross_plugin_imports():

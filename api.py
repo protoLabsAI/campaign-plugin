@@ -97,6 +97,10 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         from . import retention
 
         out["pruned"] = store.is_pruned(a)
+        arch = ((a.get("meta") or {}).get("archive") or {}) if isinstance(a.get("meta"), dict) else {}
+        out["archived"] = (
+            {"at": arch.get("at", ""), "release_tag": arch.get("release_tag", "")} if arch.get("url") else None
+        )
         age = retention.age_days(_utcnow(), a.get("updated"), a.get("created"))
         out["stale"] = a.get("status") == "ready_for_review" and age is not None and age >= retention.STALE_REVIEW_DAYS
         return out
@@ -247,6 +251,13 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
             a = store.review(asset_id, body.decision, body.note, body.superseded_by)
         except ValueError as e:
             raise HTTPException(400, str(e)) from None
+        # Approving queues the protoContent backup; the library surface uploads + catalogs it.
+        try:
+            from . import archive
+
+            archive.queue_approved(a)
+        except Exception:  # noqa: BLE001 — a queue hiccup never fails the operator's approval
+            log.exception("[campaign] queueing asset #%s for the archive failed", asset_id)
         if emit:
             try:
                 emit("asset_reviewed", {"campaign_id": a["campaign_id"], "asset_id": a["id"], "status": a["status"]})
@@ -291,6 +302,29 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
             except Exception:  # noqa: BLE001 — the bus is chrome
                 pass
         return JSONResponse(report)
+
+    # The protoContent archive (archive.py): status, backfill, and a pass right now. The pass is
+    # a SYNC route so FastAPI runs it on its threadpool — uploads never block the event loop.
+    class Backfill(BaseModel):
+        campaign_id: int = 0
+
+    @router.get("/archive")
+    async def _archive_status() -> JSONResponse:
+        from . import archive
+
+        return JSONResponse(archive.status())
+
+    @router.post("/archive/backfill")
+    def _archive_backfill(body: Backfill) -> JSONResponse:
+        from . import archive
+
+        return JSONResponse({"queued": archive.backfill(body.campaign_id)})
+
+    @router.post("/archive/drain")
+    def _archive_drain() -> JSONResponse:
+        from . import archive, surface
+
+        return JSONResponse(archive.drain(surface.config()))
 
     # Video jobs (campaign_produce_video): progress + gates + where the files are, for a
     # dashboard or an API caller polling a job it started. Files download through /file/{id}.
