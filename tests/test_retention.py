@@ -647,3 +647,9 @@ def test_two_prunes_never_run_at_once(c):
             retention.execute(NOW)
     finally:
         retention._RUN_LOCK.release()
+
+
+def test_unicode_digit_ids_in_meta_never_abort_the_plan(c):
+    a = _asset(c, "renders/a/a.mp4", "rendered", days=30)
+    _asset(c, "montages/m.mp4", "approved", kind="montage", days=30, meta={"inputs": ["²", str(a["id"])]})
+    assert a["id"] not in _ids(retention.plan(NOW)), "the ASCII id still protects; the superscript is ignored"

@@ -463,7 +463,7 @@ def _ints(value: Any) -> list[int]:
             continue
         if isinstance(v, int):
             out.append(v)
-        elif isinstance(v, str) and v.isdigit():
+        elif isinstance(v, str) and v.isascii() and v.isdigit():  # '²'.isdigit() is True; int('²') isn't
             out.append(int(v))
     return out
 
