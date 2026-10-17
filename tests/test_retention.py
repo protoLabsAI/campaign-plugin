@@ -587,6 +587,8 @@ def test_a_failed_prune_is_a_clear_500_and_deletes_nothing(client, c, monkeypatc
     monkeypatch.setattr(retention, "_job_refs", lambda: 1 / 0)
     r = client.post("/api/plugins/campaign/retention/prune", json={"dry_run": False})
     assert r.status_code == 500 and "ZeroDivisionError" in r.json()["detail"] and os.path.exists(a["path"])
+    assert "division" not in r.json()["detail"], "the type, not the message (paths stay in the log)"
+    assert client.get("/api/plugins/campaign/retention").status_code == 500
 
 
 # The file route is the containment boundary the prune relies on too: a tombstone, a row that

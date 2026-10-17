@@ -189,7 +189,12 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
     def _retention(campaign_id: int = 0) -> JSONResponse:
         from . import retention
 
-        return JSONResponse({"last": retention.last_report(), "plan": retention.plan(campaign_id=campaign_id)})
+        try:
+            fresh = retention.plan(campaign_id=campaign_id)
+        except Exception:  # noqa: BLE001 — say so plainly; the details are in the log
+            log.exception("[campaign] retention plan failed")
+            raise HTTPException(500, "the retention plan failed — see the agent log") from None
+        return JSONResponse({"last": retention.last_report(), "plan": fresh})
 
     @router.post("/retention/prune")
     def _prune(body: Prune) -> JSONResponse:
@@ -202,7 +207,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         except Exception as e:  # noqa: BLE001 — a failed plan (e.g. unreadable job records) deletes nothing
             log.exception("[campaign] retention prune failed")
             raise HTTPException(
-                500, f"prune failed before deleting anything further: {type(e).__name__}: {e}"
+                500, f"prune failed ({type(e).__name__}) — nothing further was deleted; see the agent log"
             ) from None
         if emit:
             try:
