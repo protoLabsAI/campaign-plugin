@@ -52,6 +52,7 @@ PAGE = r"""<!doctype html>
   .st.approved{color:var(--pl-color-success,#30a46c);border-color:var(--pl-color-success,#30a46c)}
   .st.rejected{color:var(--pl-color-danger,#e5484d);border-color:var(--pl-color-danger,#e5484d)}
   .st.stale{color:var(--pl-color-danger,#e5484d);border-color:var(--pl-color-danger,#e5484d);border-style:dashed}
+  .st.archived{color:var(--pl-color-success,#30a46c);border-color:var(--pl-color-success,#30a46c);border-style:dashed}
   .st.superseded{color:var(--pl-color-fg-muted,#999);border-style:dashed;text-decoration:line-through}
   .card.superseded{opacity:.55}
   .toggle{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--pl-color-fg-muted,#999);cursor:pointer}
@@ -238,6 +239,7 @@ PAGE = r"""<!doctype html>
         `<div class="title">${esc(a.title || "(untitled)")}</div>` +
         `<div class="meta"><span class="st ${esc(a.status)}">${esc(a.status.replace(/_/g, " "))}</span>` +
           (a.stale ? `<span class="st stale" title="Waiting for review 14+ days — never auto-deleted">stale</span>` : "") +
+          (a.archived ? `<span class="st archived" title="${esc("Backed up to protoContent (" + a.archived.release_tag + ") " + absTime(a.archived.at))}">backed up</span>` : "") +
           `${when}<span>${esc(a.kind)}</span><span>#${a.id}</span>${dims ? `<span>${dims}</span>` : ""}` +
           `${dur ? `<span>${dur}</span>` : ""}${a.size_bytes ? `<span>${fmtBytes(a.size_bytes)}</span>` : ""}` +
           `${a.limit_id ? `<span title="hard limit">≤ ${esc(a.limit_id)}</span>` : ""}</div>` +

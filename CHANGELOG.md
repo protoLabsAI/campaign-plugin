@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+- **The gallery shows which approved assets are backed up.** An approved asset whose file is on its
+  campaign's protoContent release and listed in the catalog gets a **backed up** badge. Hovering
+  shows the release and when it was uploaded. The asset API returns this as `archived` (`at`,
+  `release_tag`); it's `null` until the catalog PR has the entry.
+
 ## 0.5.0
 
 - **Retention — the gallery prunes its intermediates (report-only until you flip it).** A
