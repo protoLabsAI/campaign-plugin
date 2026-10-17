@@ -566,3 +566,44 @@ def test_a_pruned_tombstone_serves_no_file(client, c):
         .headers.get("content-type", "")
         .startswith("application/json")
     )
+
+
+def test_counts_keep_superseded_and_pruned_apart(client, c):
+    keep = _asset(c, "renders/k/k.mp4", "ready_for_review", days=0)
+    s = _asset(c, "renders/s/s.mp4", "rendered", days=1)
+    store.update_asset(s["id"], status="superseded", superseded_by=[keep["id"]])
+    named = _asset(c, "renders/n/n.mp4", "rendered", days=3650)  # an old intermediate s names → a tombstone
+    store.update_asset(s["id"], status="superseded", superseded_by=[named["id"]])
+    client.post("/api/plugins/campaign/retention/prune", json={"dry_run": False})
+    assert store.is_pruned(store.get_asset(named["id"]))
+    (row,) = client.get("/api/plugins/campaign/campaigns").json()["campaigns"]
+    assert row["superseded"] == 1 and row["pruned"] == 1 and row["assets"] == 1
+    summary = store.status_summary(c["id"])
+    assert summary["superseded"] == 1 and summary["pruned"] == 1
+
+
+def test_a_failed_prune_is_a_clear_500_and_deletes_nothing(client, c, monkeypatch):
+    a = _asset(c, "renders/a/a.mp4", "rendered", days=3650)
+    monkeypatch.setattr(retention, "_job_refs", lambda: 1 / 0)
+    r = client.post("/api/plugins/campaign/retention/prune", json={"dry_run": False})
+    assert r.status_code == 500 and "ZeroDivisionError" in r.json()["detail"] and os.path.exists(a["path"])
+
+
+# The file route is the containment boundary the prune relies on too: a tombstone, a row that
+# points outside the media root, or a symlink out of it is never served.
+@pytest.mark.parametrize("how", ["outside", "symlink", "traversal"])
+def test_the_file_route_never_serves_outside_the_media_root(client, c, tmp_path, how):
+    secret = tmp_path / "secret.mp4"
+    secret.write_bytes(b"secret")
+    camp = paths.campaign_dir(c["id"], c["name"])
+    if how == "outside":
+        p = str(secret)
+    elif how == "symlink":
+        link = camp / "link.mp4"
+        link.symlink_to(secret)
+        p = str(link)
+    else:
+        p = str(camp / ".." / ".." / ".." / secret.relative_to(secret.anchor))
+    a = store.add_asset(c["id"], "clip", how, path=p, status="captured")
+    r = client.get(f"/api/plugins/campaign/file/{a['id']}")
+    assert r.status_code in (403, 404) and b"secret" not in r.content

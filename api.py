@@ -121,7 +121,8 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
                     "assets": len(assets),
                     "review": sum(1 for a in assets if a["status"] == "ready_for_review"),
                     "approved": sum(1 for a in assets if a["status"] == "approved"),
-                    "superseded": len(every) - len(assets),
+                    "superseded": sum(1 for a in every if a["status"] in store.RETIRED_STATUSES),
+                    "pruned": sum(1 for a in every if store.is_pruned(a) and a["status"] not in store.RETIRED_STATUSES),
                 }
             )
         return JSONResponse({"campaigns": rows})
@@ -196,7 +197,13 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
 
         if body.dry_run:
             return JSONResponse({**retention.plan(campaign_id=body.campaign_id), "dry_run": True})
-        report = retention.execute(campaign_id=body.campaign_id)
+        try:
+            report = retention.execute(campaign_id=body.campaign_id)
+        except Exception as e:  # noqa: BLE001 — a failed plan (e.g. unreadable job records) deletes nothing
+            log.exception("[campaign] retention prune failed")
+            raise HTTPException(
+                500, f"prune failed before deleting anything further: {type(e).__name__}: {e}"
+            ) from None
         if emit:
             try:
                 emit("campaign_changed", {"campaign_id": body.campaign_id, "pruned": len(report["done"])})

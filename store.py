@@ -995,10 +995,13 @@ def status_summary(campaign_id: int, today: str = "") -> dict[str, Any]:
     assets = list_assets(campaign_id)
     lane_names = {ln["id"]: ln["name"] for ln in lanes(campaign_id)}
     counts = {s: 0 for s in ASSET_STATUSES if s not in RETIRED_STATUSES}
-    superseded = 0
+    superseded = pruned = 0
     for a in assets:
-        if is_retired(a):
-            superseded += 1
+        if is_retired(a):  # superseded, or a pruned tombstone — counted apart, never as the other
+            if a["status"] in RETIRED_STATUSES:
+                superseded += 1
+            else:
+                pruned += 1
         else:
             counts[a["status"]] = counts.get(a["status"], 0) + 1
 
@@ -1040,6 +1043,7 @@ def status_summary(campaign_id: int, today: str = "") -> dict[str, Any]:
         "counts": counts,
         "progress": {"approved": done, "total": total},
         "superseded": superseded,
+        "pruned": pruned,
         "on_operator": on_operator,
         "on_agent": on_agent,
     }
