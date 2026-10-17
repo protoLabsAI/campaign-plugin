@@ -44,8 +44,10 @@ product: the planning + production half of a "Brand & Launch" agent.
   The assets API carries `created_at` / `updated_at` (the row), `made_at` + `made_from`
   (`stamp` | `mtime`) and `take_at`.
 
-**Draft-only.** It never posts anywhere and holds no platform credentials. Every asset has an
-approval state and only the operator approves (in the gallery — there is no agent tool for it).
+**Draft-only.** It never posts to a social platform and holds no platform credentials. Every
+asset has an approval state and only the operator approves (in the gallery — there is no agent
+tool for it). Its one optional credential is the operator's GitHub token for **backing up**
+approved media to protoContent (see **Archive to protoContent**).
 
 **What it is not.** Copy is the [Social Studio](https://github.com/protoLabsAI/social-plugin)
 plugin's job (brand kit, queue, linter, disclosure, export); browsing a site is core's
@@ -84,8 +86,8 @@ loads nothing from the network at all.
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.4.3`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.4.3`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.5.0`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.5.0`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —
@@ -107,6 +109,7 @@ loads nothing from the network at all.
 | Tool | What it does |
 |---|---|
 | `campaign_create` / `campaign_update` / `campaign_list` / `campaign_get` | The plan: goal, target metric, launch window, target URL, goal math, sourced assumptions, channel plan, do-not list |
+| `campaign_collect` / `campaign_archive` | Collections: move or copy assets (with their lineage) into another campaign; archive a campaign (hidden by default) or bring it back (see **Collections**) |
 | `campaign_lane` | A lane: name, pitch, audience, hero asset |
 | `campaign_asset_add` / `campaign_asset_update` / `campaign_assets` | The shot list. Status `planned → scripted → captured → rendered → ready_for_review`, or `superseded` (with `superseded_by`) to retire a replaced take; `ready_for_review` is refused if the file is missing or breaks its hard limit; `approved`/`rejected` are refused outright, and so is superseding an approved asset. `campaign_assets` hides superseded takes unless `include_superseded=true` |
 | `campaign_milestone` / `campaign_decision` | Dated milestones (owner agent/operator); operator decisions with options + a recommendation |
@@ -123,6 +126,7 @@ loads nothing from the network at all.
 | `campaign_video_status` | A video job's stage, progress, gate table, files and links; `wait_s` blocks until it ends |
 | `campaign_limits` | The hard-limit table, each row with its source URL and as-of date |
 | `campaign_setup` | What's installed and how to fix what isn't |
+| `campaign_backup` | The protoContent backup of approved media: archived / queued / retrying; `backfill=true` queues every approved asset (see **Archive to protoContent**) |
 | `campaign_prune` | Retention: what the prune would delete, with sizes, by rule (dry run by default); `dry_run=false` deletes only once the operator set `retention_mode: prune` (see **Retention**) |
 
 Plus: skills `campaign-planning`, `shot-scripting`, `asset-review`, `montage-editing`,
@@ -287,6 +291,67 @@ on for itself. `campaign_prune` shows the dry run any time; the operator routes 
 `GET /api/plugins/campaign/retention` (the last saved report + a fresh plan) and
 `POST /api/plugins/campaign/retention/prune` (`{"dry_run": false}` prunes now, whatever the
 mode).
+
+## Archive to protoContent
+
+Approved media is backed up to [protoContent](https://github.com/protoLabsAI/protoContent)
+(private), the protoLabs marketing hub — opt in with `archive_enabled` and an `archive_token`.
+
+* **Files** → GitHub **release assets**, one release per campaign: tag `media/<slug>`, made on
+  first use, never marked *latest* (it can't displace a package release; nothing in
+  protoContent's CI fires on it). Video never goes into git. Assets are content-addressed —
+  `<sha256[:12]>-<file name>` — so the same bytes upload once.
+* **Catalog** → `specs/media/catalog/<slug>.json` (`archive_catalog_dir`), validating against
+  protoContent's `schemas/media/catalog.schema.json`: one entry per approved asset — id,
+  title, lane, kind, width/height/duration, size, sha256, approved_at, review_note, the release
+  asset URL, the source campaign. Append/update only. protoContent's `main` takes changes only
+  through PRs, so the catalog is **batched onto one open PR per campaign** (branch
+  `media-catalog/<slug>`): later approvals add commits to that PR; a new one opens only after it
+  merged (a PR closed unmerged is regenerated in full). The plugin never merges anything.
+* **Flow:** every minute (while enabled) the library surface reconciles — queuing each approved
+  asset with no archive record, or none for its current campaign's catalog — then drains → upload (skipped when `meta.archive.sha256` already matches: same sha256 =
+  already archived) → `meta.archive = {url, sha256, at, …}` → one catalog commit per campaign
+  per pass (at most 25 assets a pass). Catalog entries upsert by sha256. Failures back off
+  1 min → 5 min → 30 min → 2 h → 6 h; after 10 attempts an asset parks until a backfill. An
+  asset collected into another campaign is added to THAT campaign's catalog without re-uploading.
+* **Backfill:** `campaign_backup(backfill=true)` or `POST /api/plugins/campaign/archive/backfill`
+  queues every approved, non-superseded asset. `GET /archive` is the status;
+  `POST /archive/drain` runs a pass now; `campaign_backup` shows the same status to the agent.
+
+**The token** (`archive_token`, a secret in `secrets.yaml`, never logged or echoed): a
+**fine-grained personal access token**, resource owner `protoLabsAI`, repository access
+**only `protoContent`**, with repository permissions **Contents: Read and write** (releases,
+release assets, the catalog branch and commit) and **Pull requests: Read and write** (open the
+catalog PR). *Metadata: Read* is added automatically. Nothing else — no Actions, Workflows,
+Administration or org permissions. (A classic token would need the whole `repo` scope; prefer
+the fine-grained one.) `archive_enabled`, `archive_repo` and `archive_catalog_dir` are
+operator-only settings — they decide whether and where your media goes.
+
+## Collections — keep the good ones together, start fresh
+
+A collection is a campaign. To gather the keepers and start over:
+
+1. `campaign_create(name="protoAgent launch — best of")`.
+2. `campaign_collect(target_campaign_id=<new>, asset_ids=[…])` — a **dry run** by default:
+   it lists every asset that would come, with sizes. With `lineage=true` (default) that is the
+   selected assets **plus everything they were made from** (the take a render was cut from, a
+   bookended clip's render, a montage's inputs), so the chain still reads and retention keeps it.
+3. Run it for real (`dry_run=false`):
+   * `mode="move"` re-homes the rows — same ids, same files (they stay where they are on disk,
+     inside the media root), same status and approval. Lanes are matched by name in the
+     target (created when missing).
+   * `mode="copy"` duplicates them: files are COPIED into the target's folder (same layout),
+     side files too (raw masters, a take's stills and timing log), and every id and path in the
+     copies is re-pointed at the copies. Copying the same asset again maps to its existing copy.
+4. `campaign_archive(old_id)` — hidden from `campaign_list` and the gallery picker (**Show
+   archived** brings it back); nothing in it is touched. `archived=false` restores the status it
+   had.
+
+**Approval stays the operator's:** the agent can't move an APPROVED asset, and its copy of one
+lands `ready_for_review`. The operator's route does both:
+`POST /api/plugins/campaign/campaigns/<target>/collect` with
+`{"asset_ids": [...], "mode": "move" | "copy", "lineage": true, "dry_run": false}` (dry run by
+default), and `POST /api/plugins/campaign/campaigns/<id>/archive` with `{"archived": true}`.
 
 ## Directing a clip — two rules from operator review
 
@@ -594,7 +659,8 @@ names a shot script may use as its bearer), `upload_dirs` (folders an `upload` s
 files from; blank refuses uploads; operator-only), `outro` (the brand outro — see **The brand
 outro**; operator-only), `intro` (the brand intro — see **The brand intro**; operator-only),
 `producer_model`, `retention_mode` (`report` | `prune` | `disabled` — see **Retention**;
-operator-only).
+operator-only), `archive_enabled` / `archive_repo` / `archive_catalog_dir` / `archive_token`
+(see **Archive to protoContent**; operator-only, the token a secret).
 
 ## Development
 
