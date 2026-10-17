@@ -57,7 +57,7 @@ def build_view_router():
 def build_data_router(emit: Callable[[str, dict], Any] | None = None):
     from fastapi import APIRouter, HTTPException
     from fastapi.responses import FileResponse, JSONResponse
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field
 
     from . import paths, store
 
@@ -148,7 +148,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         archived: bool = True
 
     class Collect(BaseModel):
-        asset_ids: list[int]
+        asset_ids: list[int] = Field(min_length=1, max_length=2000)  # a whole campaign is ~1k assets
         mode: Literal["move", "copy"] = "move"
         lineage: bool = True
         dry_run: bool = True
@@ -159,6 +159,9 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
             c = store.set_archived(campaign_id, body.archived)
         except ValueError as e:
             raise HTTPException(404, str(e)) from None
+        except Exception as e:  # noqa: BLE001 — e.g. a locked database: a clear 500, details in the log
+            log.exception("[campaign] archiving campaign %s failed", campaign_id)
+            raise HTTPException(500, f"archive failed ({type(e).__name__}) — see the agent log") from None
         if emit:
             try:
                 emit("campaign_changed", {"campaign_id": c["id"], "status": c["status"]})
