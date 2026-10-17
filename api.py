@@ -252,7 +252,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
                 emit("asset_reviewed", {"campaign_id": a["campaign_id"], "asset_id": a["id"], "status": a["status"]})
             except Exception:  # noqa: BLE001 — the bus is chrome
                 pass
-        return JSONResponse({"asset": _safe_public(a) or {"id": asset_id, "status": (a or {}).get("status")}})
+        return JSONResponse({"asset": _safe_public(a) or {"id": a.get("id"), "status": a.get("status")}})
 
     # Retention (retention.py): the last scheduled report, a fresh dry run, and the operator's
     # own real run — which works whatever retention_mode says (the operator IS the authority the

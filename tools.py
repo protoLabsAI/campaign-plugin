@@ -386,9 +386,7 @@ def build_tools(registry):
     @tool
     def campaign_list(include_archived: bool = False) -> str:
         """List campaigns with their ids, status, launch window and asset progress. Start here
-        when the operator refers to 'the launch' or 'the campaign' without an id. Archived
-        campaigns (collections set aside with campaign_archive) are left out unless
-        include_archived is true."""
+        when the operator refers to 'the launch' or 'the campaign' without an id."""
         rows = store.list_campaigns(include_archived=include_archived)
         if not rows:
             return "No campaigns yet. Create one with campaign_create."
