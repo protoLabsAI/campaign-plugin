@@ -154,8 +154,13 @@ PAGE = r"""<!doctype html>
 
   function showErr(msg){ const e = document.getElementById("err"); e.hidden = !msg; e.textContent = msg || ""; }
 
+  // Only the newest load may write state: a slow response for a campaign (or archive toggle) the
+  // operator has already left must not overwrite the one they are looking at.
+  let loadGen = 0;
   async function loadCampaigns(){
+    const gen = ++loadGen;
     const { campaigns, archived_hidden } = await api(`/campaigns${state.showArchived ? "?include_archived=true" : ""}`).then(r => r.json());
+    if (gen !== loadGen) return;
     document.getElementById("arch-n").textContent = archived_hidden ? `(${archived_hidden})` : "";
     const sel = document.getElementById("campaign");
     sel.innerHTML = campaigns.map(c =>
@@ -173,7 +178,10 @@ PAGE = r"""<!doctype html>
   }
 
   async function loadAssets(){
-    state.data = await api(`/campaigns/${state.campaign}/assets`).then(r => r.json());
+    const gen = ++loadGen;
+    const data = await api(`/campaigns/${state.campaign}/assets`).then(r => r.json());
+    if (gen !== loadGen) return;
+    state.data = data;
     const lane = document.getElementById("lane");
     lane.innerHTML = `<option value="">All lanes</option>` +
       state.data.lanes.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join("");
