@@ -117,7 +117,9 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
     @router.get("/campaigns")
     def _campaigns(include_archived: bool = False) -> JSONResponse:
         rows = []
-        for c in store.list_campaigns(include_archived=include_archived):
+        every_campaign = store.list_campaigns(include_archived=True)
+        shown = [c for c in every_campaign if include_archived or c.get("status") != "archived"]
+        for c in shown:
             if not isinstance(c, dict) or not c.get("id"):
                 continue  # (rows are NOT NULL columns; belt and braces for the listing)
             every = store.list_assets(c["id"])
@@ -137,7 +139,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
                     "archived": c.get("status") == "archived",
                 }
             )
-        hidden = 0 if include_archived else len(store.list_campaigns(include_archived=True)) - len(rows)
+        hidden = len(every_campaign) - len(shown)
         return JSONResponse({"campaigns": rows, "archived_hidden": hidden})
 
     # Collections (library.py): the operator's archive switch, and move/copy with lineage. This is
@@ -168,6 +170,8 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
     def _collect(campaign_id: int, body: Collect) -> JSONResponse:  # sync: a copy copies files
         from . import library
 
+        if store.get_campaign(campaign_id) is None:
+            raise HTTPException(404, "no such campaign")
         try:
             if body.dry_run:
                 out = library.plan(body.asset_ids, campaign_id, mode=body.mode, lineage=body.lineage, operator=True)

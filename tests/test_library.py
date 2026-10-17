@@ -310,3 +310,14 @@ def test_the_operator_route_moves_approved_assets(client, src, best):
     assert len(real["done"]) == 3 and store.get_asset(hero["id"])["campaign_id"] == best["id"]
     assert client.post(url, json={"asset_ids": [hero["id"]], "mode": "steal"}).status_code == 422
     assert client.post(url, json={"asset_ids": [12345], "dry_run": False}).status_code == 400
+    assert (
+        client.post("/api/plugins/campaign/campaigns/999/collect", json={"asset_ids": [hero["id"]]}).status_code == 404
+    )
+
+
+def test_any_file_under_matches_folders_not_name_prefixes(src):
+    a = _row(src, "shots/t_1/take.webm", "captured")
+    d = str(Path(a["path"]).parent)
+    assert store.any_file_under(d) and store.any_file_under(d + "/")
+    assert not store.any_file_under(d[:-1]), "t_ is not a wildcard, and t_ isn't t_1"
+    assert not store.any_file_under(d + "x")

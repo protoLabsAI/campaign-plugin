@@ -101,8 +101,8 @@ def _supersede_take(old: dict[str, Any], new_take_dir: str) -> list[str]:
     # approved one) in the old campaign while the take itself lives in another.
     stills = [
         s
-        for s in store.list_assets(kind="still")
-        if s["parent_id"] == old["id"] and s.get("path") and old_dir and Path(s["path"]).parent == Path(old_dir)
+        for s in store.children(old["id"], kind="still")
+        if s.get("path") and old_dir and Path(s["path"]).parent == Path(old_dir)
     ]
     kept = [s for s in stills if s["status"] == "approved"]
     gone = [s for s in stills if s["status"] != "approved"]
@@ -124,9 +124,7 @@ def _supersede_take(old: dict[str, Any], new_take_dir: str) -> list[str]:
         # must not take every campaign's media with it
         and Path(old_dir).resolve() != paths.media_root().resolve()
     ):
-        still_used = any(
-            a.get("path") and Path(old_dir) in Path(a["path"]).parents for a in store.list_assets()
-        )  # any row, in any campaign, with a file anywhere under the folder keeps it
+        still_used = store.any_file_under(old_dir)  # any row, in any campaign, with a file under it
         if not still_used:
             import shutil
 

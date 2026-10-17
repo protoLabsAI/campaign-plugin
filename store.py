@@ -24,6 +24,7 @@ writes; additive ``ALTER TABLE`` migrations on connect.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -883,6 +884,31 @@ def review(asset_id: int, decision: str, note: str = "", superseded_by: Any = No
 def get_asset(asset_id: int) -> dict[str, Any] | None:
     rows = _read("SELECT * FROM assets WHERE id = ?", (int(asset_id),))
     return rows[0] if rows else None
+
+
+def children(parent_id: int, kind: str = "") -> list[dict[str, Any]]:
+    """Rows whose ``parent_id`` is ``parent_id`` — in EVERY campaign (a move can split a family)."""
+    sql, args = "SELECT * FROM assets WHERE parent_id = ?", [int(parent_id)]
+    if kind:
+        sql += " AND kind = ?"
+        args.append(kind)
+    return _read(sql + " ORDER BY id", tuple(args))
+
+
+def any_file_under(folder: str) -> bool:
+    """True when any row, in any campaign, has its file somewhere under ``folder``."""
+    # the platform's separator (a Windows desktop stores C:\\…\\); LIKE is case-blind for ASCII,
+    # which can only over-match — i.e. keep a folder — never under-match
+    prefix = str(Path(folder)).rstrip("/\\") + os.sep
+    esc = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    conn = connect()
+    try:
+        return (
+            conn.execute("SELECT 1 FROM assets WHERE path LIKE ? ESCAPE '\\' LIMIT 1", (esc + "%",)).fetchone()
+            is not None
+        )
+    finally:
+        conn.close()
 
 
 def list_assets(campaign_id: int = 0, *, status: str = "", lane_id: int = 0, kind: str = "") -> list[dict[str, Any]]:
