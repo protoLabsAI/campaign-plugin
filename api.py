@@ -165,7 +165,7 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
         return JSONResponse({"campaign": {"id": c["id"], "name": c["name"], "status": c["status"]}})
 
     @router.post("/campaigns/{campaign_id}/collect")
-    async def _collect(campaign_id: int, body: Collect) -> JSONResponse:
+    def _collect(campaign_id: int, body: Collect) -> JSONResponse:  # sync: a copy copies files
         from . import library
 
         try:
