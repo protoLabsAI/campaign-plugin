@@ -36,15 +36,15 @@ def build_archive_router():
             log.exception("[campaign] archive %s failed", what)
             raise HTTPException(500, f"the archive {what} failed — see the agent log") from None
 
-    @router.get("/archive")
+    @router.get("")
     def _status() -> JSONResponse:
         return _guarded("status", lambda: archive.status(surface.config()))
 
-    @router.post("/archive/backfill")
+    @router.post("/backfill")
     def _backfill(body: Backfill) -> JSONResponse:
         return _guarded("backfill", lambda: {"queued": archive.backfill(body.campaign_id)})
 
-    @router.post("/archive/drain")
+    @router.post("/drain")
     def _drain() -> JSONResponse:
         return _guarded("pass", lambda: archive.drain(surface.config()))
 

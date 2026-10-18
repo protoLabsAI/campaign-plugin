@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1
+
+- **The archive's operator routes are actually served.** `GET /api/plugins/campaign/archive`
+  (status), `POST …/archive/backfill` and `POST …/archive/drain` were registered as a second router at
+  the same prefix as the data routes. The host keeps one router per prefix, so since 0.5.0 it
+  dropped them (logging "registered a second router … dropped") and they returned 404. The
+  background backup pass was unaffected. They now mount at their own prefix with the same URLs. The
+  test registry drops a duplicate prefix the way the host does, so this can't regress silently.
+
 ## 0.6.0
 
 - **The protoContent archive can act as a GitHub App (protoquinn) instead of a personal token.**

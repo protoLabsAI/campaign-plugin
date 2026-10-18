@@ -517,6 +517,7 @@ class FakeRegistry:
         self.config = config or {}
         self.plugin_id = "campaign"
         self.tools, self.routers, self.subagents, self.events = [], [], [], []
+        self.dropped_routers: list = []
         self.gaps: dict[str, tuple] = {}
         self.steps: dict[str, object] = {}
         self.media = []
@@ -528,6 +529,11 @@ class FakeRegistry:
         self.tools.extend(ts)
 
     def register_router(self, router, prefix):
+        # Like the host: ONE router per (plugin, prefix) — a second one at the same prefix is
+        # dropped with a warning, its routes never served (v0.5.0 shipped /archive that way).
+        if any(p == prefix for p, _ in self.routers):
+            self.dropped_routers.append((prefix, router))
+            return
         self.routers.append((prefix, router))
 
     def register_subagent(self, cfg):
