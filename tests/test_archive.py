@@ -600,3 +600,20 @@ def test_a_pass_takes_at_most_a_batch_and_the_next_takes_the_rest(c, gh, monkeyp
     archive.drain(CFG, gh=gh, now=NOW, limit=archive.BATCH)
     assert store.archive_queue() == [] and len(gh.prs) == 1
     assert [e["id"] for e in _catalog(gh, gh.prs[0]["head"])["assets"]] == ids
+
+
+def test_the_archive_routes_live_only_under_their_own_prefix(client):
+    # the status route answers at /archive (its own router's prefix) …
+    assert client.get("/api/plugins/campaign/archive").status_code == 200
+    # … and nothing is mounted a level deeper (the 0.5.x paths re-prefixed) or leaks elsewhere
+    assert client.get("/api/plugins/campaign/archive/archive").status_code == 404
+    assert client.post("/api/plugins/campaign/archive/archive/drain").status_code == 404
+
+
+def test_a_second_concurrent_drain_is_skipped_not_doubled():
+    # POST /drain and the background tick can overlap; drain() is single-flight
+    assert archive._DRAIN_LOCK.acquire(blocking=False)
+    try:
+        assert archive.drain({"archive_enabled": True}) == {"skipped": "another archive pass is running"}
+    finally:
+        archive._DRAIN_LOCK.release()
