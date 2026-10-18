@@ -1,6 +1,6 @@
 id: campaign
 name: Campaign Studio
-version: 0.6.3
+version: 0.6.4
 description: >-
   Campaign plans and deterministic, repeatable media production for launching ANY app or
   product. Plans hold the goal and its math, lanes, a shot list of assets (who records what),
@@ -128,13 +128,8 @@ settings:
 views:
   - { id: gallery, label: "Campaign Studio", icon: "Clapperboard", path: /plugins/campaign/view }
 
-# The host's auth gate matches these as PREFIXES (a2a_impl/auth.py `_is_public`), and a fleet hub
-# defers /agents/<slug>/plugins/… to this list (graph/fleet/member_public.py). `open/` is the
-# gallery's "Open in new tab": public so a bearer-less browser tab can load it, but it serves a
-# file only for a 15-minute HMAC-signed link minted by the GATED /api/plugins/campaign/assets/<id>/open-link.
 public_paths:
   - /plugins/campaign/view
-  - /plugins/campaign/open/
 
 # Event bus (ADR 0039) — auto-namespaced campaign.*.
 emits:

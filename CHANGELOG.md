@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.4
+
+- **`campaign_view` can look at an asset that was moved in from another campaign.** Moving assets
+  (`campaign_collect` / the gallery's move) leaves each file where it was, so a moved row's file
+  sits under the OLD campaign's folder, and `campaign_view` refused it as "not a file inside this
+  campaign's media dir". That meant an agent couldn't review or re-cut a moved take. A file is now
+  accepted when it is inside this campaign's folder, or inside any campaign folder under the media
+  root **and** named by an asset of this campaign (its own file or a side file). Anything outside
+  the media root, a symlink that escapes it, and the old campaign's other files are still refused.
+  The gallery, retention and the archive already checked against the media root, so they were
+  unaffected. Already-moved assets work with no migration.
+
 ## 0.6.3
 
 - **Gallery images have "Open in new tab", like images in chat.** It's the third hover button,
