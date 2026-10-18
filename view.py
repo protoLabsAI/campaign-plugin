@@ -48,6 +48,7 @@ PAGE = r"""<!doctype html>
   .prev.pl-markdown [data-streamdown="image-wrapper"]{display:block;width:100%;height:100%;margin:0}
   .prev.pl-markdown [data-streamdown="image"]{width:100%;height:100%;object-fit:contain;border:0;border-radius:0;cursor:zoom-in}
   .prev .pl-md-img-actions svg{width:14px;height:14px;display:block}
+  .newtab-note a{color:var(--pl-color-accent,#9b87f2)}
   .body{padding:8px 10px;display:flex;flex-direction:column;gap:6px}
   .title{font-weight:600;line-height:1.3;word-break:break-word}
   .meta{display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:11px;color:var(--pl-color-fg-muted,#999);
@@ -274,16 +275,20 @@ PAGE = r"""<!doctype html>
 
   // ── The chat's image viewer, reused (DS MarkdownImage + Lightbox via the kit CSS) ──────────────
   // Same markup, classes and icons as an image in chat: a hover action cluster (Download · View
-  // fullscreen) and the DS Lightbox. No "Open in new tab": the file is a private blob: URL that
-  // can't leave this view (and the desktop shell only hands http(s) links to the browser).
+  // fullscreen · Open in new tab) and the DS Lightbox. The preview is a private blob: URL that
+  // can't leave this view, so "Open in new tab" opens a 15-minute signed link instead, minted by
+  // the gated /assets/<id>/open-link and served by the public /plugins/campaign/open/<id>. In the
+  // desktop app the shell hands that sidecar link to the system browser (protoAgent PR 4312).
   const ICON_DOWNLOAD = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v8M4.75 7.25 8 10.5l3.25-3.25M2.75 13.5h10.5"/></svg>';
   const ICON_FULLSCREEN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2.75H2.75V6M10 2.75h3.25V6M6 13.25H2.75V10M10 13.25h3.25V10"/></svg>';
+  const ICON_NEWTAB = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 3.5H3.5v9h9V9M9.75 2.75h3.5v3.5M13 3 7.75 8.25"/></svg>';
   function imageMarkup(url, title){
     return `<div data-streamdown="image-wrapper">` +
       `<img data-streamdown="image" src="${url}" alt="${esc(title)}">` +
       `<div class="pl-md-img-actions">` +
         `<button type="button" data-img="download" title="Download image" aria-label="Download image">${ICON_DOWNLOAD}</button>` +
         `<button type="button" data-img="fullscreen" title="View fullscreen" aria-label="View fullscreen">${ICON_FULLSCREEN}</button>` +
+        `<button type="button" data-img="newtab" title="Open in new tab" aria-label="Open in new tab">${ICON_NEWTAB}</button>` +
       `</div></div>`;
   }
   function wireImage(box, url, a){
@@ -296,6 +301,56 @@ PAGE = r"""<!doctype html>
       link.href = url; link.download = name;
       document.body.appendChild(link); link.click(); link.remove();
     });
+    // Mint ahead (hover / keyboard focus), so the click can open the tab synchronously: a
+    // window.open after an await loses the click's user activation in Safari / WebKit and is
+    // popup-blocked. A link is stateless (an HMAC), so minting one that's never used costs nothing.
+    const wrap = box.querySelector('[data-streamdown="image-wrapper"]');
+    wrap.addEventListener("pointerenter", () => { openLink(a.id).catch(() => {}); });
+    wrap.addEventListener("focusin", () => { openLink(a.id).catch(() => {}); });
+    box.querySelector('[data-img="newtab"]').addEventListener("click", () => openInNewTab(a, box.closest(".card")));
+  }
+  // asset id → { url, at, pending } — a minted link, reused while it has 10+ minutes left.
+  const links = new Map();
+  const LINK_FRESH_MS = 5 * 60000;
+  function freshLink(id){ const l = links.get(id); return l && l.url && Date.now() - l.at < LINK_FRESH_MS ? l.url : ""; }
+  function openLink(id){
+    const fresh = freshLink(id);
+    if (fresh) return Promise.resolve(fresh);
+    const l = links.get(id);
+    if (l && l.pending) return l.pending;
+    const pending = api(`/assets/${id}/open-link`, { method: "POST" }).then(r => r.json()).then(j => {
+      // Slug-aware: under the fleet hub the page is /agents/<slug>/plugins/campaign/view, and the
+      // link must go through the same /agents/<slug> proxy to reach THIS agent.
+      const url = location.origin + BASE + j.url;
+      links.set(id, { url, at: Date.now() });
+      return url;
+    }, (e) => { links.delete(id); throw e; });
+    links.set(id, { pending });
+    return pending;
+  }
+  // In the desktop app the shell answers window.open itself (system browser) and denies the
+  // webview a window, so a null return there is success — not a blocked pop-up.
+  const IN_DESKTOP = Array.from(location.ancestorOrigins || []).some(o => o.startsWith("tauri:") || o === "http://tauri.localhost");
+  function openTab(url){
+    // No "noopener" feature: with it window.open ALWAYS returns null, so a blocked pop-up can't be
+    // told apart. The opener is cut by hand instead (the opened page is an image, which runs no script).
+    const w = window.open(url, "_blank");
+    if (w) { try { w.opener = null; } catch {} }
+    return !!w || IN_DESKTOP;
+  }
+  function blockedNote(card, a, url){
+    let n = card.querySelector(".newtab-note");
+    if (!n) { n = document.createElement("div"); n.className = "note newtab-note"; card.querySelector(".body").prepend(n); }
+    n.innerHTML = `Your browser blocked the new tab. <a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open #${a.id} in a new tab</a> (link valid 15 min)`;
+    n.querySelector("a").addEventListener("click", () => setTimeout(() => n.remove(), 0));
+  }
+  async function openInNewTab(a, card){
+    const fresh = freshLink(a.id);
+    if (fresh) { if (!openTab(fresh)) blockedNote(card, a, fresh); return; }
+    let url;
+    try { url = await openLink(a.id); }
+    catch (e) { showErr(`Could not open #${a.id} in a new tab: ${e.message}`); return; }
+    if (!openTab(url)) blockedNote(card, a, url);
   }
   // The DS Lightbox (overlays.tsx), as plain DOM: same classes, Escape / backdrop / × to close,
   // focus moved in and restored, body scroll locked while open.
@@ -402,7 +457,7 @@ PAGE = r"""<!doctype html>
   document.getElementById("chips").addEventListener("click", (ev) => {
     const c = ev.target.closest(".chip"); if (!c) return; state.status = c.dataset.status; render(); });
   document.getElementById("campaign").addEventListener("change", (ev) => {
-    for (const u of blobs.values()) URL.revokeObjectURL(u); blobs.clear();
+    for (const u of blobs.values()) URL.revokeObjectURL(u); blobs.clear(); links.clear();
     state.campaign = ev.target.value; state.lane = ""; loadAssets().catch(e => showErr(String(e))); });
   document.getElementById("sort").addEventListener("change", (ev) => { state.sort = ev.target.value; render(); });
   // Keep "x min ago" honest while the page sits open.
@@ -415,7 +470,7 @@ PAGE = r"""<!doctype html>
   document.getElementById("lane").addEventListener("change", (ev) => { state.lane = ev.target.value; render(); });
   document.getElementById("kind").addEventListener("change", (ev) => { state.kind = ev.target.value; render(); });
   document.getElementById("refresh").addEventListener("click", () => {
-    for (const u of blobs.values()) URL.revokeObjectURL(u); blobs.clear();  // a re-render or prune changes files
+    for (const u of blobs.values()) URL.revokeObjectURL(u); blobs.clear(); links.clear();  // a re-render or prune changes files
     loadCampaigns().catch(e => showErr(String(e))); });
 
   let booted = false;

@@ -250,7 +250,8 @@ def test_the_declared_view_path_is_the_path_actually_served(client):
     (v,) = MANIFEST["views"]
     assert v["path"] == "/plugins/campaign/view" and v["icon"] == "Clapperboard"
     assert client.get(v["path"]).status_code == 200
-    assert MANIFEST["public_paths"] == [v["path"]]
+    # The view page, plus the signed "Open in new tab" route (tests/test_open_link.py).
+    assert MANIFEST["public_paths"] == [v["path"], "/plugins/campaign/open/"]
 
 
 def test_the_page_is_public_and_the_data_is_not(client):
@@ -484,7 +485,7 @@ def test_videos_route_maps_a_job_and_skips_malformed_records(client):
 
 def test_the_gallery_reuses_the_chat_image_viewer(client):
     # an image in the gallery gets the same chrome as an image in chat: the DS MarkdownImage action
-    # cluster (Download · View fullscreen) and the DS Lightbox, by the kit's own class names
+    # cluster (Download · View fullscreen · Open in new tab) and the DS Lightbox, by the kit's own class names
     page = client.get("/plugins/campaign/view").text
     for needle in (
         'class="pl-md-img-actions"',
@@ -496,4 +497,6 @@ def test_the_gallery_reuses_the_chat_image_viewer(client):
         'aria-label="View fullscreen"',
     ):
         assert needle in page, needle
-    assert 'aria-label="Open in new tab"' not in page  # a private blob: URL can't leave the view
+    # …and the chat's third button: a private blob: URL can't leave the view, so it opens a short-lived
+    # signed link instead (tests/test_open_link.py)
+    assert 'aria-label="Open in new tab"' in page
