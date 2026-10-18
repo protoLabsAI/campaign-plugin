@@ -21,7 +21,7 @@ from campaign import archive, store
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from test_archive import CFG, NOW, TOKEN, FakeGitHub, _approved, _catalog, c, gh  # noqa: F401 — fixtures
+from archive_support import TOKEN, NOW, FakeGitHub, _approved, _catalog, new_campaign
 
 APP_ID, INSTALLATION = 3282126, 121562683
 REPO = "protoLabsAI/protoContent"
@@ -39,6 +39,16 @@ def _keypair():
 
 PEM, PUB = _keypair()
 APP_CFG = {"archive_enabled": True, "archive_app_id": APP_ID, "archive_app_private_key": PEM}
+
+
+@pytest.fixture
+def gh():
+    return FakeGitHub()
+
+
+@pytest.fixture
+def c():
+    return new_campaign()
 
 
 @pytest.fixture(autouse=True)
@@ -247,6 +257,8 @@ def test_a_bad_key_or_a_missing_library_is_a_readable_problem(monkeypatch):
 
 
 def test_the_ids_are_numbers_from_settings():
+    assert archive._int(3.7) == archive._int(-5) == archive._int("x") == -1
+    assert archive._int(None) == archive._int("") == 0
     s = archive.settings({**APP_CFG, "archive_app_id": "3282126", "archive_app_installation_id": 121562683.0})
     assert (s["app_id"], s["installation_id"]) == (APP_ID, INSTALLATION)
     assert any("isn't a number" in p for p in archive.problems(archive.settings({**APP_CFG,
@@ -307,7 +319,7 @@ def test_mint_errors_never_carry_the_key_or_the_jwt():
     assert not any(ln in msg for ln in PEM.splitlines()[1:-1])
 
 
-def test_an_installation_token_echoed_by_an_api_error_is_redacted(c, caplog):  # noqa: F811
+def test_an_installation_token_echoed_by_an_api_error_is_redacted(c, caplog):
     def api(req):
         tok = req.get_header("Authorization").removeprefix("Bearer ")
         return 500, {"message": f"boom for {tok}"}
@@ -326,7 +338,7 @@ def test_an_installation_token_echoed_by_an_api_error_is_redacted(c, caplog):  #
     )
 
 
-def test_a_key_pasted_into_a_drain_error_never_escapes(c, gh, caplog):  # noqa: F811
+def test_a_key_pasted_into_a_drain_error_never_escapes(c, gh, caplog):
     def boom():
         raise archive.ArchiveError(f"weird: {PEM.replace(chr(10), '')}")
 
@@ -361,7 +373,7 @@ def test_the_catalog_commit_sets_no_author_so_the_app_bot_authors_it():
     assert sha == "abc" and not {"author", "committer"} & set(body)
 
 
-def test_the_pr_opens_only_after_the_whole_catalog_is_committed(c, gh):  # noqa: F811
+def test_the_pr_opens_only_after_the_whole_catalog_is_committed(c, gh):
     order = []
     put, create = gh.put_file, gh.create_pr
     gh.put_file = lambda *a, **k: (order.append("commit"), put(*a, **k))[1]
@@ -373,7 +385,7 @@ def test_the_pr_opens_only_after_the_whole_catalog_is_committed(c, gh):  # noqa:
     assert len(_catalog(gh, "media-catalog/protoagent-github-trending-launch-oct-13")["assets"]) == 3
 
 
-def test_a_pr_merged_while_its_commit_landed_is_reopened_fresh(c, gh):  # noqa: F811
+def test_a_pr_merged_while_its_commit_landed_is_reopened_fresh(c, gh):
     _approved(c, "a.mp4")
     archive.drain(APP_CFG, gh=gh, now=NOW)
     (pr1,) = gh.prs
@@ -393,7 +405,7 @@ def test_a_pr_merged_while_its_commit_landed_is_reopened_fresh(c, gh):  # noqa: 
     assert len(_catalog(gh, branch)["assets"]) == 2  # the fresh PR carries the whole catalog, b included
 
 
-def test_a_fresh_pr_merged_the_moment_it_opens_is_complete_and_the_next_approval_reopens(c, gh):  # noqa: F811
+def test_a_fresh_pr_merged_the_moment_it_opens_is_complete_and_the_next_approval_reopens(c, gh):
     # the review's "race on a NEW PR": protoquinn merges it as soon as it exists — nothing is lost,
     # because the whole catalog was committed BEFORE the PR opened and nothing follows in that pass
     branch = "media-catalog/protoagent-github-trending-launch-oct-13"
@@ -413,3 +425,34 @@ def test_a_fresh_pr_merged_the_moment_it_opens_is_complete_and_the_next_approval
     _approved(c, "a2.mp4")
     archive.drain(APP_CFG, gh=gh, now=NOW)
     assert len(gh.prs) == 2 and gh.prs[1]["state"] == "open" and len(_catalog(gh, branch)["assets"]) == 3
+
+
+def test_the_post_commit_check_runs_after_a_new_pr_too(c, gh):
+    # the PR this pass opened is re-read; merged at once, the re-check finds main complete and
+    # opens nothing more
+    reads = []
+    get = gh.pr
+    gh.pr = lambda n: (reads.append(n), get(n))[1]
+    create = gh.create_pr
+
+    def create_then_merge(*a, **k):
+        pr = create(*a, **k)
+        gh.merge(pr)
+        return pr
+
+    gh.create_pr = create_then_merge
+    _approved(c, "a.mp4")
+    out = archive.drain(APP_CFG, gh=gh, now=NOW)
+    assert reads == [1] and len(gh.prs) == 1 and not out["errors"]
+    assert out["prs"] == {"protoagent-github-trending-launch-oct-13": gh.prs[0]["html_url"]}
+
+
+def test_a_403_rate_limit_backs_off_and_retries(c, gh):
+    def limited(*a, **k):
+        raise archive.ArchiveError("POST /repos/x/releases/1/assets → HTTP 403 API rate limit exceeded")
+
+    gh.upload_asset = limited
+    _approved(c)
+    out = archive.drain(APP_CFG, gh=gh, now=NOW)
+    (q,) = store.archive_queue()
+    assert "HTTP 403" in out["errors"][0]["error"] and q["attempts"] == 1 and q["next_at"] > NOW.isoformat()

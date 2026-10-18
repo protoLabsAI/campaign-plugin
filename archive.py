@@ -183,10 +183,15 @@ def _key_problem(pem: str) -> str:
 
 
 def _int(v: Any) -> int:
+    """A whole, non-negative id from config (``3282126``, ``"3282126"``, ``3282126.0``); 0 when
+    unset; -1 (a reported problem) for anything else — a fraction is never truncated."""
+    if v in (None, ""):
+        return 0
     try:
-        return int(float(str(v).strip())) if v not in (None, "") else 0
+        f = float(str(v).strip())
     except (TypeError, ValueError):
         return -1
+    return int(f) if f.is_integer() and f >= 0 else -1
 
 
 # ── settings ──────────────────────────────────────────────────────────────────
@@ -705,16 +710,7 @@ def commit_catalog(gh: GitHub, c: dict[str, Any], slug: str, catalog_path: str, 
         n_new = len(doc["assets"]) - len((prev or {}).get("assets") or [])
         gh.put_file(catalog_path, branch, json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
                     f"media: catalog {slug} ({len(doc['assets'])} assets, +{n_new})", blob)  # fmt: skip
-        if pr is not None and pr.get("number"):
-            now_pr = gh.pr(pr["number"]) or {}
-            if now_pr.get("state") != "open" or now_pr.get("merged"):
-                if not _retry:
-                    raise ArchiveError(f"the catalog PR for {slug} closed while it was being updated — retrying")
-                return commit_catalog(gh, c, slug, catalog_path, base, now, _retry=False)
     if pr is None and changed:
-        # A NEW PR needs no post-check: it opens only now, on a branch that already holds the
-        # whole catalog, and nothing is pushed to it in this call — merged at once, it's complete.
-        # (The next pass's open_pr won't find it once merged and starts a fresh branch.)
         pr = gh.create_pr(
             branch,
             base,
@@ -728,7 +724,19 @@ def commit_catalog(gh: GitHub, c: dict[str, Any], slug: str, catalog_path: str, 
                 "after a merge, the next approval opens a fresh PR. Data only — no package changes."
             ),
         )
-    return {"pr": (pr or {}).get("html_url", ""), "changed": changed, "entries": len(doc["assets"])}
+    url = (pr or {}).get("html_url", "")
+    # After EVERY commit — onto an open PR or one just opened — make sure the PR is still open.
+    # If protoquinn merged (or someone closed) it meanwhile, the commit may have missed it: write
+    # the catalog once more against ``base``. That's idempotent — when ``base`` already holds
+    # every entry (the merge included our commit) nothing changes and no PR opens.
+    if changed and (pr or {}).get("number"):
+        now_pr = gh.pr(pr["number"]) or {}
+        if now_pr.get("state") != "open" or now_pr.get("merged"):
+            if not _retry:
+                raise ArchiveError(f"the catalog PR for {slug} closed while it was being updated — retrying")
+            again = commit_catalog(gh, c, slug, catalog_path, base, now, _retry=False)
+            return {**again, "pr": again["pr"] or url}
+    return {"pr": url, "changed": changed, "entries": len(doc["assets"])}
 
 
 # ── the queue ─────────────────────────────────────────────────────────────────
