@@ -37,11 +37,6 @@ product: the planning + production half of a "Brand & Launch" agent.
   playable, with status, size, dimensions, and the operator-only **Approve / Reject** buttons.
   Superseded takes are hidden (a **Show superseded** toggle brings them back, dimmed); an
   approved asset has a **Supersede…** button, the only way it can be retired.
-  An image has the chat's hover buttons: **Download**, **View fullscreen** and **Open in new
-  tab**. The last one opens a 15-minute signed link to that one file
-  (`/plugins/campaign/open/<id>?exp=…&sig=…`, public, minted only by the gated
-  `POST /api/plugins/campaign/assets/<id>/open-link`). In the desktop app it opens in the system
-  browser. A re-render or a deleted `<data_dir>/open-link.key` revokes outstanding links.
   Every card says **when the clip was made** ("12 min ago"; hover for the local date and time):
   the shot/render folder stamp (`YYYYMMDD-HHMMSS`, UTC), else the file's mtime — a render also
   names its source take's time. Sorted **newest first** by default (oldest first / asset # too),
@@ -91,8 +86,8 @@ loads nothing from the network at all.
 ## Quick start
 
 1. **Install** (pin a tag): Settings ▸ Plugins ▸ Install from URL →
-   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.6.3`. Or
-   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.6.3`.
+   `https://github.com/protoLabsAI/campaign-plugin`, ref `v0.6.4`. Or
+   `python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.6.4`.
 2. **Enable** it (`plugins.enabled: [campaign]`). It ships disabled.
 3. **Set up media** — the setup banner walks you through it:
    - **Desktop app only:** provision the **Python runtime** first (Settings ▸ Tools, ~35 MB) —
