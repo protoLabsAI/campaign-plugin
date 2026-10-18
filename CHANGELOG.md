@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.0
+
+- **The protoContent archive can act as a GitHub App (protoquinn) instead of a personal token.**
+  New settings `archive_app_id` (0 = off), `archive_app_installation_id` (0 = discovered from
+  `archive_repo`) and `archive_app_private_key_path`, and a new secret `archive_app_private_key`
+  (the app's PEM — a one-line paste from Settings is re-wrapped, so dropped newlines don't
+  matter). When an app id is set the app wins over `archive_token`. Each pass signs an RS256
+  JWT and mints an installation token **scoped to the archive repo only** (Contents + Pull
+  requests write), cached until 5 minutes before expiry and re-minted once on a 401. Commits and
+  the catalog PR are authored by `protoquinn[bot]`. The key, JWT and minted token are redacted
+  from every error, log line and status. `PyJWT[crypto]` (already shipped by protoAgent via
+  `mcp`) is declared as an optional host dep.
+- **`GET /archive` and `campaign_backup` show the active auth mode** — `app`, `token` or `none`.
+- **Catalog PRs are safe to auto-merge.** protoquinn may merge a catalog PR as soon as
+  protoContent's CI is green, so each PR opens only after its branch holds the whole catalog,
+  and if a PR merges while a later commit is landing, the pass reopens a fresh PR with the full
+  catalog instead of stranding the new entries on a merged branch.
+
 ## 0.5.1
 
 - **The gallery shows which approved assets are backed up.** An approved asset whose file is on its

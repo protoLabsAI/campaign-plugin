@@ -711,14 +711,15 @@ def build_tools(registry):
         operator makes is queued automatically; backfill=true also queues every approved asset
         that is already there (campaign_id 0 = all campaigns) — already-archived files are
         recognised by their sha256 and never upload twice. Files go up as GitHub release assets on
-        protoContent and each campaign's catalog is batched onto ONE open PR there, which the
-        operator merges. Runs in the background while the operator has archive_enabled on and an
-        archive_token set; this tool never uploads anything itself."""
+        protoContent and each campaign's catalog is batched onto ONE open PR there (merged by the
+        operator or protoContent's QA bot once CI is green). Runs in the background while the
+        operator has archive_enabled on and a credential set (the GitHub App, or an
+        archive_token); this tool never uploads anything itself."""
         from . import archive
 
         s = archive.settings(_live_cfg())
         queued = archive.backfill(campaign_id) if backfill else []
-        st = archive.status()
+        st = archive.status(_live_cfg())
         out = [f"Archived: {st['archived']} of {st['approved']} approved asset(s); {st['queued']} queued."]
         if backfill:
             out.append(f"Queued {len(queued)} approved asset(s) for the backup.")
@@ -728,7 +729,8 @@ def build_tools(registry):
         out.append(
             f"Not running: {'; '.join(why)} — the operator sets these in Settings ▸ Campaign Studio ▸ Library."
             if why
-            else f"Running: every minute → {s['repo']} (release media/<campaign>, catalog in {s['catalog_dir']}/)."
+            else f"Running: every minute → {s['repo']} (release media/<campaign>, catalog in {s['catalog_dir']}/), "
+            f"as {'the GitHub App' if s['auth'] == 'app' else 'the archive token'}."
         )
         return "\n".join(out)
 

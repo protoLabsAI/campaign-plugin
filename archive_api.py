@@ -1,7 +1,7 @@
 """The protoContent archive's operator routes — a router of its own, mounted beside the data
 router under ``/api/plugins/campaign`` (behind the host's default-deny operator auth).
 
-* ``GET  /archive`` — archived / queued / retrying.
+* ``GET  /archive`` — archived / queued / retrying, and the active auth (app / token / none).
 * ``POST /archive/backfill`` — queue every approved, non-superseded asset (``campaign_id`` 0 = all).
 * ``POST /archive/drain`` — run one pass now. SYNC route: FastAPI runs it on its threadpool, so
   uploads never block the event loop.
@@ -38,7 +38,7 @@ def build_archive_router():
 
     @router.get("/archive")
     def _status() -> JSONResponse:
-        return _guarded("status", archive.status)
+        return _guarded("status", lambda: archive.status(surface.config()))
 
     @router.post("/archive/backfill")
     def _backfill(body: Backfill) -> JSONResponse:
