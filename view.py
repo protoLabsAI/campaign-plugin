@@ -43,6 +43,11 @@ PAGE = r"""<!doctype html>
   .prev{aspect-ratio:16/10;background:var(--pl-color-bg,#111);display:flex;align-items:center;justify-content:center;
     color:var(--pl-color-fg-muted,#999);font-size:11px}
   .prev img,.prev video{width:100%;height:100%;object-fit:contain;display:block}
+  /* the chat's image chrome (DS MarkdownImage: .pl-markdown image-wrapper + .pl-md-img-actions),
+     fitted to the card's preview box; the kit CSS supplies the action cluster + Lightbox */
+  .prev.pl-markdown [data-streamdown="image-wrapper"]{display:block;width:100%;height:100%;margin:0}
+  .prev.pl-markdown [data-streamdown="image"]{width:100%;height:100%;object-fit:contain;border:0;border-radius:0;cursor:zoom-in}
+  .prev .pl-md-img-actions svg{width:14px;height:14px;display:block}
   .body{padding:8px 10px;display:flex;flex-direction:column;gap:6px}
   .title{font-weight:600;line-height:1.3;word-break:break-word}
   .meta{display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:11px;color:var(--pl-color-fg-muted,#999);
@@ -165,7 +170,7 @@ PAGE = r"""<!doctype html>
     document.getElementById("arch-n").textContent = archived_hidden ? `(${archived_hidden})` : "";
     const sel = document.getElementById("campaign");
     sel.innerHTML = campaigns.map(c =>
-      `<option value="${c.id}">${c.archived ? "[archived] " : ""}${esc(c.name)} — ${c.approved}/${c.assets} approved${c.review ? ` · ${c.review} to review` : ""}</option>`).join("");
+      `<option value="${esc(c.id)}">${c.archived ? "[archived] " : ""}${esc(c.name)} — ${c.approved}/${c.assets} approved${c.review ? ` · ${c.review} to review` : ""}</option>`).join("");
     if (!campaigns.length) {
       state.data = null; document.getElementById("grid").innerHTML = ""; document.getElementById("chips").innerHTML = "";
       document.getElementById("empty").hidden = false;
@@ -185,7 +190,7 @@ PAGE = r"""<!doctype html>
     state.data = data;
     const lane = document.getElementById("lane");
     lane.innerHTML = `<option value="">All lanes</option>` +
-      state.data.lanes.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join("");
+      state.data.lanes.map(l => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join("");
     lane.value = state.lane;
     render();
   }
@@ -267,6 +272,61 @@ PAGE = r"""<!doctype html>
     return el;
   }
 
+  // ── The chat's image viewer, reused (DS MarkdownImage + Lightbox via the kit CSS) ──────────────
+  // Same markup, classes and icons as an image in chat: a hover action cluster (Download · View
+  // fullscreen) and the DS Lightbox. No "Open in new tab": the file is a private blob: URL that
+  // can't leave this view (and the desktop shell only hands http(s) links to the browser).
+  const ICON_DOWNLOAD = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v8M4.75 7.25 8 10.5l3.25-3.25M2.75 13.5h10.5"/></svg>';
+  const ICON_FULLSCREEN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2.75H2.75V6M10 2.75h3.25V6M6 13.25H2.75V10M10 13.25h3.25V10"/></svg>';
+  function imageMarkup(url, title){
+    return `<div data-streamdown="image-wrapper">` +
+      `<img data-streamdown="image" src="${url}" alt="${esc(title)}">` +
+      `<div class="pl-md-img-actions">` +
+        `<button type="button" data-img="download" title="Download image" aria-label="Download image">${ICON_DOWNLOAD}</button>` +
+        `<button type="button" data-img="fullscreen" title="View fullscreen" aria-label="View fullscreen">${ICON_FULLSCREEN}</button>` +
+      `</div></div>`;
+  }
+  function wireImage(box, url, a){
+    box.classList.add("pl-markdown");
+    box.querySelector('[data-streamdown="image"]').addEventListener("click", () => openLightbox(url, a.title));
+    box.querySelector('[data-img="fullscreen"]').addEventListener("click", () => openLightbox(url, a.title));
+    box.querySelector('[data-img="download"]').addEventListener("click", () => {
+      const name = String(a.path || "").split("/").pop() || `asset-${a.id}`;
+      const link = document.createElement("a");
+      link.href = url; link.download = name;
+      document.body.appendChild(link); link.click(); link.remove();
+    });
+  }
+  // The DS Lightbox (overlays.tsx), as plain DOM: same classes, Escape / backdrop / × to close,
+  // focus moved in and restored, body scroll locked while open.
+  function openLightbox(url, title){
+    const back = document.activeElement;
+    const scrim = document.createElement("div");
+    scrim.className = "pl-overlay pl-overlay--lightbox";
+    scrim.innerHTML =
+      `<div class="pl-lightbox" role="dialog" aria-modal="true" aria-label="${esc(title || "Image")}" tabindex="-1">` +
+        `<img class="pl-lightbox__img" src="${url}" alt="${esc(title)}">` +
+        `<button type="button" class="pl-iconbtn pl-lightbox__close" aria-label="Close">×</button>` +
+      `</div>`;
+    const prevOverflow = document.body.style.overflow;
+    const close = () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+      scrim.remove();
+      if (back && back.focus) back.focus();
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); close(); }
+      else if (e.key === "Tab") { e.preventDefault(); scrim.querySelector(".pl-lightbox__close").focus(); }  // one focusable: trap
+    };
+    scrim.addEventListener("mousedown", (e) => { if (e.target === scrim) close(); });
+    scrim.querySelector(".pl-lightbox__close").addEventListener("click", close);
+    document.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden";
+    document.body.appendChild(scrim);
+    scrim.querySelector(".pl-lightbox__close").focus();
+  }
+
   async function preview(el){
     const a = (state.data?.assets || []).find(x => String(x.id) === el.dataset.id);
     const box = el.querySelector(".prev");
@@ -279,7 +339,8 @@ PAGE = r"""<!doctype html>
       box.innerHTML = isVideo
         // #t=0.5 — a raw take's first frame is the blank page before navigation.
         ? `<video src="${url}#t=0.5" controls muted loop playsinline preload="metadata"></video>`
-        : `<img src="${url}" alt="${esc(a.title)}">`;
+        : imageMarkup(url, a.title);
+      if (!isVideo) wireImage(box, url, a);
     } catch (e) { box.textContent = "preview failed: " + e.message; }
   }
   const observer = new IntersectionObserver((entries) => {
@@ -289,6 +350,7 @@ PAGE = r"""<!doctype html>
   async function onAction(ev, a, el){
     const btn = ev.target.closest("button"); if (!btn) return;
     const act = btn.dataset.act;
+    if (!act) return;  // e.g. the image action cluster's own buttons
     if (act === "copy") {
       if (!navigator.clipboard) { btn.textContent = a.path; return; }  // no clipboard off a secure origin: show it
       navigator.clipboard.writeText(a.path).then(() => { btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy path", 1200); },

@@ -480,3 +480,20 @@ def test_videos_route_maps_a_job_and_skips_malformed_records(client):
         "final": "/api/plugins/campaign/file/9"
     }, "a non-integer asset id never becomes a /file URL"
     assert client.get("/api/plugins/campaign/videos/../../etc").status_code == 404
+
+
+def test_the_gallery_reuses_the_chat_image_viewer(client):
+    # an image in the gallery gets the same chrome as an image in chat: the DS MarkdownImage action
+    # cluster (Download · View fullscreen) and the DS Lightbox, by the kit's own class names
+    page = client.get("/plugins/campaign/view").text
+    for needle in (
+        'class="pl-md-img-actions"',
+        'data-streamdown="image-wrapper"',
+        "pl-overlay pl-overlay--lightbox",
+        "pl-lightbox__img",
+        "pl-iconbtn pl-lightbox__close",
+        'aria-label="Download image"',
+        'aria-label="View fullscreen"',
+    ):
+        assert needle in page, needle
+    assert 'aria-label="Open in new tab"' not in page  # a private blob: URL can't leave the view
