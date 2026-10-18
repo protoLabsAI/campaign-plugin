@@ -170,7 +170,7 @@ PAGE = r"""<!doctype html>
     document.getElementById("arch-n").textContent = archived_hidden ? `(${archived_hidden})` : "";
     const sel = document.getElementById("campaign");
     sel.innerHTML = campaigns.map(c =>
-      `<option value="${c.id}">${c.archived ? "[archived] " : ""}${esc(c.name)} — ${c.approved}/${c.assets} approved${c.review ? ` · ${c.review} to review` : ""}</option>`).join("");
+      `<option value="${esc(c.id)}">${c.archived ? "[archived] " : ""}${esc(c.name)} — ${c.approved}/${c.assets} approved${c.review ? ` · ${c.review} to review` : ""}</option>`).join("");
     if (!campaigns.length) {
       state.data = null; document.getElementById("grid").innerHTML = ""; document.getElementById("chips").innerHTML = "";
       document.getElementById("empty").hidden = false;
@@ -190,7 +190,7 @@ PAGE = r"""<!doctype html>
     state.data = data;
     const lane = document.getElementById("lane");
     lane.innerHTML = `<option value="">All lanes</option>` +
-      state.data.lanes.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join("");
+      state.data.lanes.map(l => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join("");
     lane.value = state.lane;
     render();
   }
