@@ -391,3 +391,25 @@ def test_a_pr_merged_while_its_commit_landed_is_reopened_fresh(c, gh):  # noqa: 
     archive.drain(APP_CFG, gh=gh, now=NOW)
     assert len(gh.prs) == 2 and gh.prs[1]["state"] == "open"
     assert len(_catalog(gh, branch)["assets"]) == 2  # the fresh PR carries the whole catalog, b included
+
+
+def test_a_fresh_pr_merged_the_moment_it_opens_is_complete_and_the_next_approval_reopens(c, gh):  # noqa: F811
+    # the review's "race on a NEW PR": protoquinn merges it as soon as it exists — nothing is lost,
+    # because the whole catalog was committed BEFORE the PR opened and nothing follows in that pass
+    branch = "media-catalog/protoagent-github-trending-launch-oct-13"
+    create = gh.create_pr
+
+    def create_then_merge(*a, **k):
+        pr = create(*a, **k)
+        gh.merge(pr)  # merged straight away
+        return pr
+
+    gh.create_pr = create_then_merge
+    for n in range(2):
+        _approved(c, f"a{n}.mp4")
+    archive.drain(APP_CFG, gh=gh, now=NOW)
+    assert len(_catalog(gh, "main")["assets"]) == 2 and gh.prs[0]["state"] == "merged"
+    gh.create_pr = create
+    _approved(c, "a2.mp4")
+    archive.drain(APP_CFG, gh=gh, now=NOW)
+    assert len(gh.prs) == 2 and gh.prs[1]["state"] == "open" and len(_catalog(gh, branch)["assets"]) == 3

@@ -124,7 +124,10 @@ def test_declared_capabilities_match_reality():
     files = [p for p in [*ROOT.glob("*.py"), *ROOT.glob("worker/*.py")] if p.name != "archive.py"]
     sources = "\n".join(p.read_text(encoding="utf-8") for p in files)
     for client in ("httpx", "requests", "urllib.request", "urllib3", "aiohttp", "http.client", "socket"):
+        head, _, leaf = client.rpartition(".")
         pattern = rf"^\s*(import|from)\s+{re.escape(client)}\b"
+        if head:  # the split form too: `from urllib import request`
+            pattern += rf"|^\s*from\s+{re.escape(head)}\s+import\s+([^#\n]*,\s*)?\(?\s*{re.escape(leaf)}\b"
         assert not re.search(pattern, sources, re.M), f"only archive.py makes outbound calls ({client})"
     arch = (ROOT / "archive.py").read_text(encoding="utf-8")
     assert 'API = "https://api.github.com"' in arch and 'UPLOADS = "https://uploads.github.com"' in arch

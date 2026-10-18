@@ -334,6 +334,9 @@ class AppAuth:
         return self.installation_id
 
     def token(self) -> str:
+        # The lock is held across discovery + the mint ON PURPOSE: a second caller waits for the
+        # token being minted (bounded by the 30 s timeouts) instead of minting another one. The
+        # archive drains one pass at a time, so in practice there is no second caller.
         with self._lock:
             if self._token and self._clock() < self._until:
                 return self._token
@@ -709,6 +712,9 @@ def commit_catalog(gh: GitHub, c: dict[str, Any], slug: str, catalog_path: str, 
                     raise ArchiveError(f"the catalog PR for {slug} closed while it was being updated — retrying")
                 return commit_catalog(gh, c, slug, catalog_path, base, now, _retry=False)
     if pr is None and changed:
+        # A NEW PR needs no post-check: it opens only now, on a branch that already holds the
+        # whole catalog, and nothing is pushed to it in this call — merged at once, it's complete.
+        # (The next pass's open_pr won't find it once merged and starts a fresh branch.)
         pr = gh.create_pr(
             branch,
             base,
