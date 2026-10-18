@@ -295,7 +295,9 @@ mode).
 ## Archive to protoContent
 
 Approved media is backed up to [protoContent](https://github.com/protoLabsAI/protoContent)
-(private), the protoLabs marketing hub — opt in with `archive_enabled` and an `archive_token`.
+(private), the protoLabs marketing hub — opt in with `archive_enabled` and a credential: the
+**protoquinn GitHub App** (`archive_app_id` + `archive_app_private_key`, preferred) or an
+`archive_token`.
 
 * **Files** → GitHub **release assets**, one release per campaign: tag `media/<slug>`, made on
   first use, never marked *latest* (it can't displace a package release; nothing in
@@ -307,7 +309,13 @@ Approved media is backed up to [protoContent](https://github.com/protoLabsAI/pro
   asset URL, the source campaign. Append/update only. protoContent's `main` takes changes only
   through PRs, so the catalog is **batched onto one open PR per campaign** (branch
   `media-catalog/<slug>`): later approvals add commits to that PR; a new one opens only after it
-  merged (a PR closed unmerged is regenerated in full). The plugin never merges anything.
+  merged (a PR closed unmerged is regenerated in full). The plugin never merges anything —
+  but with app auth the PR is protoquinn's, and **protoquinn (protoContent's QA bot) may merge
+  it as soon as its CI is green**. So every catalog PR is complete the moment it opens: each
+  commit is the *whole* catalog (regenerated from the local DB), one commit per campaign per
+  pass, and the PR is opened only after its branch holds that commit. Approvals arriving while
+  the PR is open add further whole-catalog commits; if the PR merged while a commit was landing,
+  the pass notices (the PR is no longer open) and writes the catalog onto a fresh PR from `main`.
 * **Flow:** every minute (while enabled) the library surface reconciles — queuing each approved
   asset with no archive record, or none for its current campaign's catalog — then drains → upload (skipped when `meta.archive.sha256` already matches: same sha256 =
   already archived) → `meta.archive = {url, sha256, at, …}` → one catalog commit per campaign
@@ -318,14 +326,50 @@ Approved media is backed up to [protoContent](https://github.com/protoLabsAI/pro
   queues every approved, non-superseded asset. `GET /archive` is the status;
   `POST /archive/drain` runs a pass now; `campaign_backup` shows the same status to the agent.
 
-**The token** (`archive_token`, a secret in `secrets.yaml`, never logged or echoed): a
-**fine-grained personal access token**, resource owner `protoLabsAI`, repository access
-**only `protoContent`**, with repository permissions **Contents: Read and write** (releases,
-release assets, the catalog branch and commit) and **Pull requests: Read and write** (open the
-catalog PR). *Metadata: Read* is added automatically. Nothing else — no Actions, Workflows,
-Administration or org permissions. (A classic token would need the whole `repo` scope; prefer
-the fine-grained one.) `archive_enabled`, `archive_repo` and `archive_catalog_dir` are
-operator-only settings — they decide whether and where your media goes.
+**Credentials — the GitHub App wins when it's configured.** `GET /archive` and
+`campaign_backup` show which one is active (`auth`: `app` / `token` / `none`), never the secret.
+
+* **GitHub App** (preferred) — protoquinn, app id `3282126`, installed org-wide on `protoLabsAI`
+  (installation `121562683`, Contents + Pull requests write). Settings ▸ Campaign Studio ▸ Library:
+  * `archive_app_id` = `3282126` (0 = off).
+  * `archive_app_installation_id` = `121562683` — optional; 0 finds it with
+    `GET /repos/{archive_repo}/installation`.
+  * `archive_app_private_key` (secret) — the app's `.pem`. Paste the whole file, `-----BEGIN RSA
+    PRIVATE KEY-----` through `-----END RSA PRIVATE KEY-----`, into the field: it's a one-line
+    input, so the newlines are dropped, and the plugin re-wraps the key (spaces or literal `\n`
+    in place of newlines also work). In `secrets.yaml` (0600, under the plugin's section) use a
+    block scalar:
+
+    ```yaml
+    campaign:
+      archive_app_private_key: |
+        -----BEGIN RSA PRIVATE KEY-----
+        MIIEow…
+        -----END RSA PRIVATE KEY-----
+    ```
+  * …or `archive_app_private_key_path` — an absolute path to the `.pem` (chmod 600), used only
+    when the secret is blank.
+
+  Each pass signs a 9-minute RS256 JWT as the app and mints an installation access token
+  **scoped to `archive_repo` only** (`repositories: ["protoContent"]`, `contents: write`,
+  `pull_requests: write`) — the org-wide install never reaches another repo through this
+  plugin. The token is cached until 5 minutes before it expires and re-minted once on a 401.
+  Commits and the catalog PR are authored by `protoquinn[bot]` (the plugin sets no author).
+  Needs `PyJWT[crypto]` in the agent's process — protoAgent already ships it (its `mcp`
+  dependency requires `pyjwt[crypto]`); it's declared as an optional host dep.
+* **Token** — `archive_token` (a secret in `secrets.yaml`), used only when no app id is set: a
+  **fine-grained personal access token**, resource owner `protoLabsAI`, repository access
+  **only `protoContent`**, with repository permissions **Contents: Read and write** (releases,
+  release assets, the catalog branch and commit) and **Pull requests: Read and write** (open the
+  catalog PR). *Metadata: Read* is added automatically. Nothing else — no Actions, Workflows,
+  Administration or org permissions. (A classic token would need the whole `repo` scope; prefer
+  the fine-grained one.)
+
+The key, the JWT, a minted token and the PAT go only into an `Authorization` header to
+`api.github.com` / `uploads.github.com` — never into a log line, an error, a URL or the status.
+`archive_enabled`, `archive_repo`, `archive_catalog_dir`, `archive_app_id`,
+`archive_app_installation_id` and `archive_app_private_key_path` are operator-only settings —
+they decide whether, where and as whom your media goes.
 
 ## Collections — keep the good ones together, start fresh
 
@@ -659,8 +703,10 @@ names a shot script may use as its bearer), `upload_dirs` (folders an `upload` s
 files from; blank refuses uploads; operator-only), `outro` (the brand outro — see **The brand
 outro**; operator-only), `intro` (the brand intro — see **The brand intro**; operator-only),
 `producer_model`, `retention_mode` (`report` | `prune` | `disabled` — see **Retention**;
-operator-only), `archive_enabled` / `archive_repo` / `archive_catalog_dir` / `archive_token`
-(see **Archive to protoContent**; operator-only, the token a secret).
+operator-only), `archive_enabled` / `archive_repo` / `archive_catalog_dir` /
+`archive_app_id` / `archive_app_installation_id` / `archive_app_private_key` /
+`archive_app_private_key_path` / `archive_token` (see **Archive to protoContent**; operator-only,
+the key and the token secrets).
 
 ## Development
 

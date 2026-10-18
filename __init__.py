@@ -7,8 +7,9 @@ cards. Copy belongs to Social Studio (``social``) and browser exploration to the
 ``agent_browser`` plugin — both referenced by tool NAME only, never imported (ADR 0039).
 
 Draft-only: nothing here posts to a social platform or holds a platform credential, and only
-the operator approves an asset. Its one optional credential is the operator's GitHub token
-(``archive_token``) for backing approved media up to protoContent (``archive.py``).
+the operator approves an asset. Its one optional credential is a GitHub one for backing approved
+media up to protoContent (``archive.py``): the operator's GitHub App key
+(``archive_app_private_key``, the default) or a token (``archive_token``).
 
 ``register(registry)`` is the only place plugin code runs (ADR 0018). Host-only imports stay
 inside functions so the suite runs with no protoAgent, and each contribution group is
@@ -21,7 +22,7 @@ import logging
 
 log = logging.getLogger("protoagent.plugins.campaign")
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 
 def _host_store(registry) -> str:

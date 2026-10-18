@@ -39,6 +39,7 @@ class FakeGitHub:
         self.fail_upload = 0
         self.commits: list[tuple[str, str]] = []
         self._n = 100
+        self.on_put = None  # a hook: what happens right after a commit lands (a racing merge)
 
     def _id(self):
         self._n += 1
@@ -98,15 +99,21 @@ class FakeGitHub:
     def put_file(self, path, branch, text, message, sha=""):
         self.commits.append((branch, message))
         self.branches[branch][path] = text
+        if self.on_put:
+            self.on_put(branch)
+        return f"commit-{len(self.commits)}"
 
     def open_pr(self, branch):
         return next((p for p in self.prs if p["head"] == branch and p["state"] == "open"), None)
 
     def create_pr(self, branch, base, title, body):
-        pr = {"head": branch, "base": base, "title": title, "body": body, "state": "open",
-              "html_url": f"https://github.com/{self.repo}/pull/{len(self.prs) + 1}"}  # fmt: skip
+        pr = {"number": len(self.prs) + 1, "head": branch, "base": base, "title": title, "body": body,
+              "state": "open", "html_url": f"https://github.com/{self.repo}/pull/{len(self.prs) + 1}"}  # fmt: skip
         self.prs.append(pr)
         return pr
+
+    def pr(self, number):
+        return next((dict(p) for p in self.prs if p["number"] == number), None)
 
     # what Josh does
     def merge(self, pr):
@@ -516,7 +523,7 @@ def test_the_archive_routes(client, c):
     store.update_asset(a["id"], status="ready_for_review")
     client.post(f"/api/plugins/campaign/assets/{a['id']}/review", json={"decision": "approve"})
     st = client.get("/api/plugins/campaign/archive").json()
-    assert st == {"queued": 0, "waiting_retry": [], "archived": 0, "approved": 1}
+    assert st == {"queued": 0, "waiting_retry": [], "archived": 0, "approved": 1, "auth": "none"}
     assert client.post("/api/plugins/campaign/archive/backfill", json={}).json() == {"queued": [a["id"]]}
     assert "archive_enabled is off" in client.post("/api/plugins/campaign/archive/drain").json()["skipped"]
 

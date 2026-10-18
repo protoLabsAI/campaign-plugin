@@ -24,11 +24,22 @@ already on the release with the right size is adopted instead of re-uploaded) �
 ``meta.archive = {url, sha256, at, …}`` → commit the campaign's catalog once for the batch.
 A failure backs off (1 min → 6 h) and retries; nothing is lost.
 
-**The token** (``archive_token``, a secret) goes only into an ``Authorization`` header to
-``api.github.com`` / ``uploads.github.com``, never into a log line, an error, a URL or a
-return value (:func:`_redact` strips it from anything that might echo it). It needs, on
-protoContent only: **Contents: read & write** (releases, assets, the catalog branch + commit)
-and **Pull requests: read & write** (open the catalog PR). Metadata: read comes with it.
+**Credentials — two modes; the GitHub App wins when it's configured.**
+
+* **app** (``archive_app_id`` > 0 + ``archive_app_private_key`` / ``archive_app_private_key_path``):
+  the plugin signs a 9-minute RS256 JWT as the app, finds the installation on ``archive_repo``
+  (``GET /repos/{repo}/installation``) unless ``archive_app_installation_id`` pins it, and
+  mints an installation access token DOWNSCOPED to ``archive_repo`` alone with Contents: write
+  + Pull requests: write — so even an org-wide installation only ever acts on protoContent.
+  The token is cached until 5 minutes before it expires; a 401 re-mints once. Commits and the
+  catalog PR are authored by the app (``protoquinn[bot]``) — no author is ever set here.
+* **token** (``archive_token``): a fine-grained PAT on protoContent only — **Contents: read &
+  write** and **Pull requests: read & write** (Metadata: read comes with it).
+
+Every credential — the token, the JWT, the private key, a minted installation token — goes
+only into an ``Authorization`` header to ``api.github.com`` / ``uploads.github.com``, never into
+a log line, an error, a URL or a return value (:func:`_redact` strips them from anything that
+might echo one).
 """
 
 from __future__ import annotations
@@ -39,6 +50,7 @@ import logging
 import mimetypes
 import re
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -68,11 +80,113 @@ class ArchiveError(RuntimeError):
     pass
 
 
-def _redact(text: str, token: str) -> str:
+_SECRET_PATTERNS = (
+    re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"),  # PATs, app/installation tokens
+    re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),  # a JWT
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(-----END [A-Z0-9 ]*PRIVATE KEY-----|$)", re.S),
+)
+
+
+def _redact(text: str, *secrets: str) -> str:
+    """``text`` with every given secret, and anything shaped like a GitHub token, a JWT or a
+    PEM private key, replaced by ``***``."""
     text = str(text)
-    if token:
-        text = text.replace(token, "***")
-    return re.sub(r"(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})", "***", text)
+    for sec in secrets:
+        if sec:
+            text = text.replace(sec, "***")
+            body = _pem_body(sec)  # a key echoed without its armour (or re-wrapped) still goes
+            if body:
+                for line in {*body.splitlines(), body.replace("\n", "")}:
+                    if len(line) >= 16:
+                        text = text.replace(line, "***")
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub("***", text)
+    return text
+
+
+# ── the GitHub App private key ────────────────────────────────────────────────
+_PEM_RE = re.compile(r"-----BEGIN ([A-Z0-9 ]+)-----(.*?)-----END \1-----", re.S)
+KEY_FILE_MAX = 64 * 1024
+
+
+def _pem_body(text: str) -> str:
+    m = _PEM_RE.search(str(text or ""))
+    return m.group(2).strip() if m else ""
+
+
+def normalize_pem(raw: Any) -> str:
+    """The PEM as GitHub issued it, whatever the paste did to it. A Settings secret field is a
+    single-line input — a browser drops the newlines from a pasted key, and some editors turn
+    them into spaces or literal ``\\n`` — so the base64 body is re-wrapped at 64 columns
+    between its BEGIN/END lines. Text that isn't PEM-armoured comes back stripped, unchanged."""
+    t = str(raw or "").strip().replace("\\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+    m = _PEM_RE.search(t)
+    if not m:
+        return t
+    label, body = m.group(1).strip(), m.group(2)
+    if ":" in body:  # an encrypted PEM (Proc-Type/DEK-Info headers) — keep it as-is; it's refused
+        return m.group(0)
+    b64 = re.sub(r"\s+", "", body)
+    lines = [b64[i : i + 64] for i in range(0, len(b64), 64)]
+    return "\n".join([f"-----BEGIN {label}-----", *lines, f"-----END {label}-----"]) + "\n"
+
+
+def _read_key_file(path: str) -> tuple[str, str]:
+    """``(pem, error)`` — the key file at ``path`` (``~`` expanded), at most 64 KB."""
+    try:
+        f = Path(path).expanduser()
+        if not f.is_file():
+            return "", "archive_app_private_key_path isn't a file"
+        if f.stat().st_size > KEY_FILE_MAX:
+            return "", "archive_app_private_key_path is too big to be a private key"
+        return normalize_pem(f.read_text(encoding="utf-8")), ""
+    except (OSError, UnicodeDecodeError) as e:
+        return "", f"archive_app_private_key_path can't be read ({type(e).__name__})"
+
+
+def _jwt_lib():
+    """PyJWT (with ``cryptography`` for RS256) — the host ships both (protoAgent's ``mcp``
+    dependency requires ``pyjwt[crypto]``). None when either is missing."""
+    try:
+        import jwt
+        from jwt.algorithms import has_crypto
+    except ImportError:
+        return None
+    return jwt if has_crypto else None
+
+
+_KEY_OK: dict[str, str] = {}  # sha256(pem) → "" (loads) or the reason it doesn't
+
+
+def _key_problem(pem: str) -> str:
+    h = hashlib.sha256(pem.encode()).hexdigest()
+    if h not in _KEY_OK:
+        why = ""
+        if "-----BEGIN" not in pem or "PRIVATE KEY-----" not in pem:
+            why = "isn't a PEM private key (-----BEGIN RSA PRIVATE KEY----- …) — re-paste it"
+        elif "ENCRYPTED" in pem or "Proc-Type:" in pem:
+            why = "is passphrase-protected — use the unencrypted .pem GitHub downloads"
+        else:
+            try:
+                from cryptography.hazmat.primitives.asymmetric import rsa
+                from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+                k = load_pem_private_key(pem.encode(), password=None)
+                if not isinstance(k, rsa.RSAPrivateKey):
+                    why = "isn't an RSA key (GitHub App keys are RSA)"
+            except ImportError:
+                why = ""  # reported once, as the missing library
+            except Exception:  # noqa: BLE001 — never echo what the parser says about the key
+                why = "doesn't parse as a private key — re-paste the whole .pem, BEGIN to END"
+        _KEY_OK[h] = why
+    return _KEY_OK[h]
+
+
+def _int(v: Any) -> int:
+    try:
+        return int(float(str(v).strip())) if v not in (None, "") else 0
+    except (TypeError, ValueError):
+        return -1
 
 
 # ── settings ──────────────────────────────────────────────────────────────────
@@ -81,11 +195,24 @@ def settings(cfg: dict[str, Any] | None) -> dict[str, Any]:
     repo = str(cfg.get("archive_repo") or DEFAULT_REPO).strip()
     cat = str(cfg.get("archive_catalog_dir") or DEFAULT_CATALOG_DIR).strip().strip("/")
     enabled = cfg.get("archive_enabled")
+    token = str(cfg.get("archive_token") or "").strip()
+    app_id = _int(cfg.get("archive_app_id"))
+    key, key_error = normalize_pem(cfg.get("archive_app_private_key")), ""
+    key_path = str(cfg.get("archive_app_private_key_path") or "").strip()
+    if not key and key_path and app_id:
+        key, key_error = _read_key_file(key_path)
     return {
         "enabled": enabled is True or str(enabled).strip().lower() in ("true", "1", "yes", "on"),
         "repo": repo,
         "catalog_dir": cat,
-        "token": str(cfg.get("archive_token") or "").strip(),
+        "token": token,
+        # the GitHub App wins whenever an app id is set (a missing key is then a problem, never
+        # a silent fall back to the PAT)
+        "auth": "app" if app_id else ("token" if token else "none"),
+        "app_id": app_id,
+        "installation_id": _int(cfg.get("archive_app_installation_id")),
+        "app_key": key,
+        "app_key_error": key_error,
     }
 
 
@@ -93,8 +220,21 @@ def problems(s: dict[str, Any]) -> list[str]:
     out = []
     if not s["enabled"]:
         out.append("archive_enabled is off")
-    if not s["token"]:
-        out.append("no archive_token is set")
+    if s["auth"] == "app":
+        if s["app_id"] < 0:
+            out.append("archive_app_id isn't a number")
+        if s["installation_id"] < 0:
+            out.append("archive_app_installation_id isn't a number (0 = find it)")
+        if s["app_key_error"]:
+            out.append(s["app_key_error"])
+        elif not s["app_key"]:
+            out.append("archive_app_id is set but no archive_app_private_key (or archive_app_private_key_path)")
+        elif _jwt_lib() is None:
+            out.append("the GitHub App needs PyJWT with cryptography (pip install 'PyJWT[crypto]')")
+        elif why := _key_problem(s["app_key"]):
+            out.append(f"archive_app_private_key {why}")
+    elif not s["token"]:
+        out.append("no archive_token is set (or set archive_app_id + archive_app_private_key for the GitHub App)")
     elif not TOKEN_RE.fullmatch(s["token"]):
         out.append("archive_token isn't a GitHub token (letters, digits and _ only) — re-paste it")
     if not REPO_RE.fullmatch(s["repo"]):
@@ -104,41 +244,184 @@ def problems(s: dict[str, Any]) -> list[str]:
     return out
 
 
-# ── the GitHub client (stdlib only; the opener is injectable for tests) ───────
-class GitHub:
-    def __init__(self, token: str, repo: str, opener: Callable[..., Any] | None = None, timeout: float = 120):
-        if not token:
-            raise ArchiveError("no token")
-        self._token = token
-        self.repo = repo
+def _secrets(s: dict[str, Any]) -> tuple[str, ...]:
+    return (s.get("token") or "", s.get("app_key") or "")
+
+
+# ── GitHub App auth: JWT → (installation) → a downscoped installation token ───
+_HEADERS = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "protoagent-campaign-archive"}  # fmt: skip
+JWT_BACKDATE_S = 60  # GitHub's clock-drift allowance
+JWT_TTL_S = 9 * 60  # under GitHub's 10-minute cap
+TOKEN_EARLY_S = 5 * 60  # refresh this long before the installation token expires
+
+
+class AppAuth:
+    """Installation tokens for one GitHub App on one repo — minted lazily, cached until 5
+    minutes before ``expires_at``, scoped to ``repo`` only (Contents + Pull requests: write).
+    Thread-safe; the opener and clock are injectable for tests."""
+
+    PERMISSIONS = {"contents": "write", "pull_requests": "write"}
+
+    def __init__(self, app_id: int, key: str, repo: str, installation_id: int = 0,
+                 opener: Callable[..., Any] | None = None, timeout: float = 30,
+                 clock: Callable[[], float] = time.time):  # fmt: skip
+        if not app_id or not key:
+            raise ArchiveError("the GitHub App needs an app id and a private key")
+        self.app_id, self.repo = int(app_id), repo
+        self._key = key
+        self.installation_id = int(installation_id or 0)
         self._open = opener or urllib.request.urlopen
         self._timeout = timeout
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._token = ""
+        self._jwt = ""
+        self._until = 0.0
 
-    def _req(self, method: str, url: str, body: Any = None, *, data: Any = None, headers: dict | None = None,
-             ok: tuple[int, ...] = (200, 201), none_on: tuple[int, ...] = ()) -> Any:  # fmt: skip
-        if not url.startswith((API + "/", UPLOADS + "/")):
-            raise ArchiveError("refusing a request to a host other than GitHub's API")
-        h = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "protoagent-campaign-archive",
-            "Authorization": f"Bearer {self._token}",
-            **(headers or {}),
-        }
+    def secrets(self) -> tuple[str, ...]:
+        return (self._token, self._jwt, self._key)
+
+    def jwt(self) -> str:
+        lib = _jwt_lib()
+        if lib is None:
+            raise ArchiveError("the GitHub App needs PyJWT with cryptography (pip install 'PyJWT[crypto]')")
+        now = int(self._clock())
+        claims = {"iat": now - JWT_BACKDATE_S, "exp": now + JWT_TTL_S, "iss": str(self.app_id)}
+        try:
+            self._jwt = lib.encode(claims, self._key, algorithm="RS256")
+        except Exception as e:  # noqa: BLE001 — never echo what the signer says about the key
+            raise ArchiveError(
+                f"signing the GitHub App JWT failed ({type(e).__name__}) — check the private key"
+            ) from None
+        return self._jwt
+
+    def _call(self, method: str, path: str, body: Any = None) -> tuple[int, Any]:
+        h = {**_HEADERS, "Authorization": f"Bearer {self.jwt()}"}
+        data = None
         if body is not None:
             data = json.dumps(body).encode()
             h["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=data, method=method, headers=h)
+        req = urllib.request.Request(f"{API}{path}", data=data, method=method, headers=h)
         try:
             with self._open(req, timeout=self._timeout) as r:
                 status, raw = r.status, r.read()
         except urllib.error.HTTPError as e:
             status, raw = e.code, (e.read() or b"")
-        except Exception as e:  # noqa: BLE001 — URLError, OSError, http.client errors, a bad header…
-            # …any of which may echo the request (the header carries the token): redact, re-raise ours
+        except Exception as e:  # noqa: BLE001 — may echo the request (the JWT): redact, re-raise ours
             raise ArchiveError(
-                _redact(f"{method} {urllib.parse.urlsplit(url).path}: {type(e).__name__}: {e}", self._token)
+                _redact(f"GitHub App: {method} {path}: {type(e).__name__}: {e}", *self.secrets())
             ) from None
+        try:
+            got = json.loads(raw or b"{}")
+        except ValueError:
+            got = {}
+        return status, got if isinstance(got, dict) else {}
+
+    def _fail(self, what: str, status: int, got: dict) -> ArchiveError:
+        return ArchiveError(_redact(f"GitHub App: {what} → HTTP {status} {got.get('message') or ''}".strip(),
+                                    *self.secrets()))  # fmt: skip
+
+    def _installation(self) -> int:
+        if self.installation_id:
+            return self.installation_id
+        status, got = self._call("GET", f"/repos/{self.repo}/installation")
+        if status == 404:
+            raise ArchiveError(f"GitHub App {self.app_id} isn't installed on {self.repo} (or can't see it)")
+        if status != 200 or not got.get("id"):
+            raise self._fail(f"GET /repos/{self.repo}/installation", status, got)
+        self.installation_id = int(got["id"])
+        return self.installation_id
+
+    def token(self) -> str:
+        with self._lock:
+            if self._token and self._clock() < self._until:
+                return self._token
+            inst = self._installation()
+            body = {"repositories": [self.repo.split("/", 1)[1]], "permissions": dict(self.PERMISSIONS)}
+            status, got = self._call("POST", f"/app/installations/{inst}/access_tokens", body)
+            if status != 201 or not got.get("token"):
+                raise self._fail(f"POST /app/installations/{inst}/access_tokens", status, got)
+            now = self._clock()
+            try:
+                exp = datetime.fromisoformat(str(got.get("expires_at"))).timestamp()
+            except ValueError:
+                exp = now + 3600  # GitHub's documented lifetime
+            self._token = str(got["token"])
+            self._until = max(now, exp - TOKEN_EARLY_S)
+            return self._token
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._token, self._until = "", 0.0
+
+
+_APPS: dict[tuple, AppAuth] = {}
+_APPS_LOCK = threading.Lock()
+
+
+def app_auth(s: dict[str, Any], opener: Callable[..., Any] | None = None) -> AppAuth:
+    """The cached :class:`AppAuth` for these settings — one per (app, installation, repo, key),
+    so a token minted on one pass serves the next ones until it's near expiry."""
+    k = (s["app_id"], s["installation_id"], s["repo"], hashlib.sha256(s["app_key"].encode()).hexdigest(), opener)
+    with _APPS_LOCK:
+        if k not in _APPS:
+            _APPS[k] = AppAuth(s["app_id"], s["app_key"], s["repo"], s["installation_id"], opener=opener)
+        return _APPS[k]
+
+
+def client(s: dict[str, Any], opener: Callable[..., Any] | None = None) -> "GitHub":
+    """A :class:`GitHub` for the active auth mode — the app when configured, else the token."""
+    if s["auth"] == "app":
+        return GitHub("", s["repo"], opener=opener, auth=app_auth(s, opener))
+    return GitHub(s["token"], s["repo"], opener=opener)
+
+
+# ── the GitHub client (stdlib only; the opener is injectable for tests) ───────
+class GitHub:
+    def __init__(self, token: str, repo: str, opener: Callable[..., Any] | None = None, timeout: float = 120,
+                 auth: AppAuth | None = None):  # fmt: skip
+        if not token and auth is None:
+            raise ArchiveError("no token")
+        self._token = token
+        self._auth = auth
+        self.repo = repo
+        self._open = opener or urllib.request.urlopen
+        self._timeout = timeout
+
+    def _secrets(self) -> tuple[str, ...]:
+        return (self._token, *(self._auth.secrets() if self._auth else ()))
+
+    def _req(self, method: str, url: str, body: Any = None, *, data: Any = None, headers: dict | None = None,
+             ok: tuple[int, ...] = (200, 201), none_on: tuple[int, ...] = ()) -> Any:  # fmt: skip
+        if not url.startswith((API + "/", UPLOADS + "/")):
+            raise ArchiveError("refusing a request to a host other than GitHub's API")
+        if body is not None:
+            data = json.dumps(body).encode()
+        where = f"{method} {urllib.parse.urlsplit(url).path}"
+        for attempt in (1, 2):
+            token = self._auth.token() if self._auth else self._token
+            h = {**_HEADERS, "Authorization": f"Bearer {token}", **(headers or {})}
+            if body is not None:
+                h["Content-Type"] = "application/json"
+            req = urllib.request.Request(url, data=data, method=method, headers=h)
+            try:
+                with self._open(req, timeout=self._timeout) as r:
+                    status, raw = r.status, r.read()
+            except urllib.error.HTTPError as e:
+                status, raw = e.code, (e.read() or b"")
+            except Exception as e:  # noqa: BLE001 — URLError, OSError, http.client errors, a bad header…
+                # …any of which may echo the request (the header carries the token): redact, re-raise ours
+                raise ArchiveError(_redact(f"{where}: {type(e).__name__}: {e}", *self._secrets())) from None
+            # an installation token can be revoked or expire early: re-mint ONCE and retry (a
+            # streamed upload rewinds its file; one that can't rewind isn't retried)
+            if status == 401 and self._auth and attempt == 1 and (data is None or isinstance(data, bytes)
+                                                                 or hasattr(data, "seek")):  # fmt: skip
+                self._auth.invalidate()
+                if hasattr(data, "seek"):
+                    data.seek(0)
+                continue
+            break
         if status in none_on:
             return None
         if status not in ok:
@@ -146,9 +429,7 @@ class GitHub:
                 msg = json.loads(raw or b"{}").get("message") or ""
             except ValueError:
                 msg = ""
-            raise ArchiveError(
-                _redact(f"{method} {urllib.parse.urlsplit(url).path} → HTTP {status} {msg}".strip(), self._token)
-            )
+            raise ArchiveError(_redact(f"{where} → HTTP {status} {msg}".strip(), *self._secrets()))
         if status == 204 or not raw:
             return {}
         try:
@@ -216,18 +497,22 @@ class GitHub:
         except ValueError:
             raise ArchiveError(f"{path} on {ref} isn't valid JSON — fix it by hand before the next archive") from None
 
-    def put_file(self, path: str, branch: str, text: str, message: str, sha: str = "") -> None:
+    def put_file(self, path: str, branch: str, text: str, message: str, sha: str = "") -> str:
         import base64
 
         body = {"message": message, "content": base64.b64encode(text.encode()).decode(), "branch": branch}
         if sha:
             body["sha"] = sha
-        self._req("PUT", self._r(f"/contents/{urllib.parse.quote(path)}"), body)
+        return ((self._req("PUT", self._r(f"/contents/{urllib.parse.quote(path)}"), body) or {}).get("commit")
+                or {}).get("sha") or ""  # fmt: skip
 
     def open_pr(self, branch: str) -> dict | None:
         owner = self.repo.split("/")[0]
         got = self._req("GET", self._r(f"/pulls?state=open&head={urllib.parse.quote(f'{owner}:{branch}')}")) or []
         return got[0] if got else None
+
+    def pr(self, number: int) -> dict | None:
+        return self._req("GET", self._r(f"/pulls/{int(number)}"), none_on=(404,))
 
     def create_pr(self, branch: str, base: str, title: str, body: str) -> dict:
         return self._req("POST", self._r("/pulls"), {"title": title, "head": branch, "base": base, "body": body})
@@ -378,11 +663,16 @@ def catalog_doc(prev: dict[str, Any] | None, c: dict[str, Any], slug: str, entri
 
 
 def commit_catalog(gh: GitHub, c: dict[str, Any], slug: str, catalog_path: str, base: str,
-                   now: datetime) -> dict[str, Any]:  # fmt: skip
+                   now: datetime, _retry: bool = True) -> dict[str, Any]:  # fmt: skip
     """Write the campaign's catalog onto its open PR's branch (opening branch + PR when none is
     open). The entries are EVERY archived approved asset of the campaign (the local DB is the
     source of truth), merged into what the branch already holds — so a PR closed unmerged is
-    simply regenerated, and entries from elsewhere are never dropped."""
+    simply regenerated, and entries from elsewhere are never dropped.
+
+    Every commit is the WHOLE catalog, and a new PR opens only after its branch holds it — so
+    the PR is complete the moment it exists (protoContent's QA bot may merge it as soon as its
+    CI is green). If the open PR was merged or closed while this commit was being pushed, the
+    commit missed it: the catalog is written again onto a fresh branch + PR from ``base``."""
     branch = BRANCH_PREFIX + slug
     pr = gh.open_pr(branch)
     if pr is None:
@@ -412,6 +702,12 @@ def commit_catalog(gh: GitHub, c: dict[str, Any], slug: str, catalog_path: str, 
         n_new = len(doc["assets"]) - len((prev or {}).get("assets") or [])
         gh.put_file(catalog_path, branch, json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
                     f"media: catalog {slug} ({len(doc['assets'])} assets, +{n_new})", blob)  # fmt: skip
+        if pr is not None and pr.get("number"):
+            now_pr = gh.pr(pr["number"]) or {}
+            if now_pr.get("state") != "open" or now_pr.get("merged"):
+                if not _retry:
+                    raise ArchiveError(f"the catalog PR for {slug} closed while it was being updated — retrying")
+                return commit_catalog(gh, c, slug, catalog_path, base, now, _retry=False)
     if pr is None and changed:
         pr = gh.create_pr(
             branch,
@@ -421,8 +717,9 @@ def commit_catalog(gh: GitHub, c: dict[str, Any], slug: str, catalog_path: str, 
                 f"Approved media from the **{c['name']}** campaign, archived by the brandLaunch agent's Campaign "
                 f"Studio plugin.\n\n- Files: release `{TAG_PREFIX}{slug}` (release assets, not git).\n"
                 f"- Catalog: `{catalog_path}` — validates against `schemas/media/catalog.schema.json`.\n\n"
-                "This PR stays open and collects further approvals as new commits; merge it whenever. "
-                "The next approval after a merge opens a fresh one. Data only — no package changes."
+                "Complete as opened: every commit is the whole catalog, so this can merge as soon as CI is "
+                "green. Approvals that arrive while it's open are added as further whole-catalog commits; "
+                "after a merge, the next approval opens a fresh PR. Data only — no package changes."
             ),
         )
     return {"pr": (pr or {}).get("html_url", ""), "changed": changed, "entries": len(doc["assets"])}
@@ -491,7 +788,11 @@ def _drain(cfg: dict[str, Any] | None, *, gh: GitHub | None, now: datetime | Non
     due = [q for q in store.archive_queue() if not q["next_at"] or q["next_at"] <= stamp][:limit]
     if not due:
         return {"uploaded": [], "cataloged": [], "errors": []}
-    gh = gh or GitHub(s["token"], s["repo"])
+    gh = gh or client(s)
+
+    def _clean(err: str) -> str:  # the minted token / JWT exist only once a call has run
+        return _redact(err, *_secrets(s), *getattr(gh, "_secrets", tuple)())
+
     out: dict[str, Any] = {"uploaded": [], "already": [], "cataloged": [], "dropped": [], "errors": [], "prs": {}}
 
     def _fail(aid: int, q: dict[str, Any], err: str) -> None:
@@ -501,8 +802,8 @@ def _drain(cfg: dict[str, Any] | None, *, gh: GitHub | None, now: datetime | Non
             if n >= PARK_AFTER
             else (now + timedelta(seconds=_backoff(n))).isoformat(timespec="seconds")
         )
-        store.update_archive_queue(aid, attempts=n, last_error=_redact(err, s["token"])[:500], next_at=nxt)
-        out["errors"].append({"asset_id": aid, "error": _redact(err, s["token"])})
+        store.update_archive_queue(aid, attempts=n, last_error=_clean(err)[:500], next_at=nxt)
+        out["errors"].append({"asset_id": aid, "error": _clean(err)})
 
     try:
         base = gh.default_branch()
@@ -571,7 +872,9 @@ def _drain(cfg: dict[str, Any] | None, *, gh: GitHub | None, now: datetime | Non
     return out
 
 
-def status() -> dict[str, Any]:
+def status(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Archived / queued / retrying, and which credential is active — ``auth`` is "app" (the
+    GitHub App), "token" (``archive_token``) or "none". Never a secret."""
     q = store.archive_queue()
     archived = [
         a for a in store.list_assets(status="approved") if ((a.get("meta") or {}).get("archive") or {}).get("url")
@@ -590,4 +893,5 @@ def status() -> dict[str, Any]:
         ],  # fmt: skip
         "archived": len(archived),
         "approved": len(store.list_assets(status="approved")),
+        "auth": settings(cfg)["auth"],
     }

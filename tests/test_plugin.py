@@ -86,15 +86,18 @@ def test_settings_that_name_a_program_to_run_are_marked_spawns():
     # and archive_repo / archive_catalog_dir decide where approved media goes with his token.
     assert spawns == {
         "ffmpeg_path", "interpreter", "upload_dirs", "outro", "intro", "retention_mode", "archive_repo",
-        "archive_catalog_dir", "archive_enabled",
+        "archive_catalog_dir", "archive_enabled", "archive_app_id", "archive_app_installation_id",
+        "archive_app_private_key_path",
     }  # fmt: skip
 
 
 def test_playwright_is_declared_runtime_scoped_and_optional():
     # NOT host: the host process never imports playwright (a frozen app can't install it), so
     # install-deps must route it to the managed runtime the worker runs on.
-    (entry,) = MANIFEST["requires_pip"]
+    entry, jwt = MANIFEST["requires_pip"]
     assert entry["pkg"].startswith("playwright") and entry["scope"] == "runtime" and entry["optional"] is True
+    # the GitHub App JWT is signed IN the host process — host-scoped, optional (token mode needs none)
+    assert jwt == {"pkg": "PyJWT[crypto]>=2.4", "optional": True, "scope": "host"}
 
 
 def test_the_host_side_never_imports_playwright():
@@ -125,7 +128,9 @@ def test_declared_capabilities_match_reality():
         assert not re.search(pattern, sources, re.M), f"only archive.py makes outbound calls ({client})"
     arch = (ROOT / "archive.py").read_text(encoding="utf-8")
     assert 'API = "https://api.github.com"' in arch and 'UPLOADS = "https://uploads.github.com"' in arch
-    assert MANIFEST["secrets"] == ["archive_token"]
+    assert MANIFEST["secrets"] == ["archive_app_private_key", "archive_token"]
+    kinds = {x["key"]: x["type"] for x in MANIFEST["settings"]}
+    assert kinds["archive_app_private_key"] == kinds["archive_token"] == "secret"
 
 
 def test_no_cross_plugin_imports():

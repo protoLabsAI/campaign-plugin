@@ -1,6 +1,6 @@
 id: campaign
 name: Campaign Studio
-version: 0.5.1
+version: 0.6.0
 description: >-
   Campaign plans and deterministic, repeatable media production for launching ANY app or
   product. Plans hold the goal and its math, lanes, a shot list of assets (who records what),
@@ -13,7 +13,7 @@ description: >-
   producer subagent, four skills, and an asset gallery for approving what ships.
   Draft-only: it never posts to a social platform, holds no platform credentials, and only the
   operator approves. Approved media can be backed up to protoContent (GitHub release assets +
-  a catalog PR) with an operator-set token. Daily retention prunes old intermediates
+  a catalog PR) as a GitHub App (repo-scoped installation tokens) or with an operator-set token. Daily retention prunes old intermediates
   (report-only until the operator turns it on); collections gather keepers into a campaign.
   Copy is Social Studio's job and browsing is agent_browser's — referenced by name, never
   imported.
@@ -26,7 +26,9 @@ min_protoagent_version: "0.188.0"
 
 # Declarative posture (ADR 0071). The plugin's Python makes ONE kind of outbound call: archive.py
 # backs approved media up to GitHub (api.github.com / uploads.github.com only — refused for any
-# other host) with the operator's `archive_token`, and only while `archive_enabled` is on. Its
+# other host) as the operator's GitHub App (archive_app_id + archive_app_private_key → a JWT →
+# an installation token scoped to archive_repo only) or with the operator's `archive_token`, and
+# only while `archive_enabled` is on. Its
 # recording browser (Playwright) loads whatever `base_url` / `goto` URLs a shot script names, and
 # that page pulls in whatever it links to. So, like agent_browser: "*".
 # Guards (enforced inside the out-of-process browser worker): the browser never reaches this
@@ -50,6 +52,11 @@ enabled: false              # author default — operators opt in via plugins.en
 # a system binary — the banner says how to get it.
 requires_pip:
   - { pkg: "playwright>=1.45", optional: true, scope: runtime }
+  # The GitHub App archive signs an RS256 JWT IN-PROCESS (archive.py), so `scope: host`. The host
+  # already ships it: protoAgent's `mcp` dependency requires `pyjwt[crypto]` (and the desktop
+  # sidecar --collect-all's mcp). `optional` because only the app auth mode needs it — the token
+  # mode and everything else run without it, and a missing one is a readable archive problem.
+  - { pkg: "PyJWT[crypto]>=2.4", optional: true, scope: host }
 
 config_section: campaign
 config:
@@ -71,8 +78,12 @@ config:
   archive_enabled: false    # back approved media up to protoContent (release assets + a catalog PR)
   archive_repo: "protoLabsAI/protoContent"
   archive_catalog_dir: "specs/media/catalog"
+  archive_app_id: 0         # GitHub App id (protoquinn = 3282126); 0 = off. Set → the app wins over archive_token
+  archive_app_installation_id: 0   # the app's installation; 0 = find it via GET /repos/{archive_repo}/installation
+  archive_app_private_key: ""      # SECRET — the app's PEM private key (multi-line; a one-line paste is re-wrapped)
+  archive_app_private_key_path: "" # …or a path to the .pem file (used only when the secret is blank)
   archive_token: ""         # SECRET — fine-grained PAT on archive_repo only: Contents RW + Pull requests RW
-secrets: [archive_token]    # → secrets.yaml, redacted in the UI; never logged
+secrets: [archive_app_private_key, archive_token]    # → secrets.yaml, redacted in the UI; never logged
 # `spawns: true` marks a setting that names a program this plugin RUNS, so the agent's own
 # set_config tool refuses to write it (protoAgent ADR 0019 §3b) — the operator sets it from
 # Settings. `interpreter` is also fenced by name; `ffmpeg_path` is fenced only by the marker.
@@ -82,7 +93,9 @@ secrets: [archive_token]    # → secrets.yaml, redacted in the UI; never logged
 # montage reads. `retention_mode` carries it too: flipping it to `prune` is what lets files be
 # DELETED, and that switch is the operator's — the agent must never turn deletion on for itself.
 # `archive_enabled` / `archive_repo` / `archive_catalog_dir` carry it because they decide WHETHER
-# and WHERE approved media is sent with the operator's token.
+# and WHERE approved media is sent with the operator's credentials; `archive_app_id` /
+# `archive_app_installation_id` / `archive_app_private_key_path` because they decide WHICH identity
+# it acts as (and the path names a local key file the plugin reads).
 # The marker is core's only per-key operator-only fence.
 # Older cores ignore the field.
 settings:
@@ -103,7 +116,11 @@ settings:
   - { key: archive_enabled, label: "Back up approved media", type: bool, spawns: true, group: "Library", description: "Upload every asset you approve to the archive repo — the file as a release asset (release media/<campaign>, never 'latest'), plus an entry in the campaign's catalog JSON, committed on one open PR per campaign that you merge. Same file = uploaded once. Needs the archive token." }
   - { key: archive_repo, label: "Archive repo", type: string, spawns: true, group: "Library", description: "owner/name of the repo approved media is backed up to. Operator-only: it decides where your media is sent." }
   - { key: archive_catalog_dir, label: "Catalog folder", type: string, spawns: true, group: "Library", description: "Folder in the archive repo for the per-campaign catalog JSON (<folder>/<campaign-slug>.json). protoContent's convention: specs/media/catalog, validating against schemas/media/catalog.schema.json." }
-  - { key: archive_token, label: "Archive GitHub token", type: secret, group: "Library", description: "A fine-grained personal access token with access to the archive repo ONLY and these repository permissions: Contents — read and write (releases, release assets, the catalog branch and commit); Pull requests — read and write (open the catalog PR). Metadata — read is included automatically. Stored in secrets.yaml; never logged." }
+  - { key: archive_app_id, label: "Archive GitHub App id", type: number, minimum: 0, spawns: true, group: "Library", description: "The GitHub App the backup acts as (protoquinn: 3282126). 0 = off (use the token below). When set, the app wins over the archive token: each pass mints an installation access token scoped to the archive repo ONLY, with Contents and Pull requests write, cached until 5 minutes before it expires. Commits and the catalog PR are authored by the app's bot (protoquinn[bot]), which may merge the catalog PR once protoContent's CI is green." }
+  - { key: archive_app_installation_id, label: "Archive GitHub App installation id", type: number, minimum: 0, spawns: true, group: "Library", description: "The app's installation id (protoquinn on protoLabsAI: 121562683). 0 = find it from the archive repo (GET /repos/{archive_repo}/installation)." }
+  - { key: archive_app_private_key, label: "Archive GitHub App private key", type: secret, group: "Library", description: "The app's private key — paste the whole .pem file, from -----BEGIN RSA PRIVATE KEY----- to -----END RSA PRIVATE KEY-----. This field is one line, so the newlines are dropped on paste; the plugin re-wraps the key, so that's fine. Stored in secrets.yaml; never logged or shown." }
+  - { key: archive_app_private_key_path, label: "Archive GitHub App private key file", type: path, path_kind: file, spawns: true, group: "Library", description: "Alternatively, an absolute path to the app's .pem file. Used only when the private key above is blank. Keep the file owner-readable only (chmod 600)." }
+  - { key: archive_token, label: "Archive GitHub token", type: secret, group: "Library", description: "A fine-grained personal access token with access to the archive repo ONLY and these repository permissions: Contents — read and write (releases, release assets, the catalog branch and commit); Pull requests — read and write (open the catalog PR). Metadata — read is included automatically. Used only when no GitHub App id is set. Stored in secrets.yaml; never logged." }
   - { key: producer_model, label: "Producer model", type: string, group: "Crew models", description: "Model override for the campaign_producer subagent. Blank rides the host's aux-model routing." }
 
 # Console rail view (ADR 0026) — browsing only: every asset of a campaign, playable, with

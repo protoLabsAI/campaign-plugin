@@ -4,7 +4,8 @@ Every ``TICK_S`` it runs :func:`tick`, which does two jobs:
 
 * **the archive, every tick** — :func:`archive.drain` uploads what the operator approved to
   protoContent and batches the catalog onto one PR per campaign (only while
-  ``archive_enabled`` is on and ``archive_token`` is set; a failure backs off and retries).
+  ``archive_enabled`` is on and the GitHub App or ``archive_token`` is set; a failure backs off
+  and retries).
 
 * **retention, daily** — :func:`retention.run_scheduled` in the ``retention_mode`` the operator
   set (``report`` by default: a dry run whose report is saved for the gallery and
