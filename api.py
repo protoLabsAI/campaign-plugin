@@ -67,20 +67,34 @@ def build_view_router():
     # defers to this member's public list — reaches it with no bearer; the signature is the gate.
     @router.get("/open/{asset_id}")
     def _open(asset_id: int, exp: str = "", sig: str = ""):
+        import os
+
         from fastapi import HTTPException
-        from fastapi.responses import FileResponse
+        from fastapi.responses import StreamingResponse
 
         from . import openlink, store
 
         a = store.get_asset(asset_id) if 0 < asset_id < 2**63 else None
         p = openlink.resolve(a.get("path") or "") if a and not store.is_pruned(a) else None
         media = MEDIA_TYPES.get(p.suffix.lower()) if p else None
-        verdict = openlink.check(asset_id, exp, sig, p if media else None)
+        verdict, fd, st = openlink.open_checked(asset_id, exp, sig, p if media else None)
         if verdict == "expired":
             raise HTTPException(403, "this link has expired — open the image from the gallery again")
         if verdict != "ok":
             raise HTTPException(403, "invalid link")
-        return FileResponse(p, media_type=media, headers=OPEN_HEADERS)
+        # Stream from the descriptor the signature was checked against — never re-open the path.
+        f = os.fdopen(fd, "rb")
+
+        def _chunks():  # exactly st_size bytes — the Content-Length — even if the file grows meanwhile
+            left = st.st_size
+            with f:
+                while left > 0 and (chunk := f.read(min(1 << 16, left))):
+                    left -= len(chunk)
+                    yield chunk
+
+        return StreamingResponse(
+            _chunks(), media_type=media, headers={**OPEN_HEADERS, "Content-Length": str(st.st_size)}
+        )
 
     return router
 

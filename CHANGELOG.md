@@ -17,9 +17,12 @@
     `Referrer-Policy: no-referrer` and the gallery's sandbox CSP. It refuses with 403 any link
     that is expired, forged, made for another asset, or made before the file was re-rendered or
     moved, and any file outside the media folder.
-  - The signature is an HMAC over the asset id, the expiry and the file (its path, size and
-    mtime). The key is a random per-instance secret in `<data_dir>/open-link.key` (mode 600).
-    Deleting that file revokes every outstanding link.
+  - The signature is an HMAC over the asset id, the expiry and the file (its path, size, mtime
+    and inode). The key is a random per-instance secret in `<data_dir>/open-link.key` (mode 600),
+    created atomically. Deleting that file revokes every outstanding link, with no restart.
+  - The route opens the file once (never following a final symlink), checks that descriptor,
+    and streams exactly those bytes. Swapping the file for a symlink mid-request can't serve
+    anything else.
 
 ## 0.6.2
 

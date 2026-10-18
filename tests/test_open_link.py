@@ -291,3 +291,63 @@ def test_the_view_has_the_chats_open_in_new_tab_button():
     # Order matches chat: Download · View fullscreen · Open in new tab.
     i = [page.index(f'data-img="{k}"') for k in ("download", "fullscreen", "newtab")]
     assert i == sorted(i)
+
+
+# ── what is checked is what is sent ───────────────────────────────────────────
+@pytest.mark.parametrize("when", ["after_open", "before_open"])
+def test_swapping_the_file_for_a_symlink_mid_request_never_serves_the_target(gated, tmp_path, monkeypatch, when):
+    a = _image()
+    url = _mint(gated, a["id"])["url"]
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"TOP SECRET outside media root")
+    p = Path(a["path"])
+    real_open = openlink.os.open
+
+    def swap():
+        p.unlink()
+        os.symlink(secret, p)
+
+    def racing_open(path, flags, *args):
+        if when == "before_open":
+            swap()  # the open itself now meets the symlink (O_NOFOLLOW refuses it)
+            return real_open(path, flags, *args)
+        fd = real_open(path, flags, *args)
+        swap()  # served from the descriptor already open on the real file; the re-resolve sees the swap
+        return fd
+
+    monkeypatch.setattr(openlink.os, "open", racing_open)
+    r = gated.get(url)
+    assert b"TOP SECRET" not in r.content and r.status_code == 403
+
+
+def test_the_body_is_exactly_the_checked_size(gated):
+    a = _image()
+    r = gated.get(_mint(gated, a["id"])["url"])
+    assert r.headers["content-length"] == str(len(PNG)) and r.content == PNG
+
+
+def test_a_garbage_key_file_is_replaced_not_a_500(gated):
+    a = _image()
+    f = paths.data_dir() / openlink.KEY_FILE
+    f.write_bytes("é".encode() * 40)  # non-ASCII, long enough to look like a key
+    assert gated.get(_mint(gated, a["id"])["url"]).status_code == 200
+    assert len(f.read_text().strip()) == 64
+
+
+def test_a_loosened_key_file_goes_back_to_owner_only():
+    f = paths.data_dir() / openlink.KEY_FILE
+    openlink._key()
+    os.chmod(f, 0o644)
+    openlink._cache.clear()
+    openlink._key()
+    assert stat.S_IMODE(f.stat().st_mode) == 0o600
+
+
+def test_concurrent_first_use_agrees_on_one_key():
+    from concurrent.futures import ThreadPoolExecutor
+
+    openlink._cache.clear()
+    with ThreadPoolExecutor(8) as ex:
+        keys = set(ex.map(lambda _: openlink._key(), range(32)))
+    assert len(keys) == 1
+    assert not list(paths.data_dir().glob(openlink.KEY_FILE + ".*.tmp")), "no temp files left behind"
