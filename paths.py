@@ -83,6 +83,22 @@ def is_contained(path: str | os.PathLike, root: Path | None = None) -> bool:
     return resolved == root or root in resolved.parents
 
 
+def campaign_root_of(path: str | os.PathLike) -> Path | None:
+    """The ``<media_root>/<id>-<slug>`` folder ``path`` (symlinks resolved) lives in — any
+    campaign's, not just one. None when it is missing, outside the media root, or the media root
+    itself / a direct child of it (no campaign folder holds it).
+
+    A row moved to another campaign (``library.move_assets``) keeps its file where it was, so a
+    campaign's assets can live under ANOTHER campaign's folder; this is the containment check for
+    them — still the media root's traversal / symlink-escape guard, never a path outside it."""
+    root = media_root().resolve()
+    try:
+        rel = Path(path).expanduser().resolve(strict=True).relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return root / rel.parts[0] if len(rel.parts) > 1 else None
+
+
 def unique_dir(parent: Path, stem: str) -> Path:
     """Create and return a NEW directory ``parent/stem`` (``stem-2``, ``-3`` … if taken).
 

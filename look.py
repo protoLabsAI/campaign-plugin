@@ -19,7 +19,9 @@ The tool wraps the result in protoAgent core's ``multimodal_tool_result`` envelo
 middleware turns into image blocks on a vision model. Core caps an envelope at 3 images of
 ≤ 2 MiB each, so this module never builds more and re-encodes until each fits.
 
-Every path is contained to the campaign's own media directory (symlinks resolved). ffmpeg
+Every path is contained to the campaign's own media directory (symlinks resolved) — or, for a
+file one of the campaign's own rows names that still sits in another campaign's folder (a moved
+asset), to the media root. ffmpeg
 does the decoding/scaling — no image library is needed in the host.
 """
 
@@ -31,7 +33,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from . import deps, paths, render, store
+from . import deps, paths, render, retention, store
 
 STILL_EXT = (".png", ".jpg", ".jpeg", ".webp")
 MOTION_EXT = (".webm", ".mp4", ".mov", ".mkv", ".m4v", ".gif")
@@ -49,8 +51,26 @@ class LookError(ValueError):
     pass
 
 
+def _named_by_this_campaign(campaign_id: int, resolved: Path) -> dict[str, Any] | None:
+    """The asset of this campaign that names ``resolved`` (its own file or a side file), if any."""
+    for a in store.list_assets(int(campaign_id)):
+        for f in retention.named_files(a):
+            try:
+                if Path(f).expanduser().resolve(strict=True) == resolved:
+                    return a
+            except (OSError, RuntimeError):
+                continue
+    return None
+
+
 def resolve(campaign_id: int, asset_id: int = 0, path: str = "") -> tuple[Path, dict[str, Any] | None]:
-    """The file to look at — an asset of THIS campaign, or a path inside its media dir."""
+    """The file to look at — an asset of THIS campaign, or a path inside its media dir.
+
+    An asset moved here from another campaign (``library.move_assets``) keeps its file under the
+    OLD campaign's folder, so a file is accepted when it is inside this campaign's folder, OR
+    inside some campaign folder under the media root AND named by an asset of this campaign (its
+    own file or a side file) — the row's ownership is what grants access. Anything outside the
+    media root (a traversal, a symlink escape) is refused either way."""
     c = store.require_campaign(campaign_id)
     root = paths.campaign_dir(c["id"], c["name"])
     asset = None
@@ -69,7 +89,13 @@ def resolve(campaign_id: int, asset_id: int = 0, path: str = "") -> tuple[Path, 
     if not p.is_absolute():
         p = root / p
     if not paths.is_contained(p, root):
-        raise LookError(f"{raw} is not a file inside this campaign's media dir ({root})")
+        # Not under this campaign's folder: allowed only for a file of THIS campaign's own rows
+        # that still lives in another campaign's folder (a moved asset) — never outside the root.
+        owned = paths.campaign_root_of(p) is not None and (
+            asset is not None or _named_by_this_campaign(c["id"], p.resolve()) is not None
+        )
+        if not owned:
+            raise LookError(f"{raw} is not a file inside this campaign's media dir ({root})")
     p = p.resolve()
     if not p.is_file():
         raise LookError(f"{raw} is not a file")

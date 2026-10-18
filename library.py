@@ -6,7 +6,10 @@ curated library needs:
 * :func:`move_assets` — re-home assets (and, by default, their **lineage**: every ancestor the
   retention closure would protect — the parent chain, a montage's inputs) into another
   campaign. Rows keep their ids, files, statuses and approvals, so every chain that names them
-  still reads; the files stay where they are on disk (still inside the media root). Lanes are
+  still reads; the files stay where they are on disk (still inside the media root) — so a
+  campaign's rows can name files under ANOTHER campaign's folder, and every path check
+  (``campaign_view``, the gallery's file route, retention, the archive) is media-root-wide or
+  ownership-based, never "inside this campaign's own folder" alone (#36). Lanes are
   matched by name in the target, and created there when missing.
 * :func:`copy_assets` — duplicate assets + lineage into another campaign: the files are COPIED
   into the target's folder (same layout under it), side files too (a bookended clip's raw
@@ -127,16 +130,6 @@ def move_assets(asset_ids: list[int], target_campaign_id: int, *, lineage: bool 
 
 
 # ── copy ──────────────────────────────────────────────────────────────────────
-def _campaign_root(p: Path) -> Path | None:
-    """The ``<media_root>/<id>-<slug>`` folder ``p`` lives in (None when outside the root)."""
-    root = paths.media_root().resolve()
-    try:
-        rel = p.resolve().relative_to(root)
-    except (OSError, RuntimeError, ValueError):
-        return None
-    return root / rel.parts[0] if len(rel.parts) > 1 else None
-
-
 def _dest(src: str, target_dir: Path, taken: set[Path]) -> Path | None:
     """Where ``src`` lands in the target: the same path under the target's folder as under its
     own campaign folder. None for a file that isn't a regular file inside the media root."""
@@ -145,7 +138,7 @@ def _dest(src: str, target_dir: Path, taken: set[Path]) -> Path | None:
     f = Path(src).expanduser()
     if f.is_symlink() or not f.is_file():
         return None
-    home = _campaign_root(f)
+    home = paths.campaign_root_of(f)
     if home is None:
         return None
     rel = f.resolve().relative_to(home)
