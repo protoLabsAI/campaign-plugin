@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.2
+
+- **Gallery images open like images in chat.** A still, card or GIF in the gallery now has the
+  same hover buttons as an image in chat, **Download** and **View fullscreen**, and opens in the
+  same Lightbox (Escape, the backdrop or × closes it). Clicking the image itself opens it too.
+  It uses the design system's own image and Lightbox styles, so it looks the same as chat. There's
+  no "Open in new tab": the gallery's files are private to the view and can't be opened outside it.
+
 ## 0.6.1
 
 - **The archive's operator routes are actually served.** `GET /api/plugins/campaign/archive`

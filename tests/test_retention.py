@@ -674,3 +674,20 @@ def test_unicode_digit_ids_in_meta_never_abort_the_plan(c):
     a = _asset(c, "renders/a/a.mp4", "rendered", days=30)
     _asset(c, "montages/m.mp4", "approved", kind="montage", days=30, meta={"inputs": ["²", str(a["id"])]})
     assert a["id"] not in _ids(retention.plan(NOW)), "the ASCII id still protects; the superscript is ignored"
+
+
+def test_the_gallery_reuses_the_chat_image_viewer(client):
+    # an image in the gallery gets the same chrome as an image in chat: the DS MarkdownImage action
+    # cluster (Download · View fullscreen) and the DS Lightbox, by the kit's own class names
+    page = client.get("/plugins/campaign/view").text
+    for needle in (
+        'class="pl-md-img-actions"',
+        'data-streamdown="image-wrapper"',
+        "pl-overlay pl-overlay--lightbox",
+        "pl-lightbox__img",
+        "pl-iconbtn pl-lightbox__close",
+        'aria-label="Download image"',
+        'aria-label="View fullscreen"',
+    ):
+        assert needle in page, needle
+    assert 'aria-label="Open in new tab"' not in page  # a private blob: URL can't leave the view
