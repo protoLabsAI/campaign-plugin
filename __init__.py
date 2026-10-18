@@ -22,7 +22,7 @@ import logging
 
 log = logging.getLogger("protoagent.plugins.campaign")
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 
 def _host_store(registry) -> str:
@@ -115,10 +115,11 @@ def register(registry) -> None:
         registry.register_router(build_data_router(getattr(registry, "emit", None)), prefix="/api/plugins/campaign")
     except Exception:
         log.exception("[campaign] mounting routers failed")
-    try:  # the protoContent archive's operator routes — their own router, same gated prefix
+    try:  # the protoContent archive's operator routes — their own router at their OWN prefix (the
+        # host keeps one router per prefix and drops a second); still under the gated /api tree
         from .archive_api import build_archive_router
 
-        registry.register_router(build_archive_router(), prefix="/api/plugins/campaign")
+        registry.register_router(build_archive_router(), prefix="/api/plugins/campaign/archive")
     except Exception:
         log.exception("[campaign] mounting the archive routes failed")
 
