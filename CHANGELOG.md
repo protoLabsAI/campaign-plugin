@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.3
+
+- **Gallery images have "Open in new tab", like images in chat.** It's the third hover button,
+  after Download and View fullscreen, with the chat's icon and label. The gallery's previews are
+  private to the view, so the button asks the agent for a **15-minute signed link** to that one
+  file and opens it in a new browser tab. In the desktop app it opens in your system browser,
+  the same as a chat image. It works through the fleet hub too
+  (`/agents/<slug>/plugins/campaign/open/…`). If your browser blocks the pop-up, the card says so
+  and shows the link to click.
+  - New gated route `POST /api/plugins/campaign/assets/{id}/open-link` returns
+    `{url, expires_in, exp}`. It answers 404 for a missing, pruned or out-of-folder file, and
+    415 for anything that isn't an image or video.
+  - New public route `GET /plugins/campaign/open/{id}?exp=…&sig=…` (added to `public_paths`)
+    serves the file `inline` with `Cache-Control: private, no-store`, `nosniff`,
+    `Referrer-Policy: no-referrer` and the gallery's sandbox CSP. It refuses with 403 any link
+    that is expired, forged, made for another asset, or made before the file was re-rendered or
+    moved, and any file outside the media folder.
+  - The signature is an HMAC over the asset id, the expiry and the file (its path, size, mtime
+    and inode). The key is a random per-instance secret in `<data_dir>/open-link.key` (mode 600),
+    created atomically. Deleting that file revokes every outstanding link, with no restart.
+  - The route opens the file once (never following a final symlink), checks that descriptor,
+    and streams exactly those bytes. Swapping the file for a symlink mid-request can't serve
+    anything else.
+
 ## 0.6.2
 
 - **Gallery images open like images in chat.** A still, card or GIF in the gallery now has the

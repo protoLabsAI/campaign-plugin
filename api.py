@@ -1,9 +1,11 @@
 """HTTP surface — two routers, two prefixes (plugin-view rule 1).
 
 * ``/plugins/campaign/view`` — the gallery page, PUBLIC (an iframe navigation carries no bearer).
-* ``/api/plugins/campaign/*`` — data, media and the review action, behind the host's
-  default-deny operator auth. The page reaches them through the DS kit's authed fetch and
-  turns media into blob: URLs, so no media URL is ever public.
+* ``/plugins/campaign/open/{id}`` — "Open in new tab": PUBLIC, but it serves a file ONLY for a
+  short-lived signed link (``openlink.py``) that the gated mint route below hands the operator.
+* ``/api/plugins/campaign/*`` — data, media, the review action and the open-link mint, behind
+  the host's default-deny operator auth. The page reaches them through the DS kit's authed fetch
+  and turns media into blob: URLs, so no media URL is public without a fresh signature.
 
 The file route serves an asset only when its resolved path (symlinks followed) sits inside
 the plugin's media root — a row pointing anywhere else is refused, whatever wrote it.
@@ -37,6 +39,14 @@ SAFE_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Content-Security-Policy": "default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; sandbox",
 }
+# The public open-link route's file: shown in the tab (inline), never cached or stored by the
+# browser, and no Referer (it carries the signature) leaks to anything the document could load.
+OPEN_HEADERS = {
+    **SAFE_HEADERS,
+    "Cache-Control": "private, no-store",
+    "Content-Disposition": "inline",
+    "Referrer-Policy": "no-referrer",
+}
 
 
 def build_view_router():
@@ -50,6 +60,41 @@ def build_view_router():
     @router.get("/view", response_class=HTMLResponse)
     async def _view() -> HTMLResponse:
         return HTMLResponse(PAGE)
+
+    # "Open in new tab" (openlink.py). On THIS router, not a second one at /plugins/campaign (the
+    # host keeps one router per prefix). Public in the manifest (public_paths), so a plain browser
+    # tab — or the desktop app's system browser, or the fleet hub's /agents/<slug>/ proxy, which
+    # defers to this member's public list — reaches it with no bearer; the signature is the gate.
+    @router.get("/open/{asset_id}")
+    def _open(asset_id: int, exp: str = "", sig: str = ""):
+        import os
+
+        from fastapi import HTTPException
+        from fastapi.responses import StreamingResponse
+
+        from . import openlink, store
+
+        a = store.get_asset(asset_id) if 0 < asset_id < 2**63 else None
+        p = openlink.resolve(a.get("path") or "") if a and not store.is_pruned(a) else None
+        media = MEDIA_TYPES.get(p.suffix.lower()) if p else None
+        verdict, fd, st = openlink.open_checked(asset_id, exp, sig, p if media else None)
+        if verdict == "expired":
+            raise HTTPException(403, "this link has expired — open the image from the gallery again")
+        if verdict != "ok":
+            raise HTTPException(403, "invalid link")
+        # Stream from the descriptor the signature was checked against — never re-open the path.
+        f = os.fdopen(fd, "rb")
+
+        def _chunks():  # exactly st_size bytes — the Content-Length — even if the file grows meanwhile
+            left = st.st_size
+            with f:
+                while left > 0 and (chunk := f.read(min(1 << 16, left))):
+                    left -= len(chunk)
+                    yield chunk
+
+        return StreamingResponse(
+            _chunks(), media_type=media, headers={**OPEN_HEADERS, "Content-Length": str(st.st_size)}
+        )
 
     return router
 
@@ -248,6 +293,21 @@ def build_data_router(emit: Callable[[str, dict], Any] | None = None):
                 headers=SAFE_HEADERS,
             )
         return FileResponse(p, media_type=media, headers=SAFE_HEADERS)
+
+    # "Open in new tab": a 15-minute signed link to this asset's file (openlink.py), for a tab
+    # that has no bearer. Gated (under /api), so only the operator can mint one. Only servable
+    # media — an image or video the gallery would show — never an opaque download.
+    @router.post("/assets/{asset_id}/open-link")
+    def _open_link(asset_id: int) -> JSONResponse:
+        from . import openlink
+
+        a = store.get_asset(asset_id) if 0 < asset_id < 2**63 else None
+        p = openlink.resolve(a.get("path") or "") if a and not store.is_pruned(a) else None
+        if p is None:
+            raise HTTPException(404, "no file for this asset (missing, pruned or outside the media directory)")
+        if p.suffix.lower() not in MEDIA_TYPES:
+            raise HTTPException(415, "only images and videos open in a new tab")
+        return JSONResponse(openlink.mint(asset_id, p))
 
     @router.post("/assets/{asset_id}/review")
     def _review(asset_id: int, body: Review) -> JSONResponse:
