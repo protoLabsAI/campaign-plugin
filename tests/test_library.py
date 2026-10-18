@@ -348,3 +348,29 @@ def test_a_copy_never_points_a_chain_into_another_campaign(src, best):
     store.update_asset(old["id"], status="superseded", superseded_by=[new["id"]])
     out = library.copy_assets([old["id"]], best["id"], lineage=False)
     assert store.get_asset(out["map"][str(old["id"])])["superseded_by"] == []
+
+
+# ── after a move (#36): the files stay put, and every path check still finds them ──────────────
+def test_after_a_move_a_real_prune_keeps_the_lineage_and_still_deletes_what_is_eligible(src, best):
+    from datetime import UTC, datetime, timedelta
+
+    take, still, render, hero, master = _chain(src)
+    loose = _row(src, "renders/loose/20261002-020000/loose.mp4", "rendered")  # nothing depends on it
+    stay = _row(src, "renders/stay/20261002-030000/stay.mp4", "rendered")  # never moved
+    library.move_assets([hero["id"], loose["id"]], best["id"], operator=True)
+    assert store.get_asset(loose["id"])["path"] == loose["path"], "a move leaves the file where it was"
+    r = retention.execute(datetime.now(UTC) + timedelta(days=60))
+    assert r["errors"] == []
+    assert {loose["id"], stay["id"]} <= set(r["done"]), "eligible rows are pruned, moved or not"
+    assert not os.path.exists(loose["path"]) and not os.path.exists(stay["path"])
+    for a in (take, still, render, hero):
+        assert os.path.exists(a["path"]), f"#{a['id']} is kept (the moved hero depends on it)"
+    assert master.exists(), "the moved hero's raw master is kept"
+    assert paths.campaign_dir(src["id"], src["name"]).is_dir(), "a campaign's own folder is never removed"
+
+
+def test_the_gallery_serves_a_moved_assets_file(client, src, best):
+    _, _, _, hero, _ = _chain(src)
+    library.move_assets([hero["id"]], best["id"], operator=True)
+    r = client.get(f"/api/plugins/campaign/file/{hero['id']}")
+    assert r.status_code == 200 and r.content == b"x" * 100

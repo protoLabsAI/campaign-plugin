@@ -306,3 +306,64 @@ def test_an_ffmpeg_failure_reads_as_a_clear_tool_reply(tools, core, camp, monkey
     monkeypatch.setattr(render, "_default_runner", broken)
     assert view(tools, campaign_id=c["id"], path="s.png").startswith("Can't show it — couldn't extract")
     assert core.calls == []
+
+
+# ── #36: an asset moved here keeps its file under the OLD campaign's folder ─────────────────────
+def test_a_moved_asset_can_be_viewed_in_its_new_campaign(tools, core, camp, monkeypatch):
+    from campaign import library
+
+    monkeypatch.setattr(deps, "ffmpeg", lambda: None)
+    c, root = camp
+    p = root / "shots" / "t-1" / "s.png"
+    p.parent.mkdir(parents=True)
+    p.write_bytes(_png(16, 16))
+    a = store.add_asset(c["id"], "still", "s", status="captured", path=str(p))
+    dest = store.create_campaign("protoAgent showcase")
+    library.move_assets([a["id"]], dest["id"])
+    assert store.get_asset(a["id"])["path"] == str(p), "the file stays where it was"
+    out = view(tools, campaign_id=dest["id"], asset_id=a["id"])
+    assert out.startswith("\x1e[multimodal-tool-v1]"), out
+    # by path too — the row of THIS campaign names that file
+    assert view(tools, campaign_id=dest["id"], path=str(p)).startswith("\x1e[multimodal-tool-v1]")
+    # the old campaign no longer owns the row (but its folder's files are still its own by path)
+    assert f"no asset #{a['id']} in campaign {c['id']}" in view(tools, campaign_id=c["id"], asset_id=a["id"])
+    assert view(tools, campaign_id=c["id"], path=str(p)).startswith("\x1e[multimodal-tool-v1]")
+
+
+def test_a_move_doesnt_open_the_old_campaigns_other_files_or_anything_outside(tools, core, camp, tmp_path, monkeypatch):
+    from campaign import library
+
+    monkeypatch.setattr(deps, "ffmpeg", lambda: None)
+    c, root = camp
+    moved_f, other_f = root / "m.png", root / "other.png"
+    moved_f.write_bytes(_png(8, 8))
+    other_f.write_bytes(_png(8, 8))
+    a = store.add_asset(c["id"], "still", "m", status="captured", path=str(moved_f))
+    dest = store.create_campaign("Dest")
+    ddir = paths.campaign_dir(dest["id"], dest["name"])
+    library.move_assets([a["id"]], dest["id"])
+    # a file of the old campaign no row here names: still out of bounds (absolute, or ../ traversal)
+    assert "not a file inside" in view(tools, campaign_id=dest["id"], path=str(other_f))
+    assert "not a file inside" in view(tools, campaign_id=dest["id"], path=f"../{root.name}/other.png")
+    # outside the media root: refused, by path and as an asset of this campaign
+    outside = tmp_path / "secret.png"
+    outside.write_bytes(_png(8, 8))
+    assert "not a file inside" in view(tools, campaign_id=dest["id"], path=str(outside))
+    bad = store.add_asset(dest["id"], "still", "x", status="captured", path=str(outside))
+    assert "not a file inside" in view(tools, campaign_id=dest["id"], asset_id=bad["id"])
+    # a file loose in the media root itself (no campaign folder) is not campaign media
+    loose = paths.media_root() / "loose.png"
+    loose.write_bytes(_png(8, 8))
+    lr = store.add_asset(dest["id"], "still", "l", status="captured", path=str(loose))
+    assert "not a file inside" in view(tools, campaign_id=dest["id"], asset_id=lr["id"])
+    if hasattr(os, "symlink"):
+        # a symlink in the OLD campaign's folder that escapes the root, owned by a row here: refused
+        esc = root / "esc.png"
+        esc.symlink_to(outside)
+        er = store.add_asset(dest["id"], "still", "e", status="captured", path=str(esc))
+        assert "not a file inside" in view(tools, campaign_id=dest["id"], asset_id=er["id"])
+        assert "not a file inside" in view(tools, campaign_id=dest["id"], path=str(esc))
+        # and a symlink in THIS campaign's folder into the old one's unowned file: refused
+        (ddir / "peek.png").symlink_to(other_f)
+        assert "not a file inside" in view(tools, campaign_id=dest["id"], path="peek.png")
+    assert len(core.calls) == 0
