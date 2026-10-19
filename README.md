@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="docs/assets/gallery.webp" alt="Campaign Studio's gallery: a campaign's approved clips as playable cards, each with its status, a backed-up badge, size, dimensions and review note" width="100%">
+</p>
+
+<p align="center">
   <a href="https://github.com/protoLabsAI/campaign-plugin/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/protoLabsAI/campaign-plugin/ci.yml?branch=main&label=CI"></a>
   <a href="https://github.com/protoLabsAI/campaign-plugin/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/protoLabsAI/campaign-plugin?label=release"></a>
   <a href="https://github.com/protoLabsAI/protoAgent"><img alt="protoAgent 0.188+" src="https://img.shields.io/badge/protoAgent-%E2%89%A5%200.188-7c5cff"></a>

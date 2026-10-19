@@ -69,6 +69,7 @@ playwright. CI runs both: the unit job, and an integration job that installs Chr
 | `subagents.py` | The `campaign_producer` subagent |
 | `threads.py` | Run a blocking call on a fresh worker thread |
 | `skills/` | The five skills |
+| `docs/assets/` | Screenshots used by the README and docs (WebP) |
 | `tests/` | The host-free suite (`conftest.py` bootstraps the plugin as a package) |
 
 `tests/test_docs_reference.py` fails if this table names a path that doesn't exist.

@@ -22,6 +22,10 @@ this page is the tour.
 
 ## The gallery
 
+<p align="center">
+  <img src="assets/gallery.webp" alt="The gallery filtered to approved assets: clips as playable cards with status, backed-up badge, size, dimensions, review note and the Reject / Supersede / Copy path buttons" width="100%">
+</p>
+
 - **Gallery** — one console view, for browsing: every clip/GIF/still/card of a campaign,
   playable, with status, size, dimensions, and the operator-only **Approve / Reject** buttons.
   Superseded takes are hidden (a **Show superseded** toggle brings them back, dimmed); an
@@ -37,6 +41,16 @@ this page is the tour.
   and the retake chain reads by time ("Superseded by #42 · 3 min later", "Replaces #41 · …").
   The assets API carries `created_at` / `updated_at` (the row), `made_at` + `made_from`
   (`stamp` | `mtime`) and `take_at`.
+
+<p align="center">
+  <img src="assets/card-actions.webp" alt="An image card's hover buttons: Download, View fullscreen and Open in new tab" width="300">
+</p>
+
+**View fullscreen** opens the chat's image viewer over the gallery:
+
+<p align="center">
+  <img src="assets/lightbox.webp" alt="The fullscreen image viewer open over the gallery, showing one still at full size with a close button" width="100%">
+</p>
 
 The gallery is a plugin view at `/plugins/campaign/view`; its data comes from the gated routes in
 the [HTTP API reference](api.md).

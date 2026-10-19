@@ -255,3 +255,14 @@ def test_the_manifest_points_at_docs_that_exist():
     assert "README's" not in text, "the manifest still points at a README section that moved to docs/"
     for ref in set(re.findall(r"docs/[a-z0-9-]+\.md", text)):
         assert (_ROOT / ref).is_file(), f"the manifest cites {ref}, which doesn't exist"
+
+
+def test_every_image_the_docs_show_is_in_the_repo():
+    """A relative <img src> or ![](…) that points nowhere renders as a broken image on GitHub."""
+    missing = []
+    for doc in [_ROOT / "README.md", *sorted(_DOCS.glob("*.md"))]:
+        text = doc.read_text()
+        for src in re.findall(r'<img[^>]*\bsrc="([^"]+)"', text) + re.findall(r"!\[[^\]]*\]\(([^)\s]+)\)", text):
+            if not re.match(r"https?:", src) and not (doc.parent / src).is_file():
+                missing.append(f"{doc.relative_to(_ROOT)} → {src}")
+    assert not missing, f"images referenced but not in the repo: {missing}"
