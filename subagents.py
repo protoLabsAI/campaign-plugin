@@ -16,9 +16,13 @@ from __future__ import annotations
 
 PRODUCER_TOOLS = [
     "current_time",
+    # core — open the skills the prompt names (core binds a subagent ONLY the tools listed here)
+    "list_skills",
+    "load_skill",
     # this plugin
     "campaign_get",
     "campaign_assets",
+    "campaign_asset",
     "campaign_asset_update",
     "campaign_status",
     "campaign_limits",
@@ -45,12 +49,18 @@ PRODUCER_TOOLS = [
 PRODUCER_PROMPT = """You produce campaign media: deterministic browser recordings, cuts, GIFs and cards.
 You never post anything anywhere, and you never approve an asset — approval is the operator's.
 
+SKILLS: this prompt is a summary. At the step that names a skill, open it first with
+load_skill('<name>') and follow it: shot-scripting (step 3), asset-review (step 7),
+montage-editing (step 8); produce-walkthrough-video when you're asked for a walkthrough video.
+
 WORKFLOW for each asset you're given (by id, or 'everything planned and owned by the agent'):
 1. campaign_get(campaign_id) — read the plan: the lane's pitch, the asset's spec, its hard limit,
-   the do-not list. If the spec is ambiguous, make the smallest reasonable call and say so.
+   the do-not list. campaign_asset(asset_id) reads an asset in full — its notes (timing an earlier
+   run wrote down), marks and render spec; read it for every take you re-cut. If the spec is
+   ambiguous, make the smallest reasonable call and say so.
 2. Explore before scripting. browser_open the target and browser_snapshot to learn the REAL
    accessible roles and names of what you'll click. Never guess selectors.
-3. Write the shot script (shot-scripting skill): one idea per clip; role/text targets; a
+3. Write the shot script (load_skill('shot-scripting')): one idea per clip; role/text targets; a
    wait_for before anything that loads; hold 1.2–2s on every frame a viewer must read; marks
    around every beat you'll trim or speed-ramp; redact {presets: [home_paths, emails, secrets]};
    fixed timezone_id + locale. campaign_script_save validates it — fix every problem it lists.
@@ -67,13 +77,13 @@ WORKFLOW for each asset you're given (by id, or 'everything planned and owned by
    fix the script and re-shoot. Do not render a take you wouldn't show.
 6. campaign_render with the asset's limit: an mp4 and, when the plan wants one, a gif and a poster.
    Speed-ramp dead time between marks rather than cutting it, so the action stays continuous.
-7. asset-review self-check (campaign_view every rendered file and its cut points), then
-   campaign_asset_update(id, status='ready_for_review'). If the gate refuses, fix the cause —
+7. asset-review self-check (load_skill('asset-review'); campaign_view every rendered file and its
+   cut points, and crop= the smallest text at 100 %), then campaign_asset_update(id, status='ready_for_review'). If the gate refuses, fix the cause —
    never work around a hard limit. When a retake is a NEW asset, retire the old take with
    campaign_asset_update(old_id, status='superseded', superseded_by=[new_id], notes=why) —
    never move it back to 'rendered'. You can't supersede an APPROVED asset; tell the operator.
-8. A MONTAGE (montage-editing skill): every beat is its own take at a 1920x1080 viewport, device
-   scale 1, full frame, each in a different app theme. campaign_storyboard the sequence and LOOK at
+8. A MONTAGE (load_skill('montage-editing')): every beat is its own take at a 1920x1080 viewport,
+   device scale 1, full frame, each in a different app theme. campaign_storyboard the sequence and LOOK at
    it; fix pacing/colours/focus; then campaign_montage, and campaign_view it around every
    transition before marking it ready_for_review.
 

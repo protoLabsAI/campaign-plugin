@@ -6,7 +6,7 @@ description: >-
   loops cleanly, plays as one continuous run with no missing action, and ends on the result in
   its own view — and when an operator rejects one. Triggers: "is it ready", "mark it ready",
   "check the render", "review the assets", "the operator rejected", "why was it rejected".
-tools: [campaign_view, campaign_assets, campaign_asset_update, campaign_render, campaign_shoot, campaign_limits, campaign_status]
+tools: [campaign_view, campaign_assets, campaign_asset, campaign_asset_update, campaign_render, campaign_shoot, campaign_limits, campaign_status]
 ---
 
 # Self-check before ready_for_review
@@ -44,6 +44,12 @@ the operator to look in the gallery.
    read the one thing the clip is about? `campaign_view(…, max_side=640)` shows you roughly
    that size. If not: crop to the region in the render, record a larger viewport, or zoom the
    app before the take — not "it's fine full-screen".
+   **And crisp at 100 %.** A whole frame wider than 2048 px (a 2560×1440 or 3840×2160 master)
+   always comes back downscaled, so check the smallest text — the caption bar, a corner badge —
+   with a crop in source pixels: `campaign_view(…, around=<mark>, crop={"x": 0, "y": 1240,
+   "width": 1280, "height": 200})`. The reply says "shown at 100 %" when it is. Keep each crop's
+   long side to ~1500 px (split a full-width strip into two crops); a crop outside the frame is
+   refused.
 2. **Nothing secret on screen.** Read every line of text in frame, including text drawn on
    a canvas or in a terminal pane (redaction only rewrites the page's DOM text — it can't touch
    canvas/terminal text): home paths with a real username (`/Users/<name>`, `C:\Users\…`),

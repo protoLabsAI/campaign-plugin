@@ -12,7 +12,10 @@ into at most a few downscaled JPEGs:
 * ``start``/``end`` (seconds or marks) → the frames come from that span only;
 * ``every_s=1`` → a frame every second from ``start`` (instead of ``frames`` evenly spaced),
   12 per contact sheet at most: a longer span is PAGED — the caption names the next page's
-  ``start`` — so a ~1 s review of a whole clip is one or a few calls.
+  ``start`` — so a ~1 s review of a whole clip is one or a few calls;
+* ``crop={x, y, width, height}`` (source pixels, the same shape ``campaign_render`` takes) →
+  only that region, cut out BEFORE any scaling, so a region no larger than ``max_side`` comes
+  back at 100 % — how a 2560- or 3840-wide master's smallest text is checked at full size.
 
 The tool wraps the result in protoAgent core's ``multimodal_tool_result`` envelope (via
 ``graph.sdk``, looked up lazily and getattr-guarded — older cores lack it), which the host's
@@ -28,6 +31,7 @@ does the decoding/scaling — no image library is needed in the host.
 from __future__ import annotations
 
 import base64
+import json
 import math
 import tempfile
 from pathlib import Path
@@ -43,6 +47,9 @@ MAX_FRAMES = 12  # per call — one contact sheet; `every_s` pages past it
 MIN_EVERY_S, MAX_EVERY_S = 0.1, 600.0
 DEFAULT_MAX_SIDE = 1280
 MIN_SIDE, MAX_SIDE = 320, 2048
+MAX_CROP_SIDE = 4096  # max_side may go this high for a crop (a native-pixel strip of a 4K master)
+VISION_SAFE_SIDE = 1568  # many vision models downscale an image whose long side is larger
+MIN_CROP = 16  # px per side — smaller is a typo, not a region anyone can read
 AROUND_OFFSET_S = 0.3  # how far either side of `around` the two frames are taken
 JPEG_QUALITIES = (3, 6, 10, 16)  # ffmpeg -q:v (lower = better)
 
@@ -63,6 +70,18 @@ def _named_by_this_campaign(campaign_id: int, resolved: Path) -> dict[str, Any] 
     return None
 
 
+def not_in_campaign(asset_id: int, campaign_id: int, asset: dict[str, Any] | None = None) -> str:
+    """'no asset #N in campaign C' — naming the campaign that DOES hold it, when one does."""
+    msg = f"no asset #{asset_id} in campaign {campaign_id}"
+    if asset is None:
+        asset = store.get_asset(asset_id)
+    if asset is not None and asset.get("campaign_id") != int(campaign_id):
+        owner = store.get_campaign(asset["campaign_id"])
+        name = f" ({owner['name']})" if owner else ""
+        return f"{msg} — it's in campaign {asset['campaign_id']}{name}; pass campaign_id={asset['campaign_id']}"
+    return f"{msg} — campaign_assets lists them"
+
+
 def resolve(campaign_id: int, asset_id: int = 0, path: str = "") -> tuple[Path, dict[str, Any] | None]:
     """The file to look at — an asset of THIS campaign, or a path inside its media dir.
 
@@ -77,7 +96,7 @@ def resolve(campaign_id: int, asset_id: int = 0, path: str = "") -> tuple[Path, 
     if asset_id:
         asset = store.get_asset(asset_id)
         if asset is None or asset["campaign_id"] != int(campaign_id):
-            raise LookError(f"no asset #{asset_id} in campaign {campaign_id} — campaign_assets lists them")
+            raise LookError(not_in_campaign(asset_id, campaign_id, asset))
         if not asset.get("path"):
             raise LookError(f"asset #{asset_id} ({asset['kind']}, {asset['status']}) has no file yet")
         raw = asset["path"]
@@ -104,8 +123,62 @@ def resolve(campaign_id: int, asset_id: int = 0, path: str = "") -> tuple[Path, 
     return p, asset
 
 
-def _scale(max_w: int, max_h: int) -> str:
-    return f"scale='min({max_w},iw)':'min({max_h},ih)':force_original_aspect_ratio=decrease"
+def _scale(max_w: int, max_h: int, crop: dict[str, int] | None = None) -> str:
+    scale = f"scale='min({max_w},iw)':'min({max_h},ih)':force_original_aspect_ratio=decrease"
+    if crop:
+        # exact=1: never round an odd size/offset to the chroma grid — the caption states these
+        return f"crop={crop['width']}:{crop['height']}:{crop['x']}:{crop['y']}:exact=1,{scale}"
+    return scale
+
+
+def parse_crop(value: Any) -> dict[str, int] | None:
+    """``{x, y, width, height}`` in source pixels (a mapping, or JSON text of one) — or None."""
+    if value in (None, "", {}):
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            raise LookError("crop must be {x, y, width, height} in source pixels (JSON)") from None
+    if not isinstance(value, dict):
+        raise LookError("crop must be {x, y, width, height} in source pixels")
+    try:
+        crop = {k: int(value[k]) for k in ("x", "y", "width", "height")}
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise LookError("crop needs integer x, y, width, height (source pixels)") from None
+    if crop["x"] < 0 or crop["y"] < 0 or crop["width"] < MIN_CROP or crop["height"] < MIN_CROP:
+        raise LookError(f"crop must have x, y ≥ 0 and width, height ≥ {MIN_CROP}px")
+    return crop
+
+
+def _fit_crop(crop: dict[str, int], width: int, height: int) -> None:
+    """Refuse a crop that isn't wholly inside a ``width``×``height`` frame."""
+    if not width or not height:
+        raise LookError("couldn't read this file's dimensions, so a crop can't be checked against them")
+    if crop["x"] + crop["width"] > width or crop["y"] + crop["height"] > height:
+        raise LookError(
+            f"crop x={crop['x']} y={crop['y']} {crop['width']}×{crop['height']} falls outside the "
+            f"{width}×{height} frame — x + width must be ≤ {width} and y + height ≤ {height}"
+        )
+
+
+def _crop_where(crop: dict[str, int]) -> str:
+    return f"crop {crop['width']}×{crop['height']} at x={crop['x']} y={crop['y']} (source pixels)"
+
+
+def _crop_note(crop: dict[str, int], max_side: int) -> str:
+    long_side = max(crop["width"], crop["height"])
+    where = _crop_where(crop)
+    if long_side <= max_side:
+        warn = (
+            f"; a model may shrink images over ~{VISION_SAFE_SIDE} px — crop smaller"
+            if long_side > VISION_SAFE_SIDE
+            else ""
+        )
+        return f"{where} — shown at 100 % (1:1 source pixels){warn}"
+    pct = max_side * 100 / long_side
+    fix = f"pass max_side={long_side} or crop smaller" if long_side <= MAX_CROP_SIDE else "crop smaller"
+    return f"{where} — downscaled to {pct:.0f} %: {fix} for 100 %"
 
 
 def _encode(runner, ff: str, src_args: list[str], vf: str, out: Path) -> bytes:
@@ -122,11 +195,13 @@ def _encode(runner, ff: str, src_args: list[str], vf: str, out: Path) -> bytes:
         data = out.read_bytes()
         if len(data) <= MAX_IMAGE_BYTES:
             return data
-    raise LookError(f"{out.name} stays over {MAX_IMAGE_BYTES} bytes even at low quality — lower max_side")
+    raise LookError(
+        f"{out.name} stays over {MAX_IMAGE_BYTES} bytes even at low quality — lower max_side or crop a smaller region"
+    )
 
 
-def _frame(runner, ff: str, src: Path, t: float, max_w: int, max_h: int, out: Path) -> bytes:
-    return _encode(runner, ff, ["-ss", f"{t:.3f}", "-i", str(src)], _scale(max_w, max_h), out)
+def _frame(runner, ff: str, src: Path, t: float, max_w: int, max_h: int, out: Path, crop=None) -> bytes:
+    return _encode(runner, ff, ["-ss", f"{t:.3f}", "-i", str(src)], _scale(max_w, max_h, crop), out)
 
 
 def frame_times(duration: float, n: int) -> list[float]:
@@ -148,25 +223,35 @@ def view(
     *,
     frames: int = 3,
     around: str = "",
-    max_side: int = DEFAULT_MAX_SIDE,
+    max_side: int = 0,
     every_s: float = 0,
     start: Any = "",
     end: Any = "",
+    crop: Any = None,
     runner=None,
 ) -> dict[str, Any]:
-    """Build the images. Returns ``{"text": caption, "images": [{"b64", "mime", "label"}]}``."""
+    """Build the images. Returns ``{"text": caption, "images": [{"b64", "mime", "label"}]}``.
+
+    ``max_side`` 0 means the default: :data:`DEFAULT_MAX_SIDE`, or — with a ``crop`` — the
+    crop's own long side (100 %), up to :data:`MAX_CROP_SIDE`."""
     runner = runner or render._default_runner
     src, asset = resolve(campaign_id, asset_id, path)
     try:
-        max_side = int(max_side)
+        max_side = int(max_side or 0)
         frames = int(frames)
         every_s = float(every_s or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise LookError("frames and max_side must be integers, every_s a number of seconds") from None
+    crop = parse_crop(crop)
     if every_s and not MIN_EVERY_S <= every_s <= MAX_EVERY_S:
         raise LookError(f"every_s must be {MIN_EVERY_S:g}..{MAX_EVERY_S:g} seconds")
-    if not MIN_SIDE <= max_side <= MAX_SIDE:
-        raise LookError(f"max_side must be {MIN_SIDE}..{MAX_SIDE}")
+    auto_side = not max_side
+    if auto_side:
+        max_side = min(max(crop["width"], crop["height"]), MAX_CROP_SIDE) if crop else DEFAULT_MAX_SIDE
+        max_side = max(max_side, MIN_SIDE)
+    top = MAX_CROP_SIDE if crop else MAX_SIDE
+    if not MIN_SIDE <= max_side <= top:
+        raise LookError(f"max_side must be {MIN_SIDE}..{top}" + ("" if crop else f" ({MAX_CROP_SIDE} with a crop)"))
     if not 0 <= frames <= MAX_FRAMES:
         raise LookError(f"frames must be 0..{MAX_FRAMES} (4+ come back as one contact sheet)")
     ff = deps.ffmpeg()
@@ -178,10 +263,26 @@ def view(
     if is_still:
         if around or every_s or start not in (None, "") or end not in (None, ""):
             raise LookError("`around`, `every_s`, `start` and `end` are for clips — a still is a single frame")
+        if crop:
+            if not ff:
+                raise LookError("a crop needs ffmpeg — " + deps.ffmpeg_hint())
+            try:
+                info = render.probe(src, runner)
+            except render.RenderError as e:
+                raise LookError(str(e)) from None
+            _fit_crop(crop, int(info.get("width") or 0), int(info.get("height") or 0))
+            head.append(f"{info.get('width')}×{info.get('height')}")
+            head.append(_crop_note(crop, max_side))
         if ff:
             with tempfile.TemporaryDirectory(prefix="campaign-look-") as td:
-                data = _encode(runner, ff, ["-i", str(src)], _scale(max_side, max_side), Path(td) / "still.jpg")
-            images.append({"b64": base64.b64encode(data).decode(), "mime": "image/jpeg", "label": "still"})
+                data = _encode(runner, ff, ["-i", str(src)], _scale(max_side, max_side, crop), Path(td) / "still.jpg")
+            images.append(
+                {
+                    "b64": base64.b64encode(data).decode(),
+                    "mime": "image/jpeg",
+                    "label": "still (crop)" if crop else "still",
+                }
+            )
         else:
             raw = src.read_bytes()
             mime = {".png": "image/png", ".webp": "image/webp"}.get(src.suffix.lower(), "image/jpeg")
@@ -203,12 +304,25 @@ def view(
         raise LookError(str(e)) from None
     dur = float(info.get("duration_s") or 0)
     head.append(f"{info.get('width')}×{info.get('height')}, {dur:.2f}s")
+    if crop:
+        _fit_crop(crop, int(info.get("width") or 0), int(info.get("height") or 0))
     marks = ((asset or {}).get("meta") or {}).get("marks") or {}
     if marks:
         head.append("marks: " + ", ".join(f"{k}={v:.2f}s" for k, v in marks.items()))
     times, page_note = _span_times(start, end, every_s, frames, marks, dur, asset)
     if page_note:
         head.append(page_note)
+    n = len(times)
+    one_each = n == 1 or (not around and n <= MAX_IMAGES)
+    sheet = bool(n) and not one_each
+    if crop:
+        if sheet and not around:
+            head.append(
+                _crop_where(crop) + " — contact-sheet cells are downscaled, NOT 100 %: ask for 1–3 frames "
+                "or around= for a 1:1 look"
+            )
+        else:
+            head.append(_crop_note(crop, max_side) + (" (the contact sheet's cells are downscaled)" if sheet else ""))
 
     with tempfile.TemporaryDirectory(prefix="campaign-look-") as td:
         tmp = Path(td)
@@ -217,7 +331,7 @@ def view(
             if t is None or t > dur + 0.05:
                 raise LookError(f"around={around!r} is past the end of this {dur:.2f}s file")
             for side, at in (("before", _clamp(t - AROUND_OFFSET_S, dur)), ("after", _clamp(t + AROUND_OFFSET_S, dur))):
-                data = _frame(runner, ff, src, at, max_side, max_side, tmp / f"{side}.jpg")
+                data = _frame(runner, ff, src, at, max_side, max_side, tmp / f"{side}.jpg", crop)
                 images.append(
                     {
                         "b64": base64.b64encode(data).decode(),
@@ -225,21 +339,20 @@ def view(
                         "label": f"{side} {around} @ {at:.2f}s",
                     }
                 )
-        room = MAX_IMAGES - len(images)
-        n = len(times)
-        one_each = n == 1 or (not around and n <= room)
         if n and one_each:
             for i, at in enumerate(times, start=1):
-                data = _frame(runner, ff, src, at, max_side, max_side, tmp / f"f{i:03d}.jpg")
+                data = _frame(runner, ff, src, at, max_side, max_side, tmp / f"f{i:03d}.jpg", crop)
                 images.append(
                     {"b64": base64.b64encode(data).decode(), "mime": "image/jpeg", "label": f"frame @ {at:.2f}s"}
                 )
         elif n:
             cols = min(n, 4 if n > 9 else 3)
             rows = math.ceil(n / cols)
-            cell_w, cell_h = max(64, (max_side - 4 * (cols - 1)) // cols), max(64, (max_side - 4 * (rows - 1)) // rows)
+            # A sheet is an overview: never 4K wide, and never shrunk to a small crop's own size.
+            side = min(max(max_side, DEFAULT_MAX_SIDE) if auto_side else max_side, MAX_SIDE)
+            cell_w, cell_h = max(64, (side - 4 * (cols - 1)) // cols), max(64, (side - 4 * (rows - 1)) // rows)
             for i, at in enumerate(times, start=1):
-                _frame(runner, ff, src, at, cell_w, cell_h, tmp / f"cell{i:03d}.jpg")
+                _frame(runner, ff, src, at, cell_w, cell_h, tmp / f"cell{i:03d}.jpg", crop)
             data = _encode(
                 runner,
                 ff,
@@ -251,8 +364,8 @@ def view(
                 {
                     "b64": base64.b64encode(data).decode(),
                     "mime": "image/jpeg",
-                    "label": f"contact sheet {cols}×{rows}, left→right, top→bottom @ "
-                    + ", ".join(f"{t:.2f}s" for t in times),
+                    "label": f"contact sheet {cols}×{rows}{' of the crop (cells downscaled)' if crop else ''}, "
+                    "left→right, top→bottom @ " + ", ".join(f"{t:.2f}s" for t in times),
                 }
             )
     return {"text": "\n".join(head), "images": images}

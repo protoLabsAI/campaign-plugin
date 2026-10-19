@@ -465,3 +465,91 @@ def test_shoot_overrides_fix_one_step_and_save_it(tools, browser_ok, ffmpeg_ok):
     assert "unknown option `clik`" in out and "nothing was recorded" in out
     out = call(tools, "campaign_shoot", campaign_id=1, script_id=1, overrides={3: {"hold": {"ms": 999999}}})
     assert "step 3 (hold)" in out and "is outside 0..60000" in out
+
+
+# ── #44: notes and meta an agent wrote can be read back ──────────────────────────────────────
+def test_notes_and_meta_read_back_through_campaign_asset(tools):
+    call(tools, "campaign_create", name="F1")
+    call(tools, "campaign_create", name="Strips")
+    call(tools, "campaign_lane", campaign_id=1, name="authors", pitch="one click")
+    take = store.add_asset(
+        1, "clip", "take", status="captured", lane_id=1, meta={"marks": {"start": 1.0, "caption_a": 10.5, "odd": "x"}}
+    )
+    master = store.add_asset(
+        1,
+        "clip",
+        "F1 master",
+        status="rendered",
+        parent_id=take["id"],
+        meta={"spec": {"name": "master", "width": 2560}, "warnings": ["steep ramp at 4s"], "take_dir": "/x"},
+    )
+    strip = store.add_asset(2, "still", "caption strip", status="captured", parent_id=master["id"])
+    long_note = "Caption starts in master: A ~10.5s, B ~21-24s … F ~182.2s. " + "x" * 300
+    assert "Updated" in call(tools, "campaign_asset_update", asset_id=master["id"], notes=long_note)
+
+    out = call(tools, "campaign_asset", asset_id=master["id"])
+    assert long_note in out, "the full note, never truncated"
+    assert "- campaign: #1 F1" in out
+    assert f"- made from: #{take['id']}" in out
+    assert f"- made from it: #{strip['id']} still (in campaign 2)" in out
+    assert '"width": 2560' in out and "steep ramp at 4s" in out and '"take_dir": "/x"' in out
+    out = call(tools, "campaign_asset", asset_id=take["id"])
+    assert "## Marks" in out and "- caption_a: 10.50s" in out and "- odd: x" in out and "(none)" in out
+    assert "- lane: authors" in out
+
+    # The listing stays short: a one-line preview only with notes=true.
+    listing = call(tools, "campaign_assets", campaign_id=1)
+    assert "Notes:" not in listing
+    listing = call(tools, "campaign_assets", campaign_id=1, notes=True)
+    line = next(ln for ln in listing.splitlines() if ln.strip().startswith("Notes:"))
+    assert "Caption starts in master: A ~10.5s" in line and line.endswith("…") and len(line.strip()) < 200
+
+    # The wrong campaign names the owner; a missing id says so.
+    out = call(tools, "campaign_asset", asset_id=strip["id"], campaign_id=1)
+    assert out.startswith(f"No asset #{strip['id']} in campaign 1 — it's in campaign 2 (Strips)")
+    assert "campaign: #2 Strips" in call(tools, "campaign_asset", asset_id=strip["id"], campaign_id=2)
+    assert call(tools, "campaign_asset", asset_id=999) == "No asset with id 999."
+
+
+def test_the_operators_review_note_shows_in_the_listing(tools):
+    call(tools, "campaign_create", name="F1")
+    a = store.add_asset(1, "still", "hero", status="ready_for_review")
+    store.review(a["id"], "reject", "the toast covers the title")
+    assert "Review: the toast covers the title" in call(tools, "campaign_assets", campaign_id=1)
+    assert "## Review note\nthe toast covers the title" in call(tools, "campaign_asset", asset_id=a["id"])
+
+
+def test_a_parent_that_is_gone_is_said_plainly(tools):
+    call(tools, "campaign_create", name="F1")
+    a = store.add_asset(
+        1, "clip", "orphan", status="rendered", parent_id=4242, meta={"blob": "y" * 5000, "warnings": "one string"}
+    )
+    out = call(tools, "campaign_asset", asset_id=a["id"])
+    assert "- made from: #4242 (no longer exists)" in out and "## Warnings\n- one string" in out
+    assert "more chars)" in out and len(out) < 5000, "a huge meta is capped"
+
+
+def test_filling_another_campaigns_asset_names_its_campaign(tools, browser_ok, ffmpeg_ok):
+    call(tools, "campaign_create", name="One")
+    call(tools, "campaign_create", name="Two")
+    call(tools, "campaign_asset_add", campaign_id=1, kind="card", title="one's card")
+    out = call(tools, "campaign_card", campaign_id=2, template="og-1280x640", data={"title": "x"}, asset_id=1)
+    assert "no asset #1 in campaign 2 — it's in campaign 1 (One); pass campaign_id=1" in out
+
+
+# ── #42: the producer can open the skills its prompt cites ────────────────────────────────────
+def test_the_producer_can_load_every_skill_its_prompt_names():
+    import re
+
+    from campaign import subagents
+
+    assert {"load_skill", "list_skills", "campaign_asset"} <= set(subagents.PRODUCER_TOOLS)
+    skills_dir = Path(campaign.__file__).parent / "skills"
+    have = {p.name for p in skills_dir.iterdir() if (p / "SKILL.md").is_file()}
+    cited = set(re.findall(r"load_skill\('([a-z0-9-]+)'\)", subagents.PRODUCER_PROMPT))
+    cited |= set(re.findall(r"\b([a-z]+(?:-[a-z]+)+)\b(?= \(step| when)", subagents.PRODUCER_PROMPT))
+    assert {"shot-scripting", "asset-review", "montage-editing", "produce-walkthrough-video"} <= cited
+    assert cited <= have, f"the prompt cites skills that don't exist: {cited - have}"
+    # Every "<name> skill" mention in the prompt must be loadable too.
+    for name in re.findall(r"\b([a-z]+(?:-[a-z]+)+) skill\b", subagents.PRODUCER_PROMPT):
+        assert name in have
