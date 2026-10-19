@@ -30,6 +30,7 @@ TOOLS = {
     "campaign_asset_add",
     "campaign_asset_update",
     "campaign_assets",
+    "campaign_asset",
     "campaign_milestone",
     "campaign_decision",
     "campaign_status",

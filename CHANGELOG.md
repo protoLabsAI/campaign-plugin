@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.7.0
+
+- **The producer can open the skills its prompt cites** (#42). `campaign_producer`'s prompt told
+  it to follow the shot-scripting, asset-review and montage-editing skills, but core binds a
+  subagent only the tools it names, and `load_skill` wasn't one of them. It now has `load_skill`
+  and `list_skills`, and the prompt says to `load_skill('<name>')` at the step that names each
+  skill. A test checks that every skill the prompt cites exists under `skills/`.
+- **`campaign_view` takes a `crop`** (#43). `crop={x, y, width, height}` in source pixels (the
+  shape `campaign_render` already takes) cuts out a region before any scaling, so a caption bar
+  or a corner badge of a 2560×1440 or 3840×2160 master comes back at 1:1 pixels. With a crop,
+  `max_side` defaults to the crop's long side and may go up to 4096; the reply says whether the
+  image is shown at 100 % or how far it was scaled. A crop outside the frame is refused with the
+  frame's size. Contact sheets of a crop stay bounded at 2048 px. The asset-review skill now
+  asks for a 100 % crop of the smallest text.
+- **Asset notes and metadata can be read back** (#44). New `campaign_asset(asset_id)` prints one
+  asset in full: notes and the operator's review note (untruncated), the asset it was made from
+  and the ones made from it (in any campaign), marks, render spec, warnings and the rest of its
+  metadata (capped). The producer has it. `campaign_assets` now shows the review note the
+  asset-review skill already pointed to, and `notes=true` adds a one-line preview of each
+  asset's notes.
+- **The wrong-campaign error names the campaign that holds the asset.** `campaign_view`,
+  `campaign_shoot`, `campaign_card` and `campaign_asset` now say "no asset #865 in campaign 2 —
+  it's in campaign 1 (Name); pass campaign_id=1" instead of only "no asset #865 in campaign 2".
+
 ## 0.6.4
 
 - **`campaign_view` can look at an asset that was moved in from another campaign.** Moving assets

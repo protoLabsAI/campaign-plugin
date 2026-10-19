@@ -367,3 +367,134 @@ def test_a_move_doesnt_open_the_old_campaigns_other_files_or_anything_outside(to
         (ddir / "peek.png").symlink_to(other_f)
         assert "not a file inside" in view(tools, campaign_id=dest["id"], path="peek.png")
     assert len(core.calls) == 0
+
+
+# ── #43: crop — a region of a >2048 px master at 1:1 source pixels ─────────────────────────────
+@pytest.fixture
+def fake_ff(monkeypatch):
+    from campaign import render
+    from test_render import FakeFF
+
+    ff = FakeFF(probe={"width": 2560, "height": 1440, "duration": "12.0"})
+    monkeypatch.setattr(deps, "ffmpeg", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(deps, "ffprobe", lambda: "/usr/bin/ffprobe")
+    monkeypatch.setattr(render, "_default_runner", ff)
+    return ff
+
+
+def _vfs(ff) -> list[str]:
+    return [cmd[cmd.index("-vf") + 1] for cmd in ff.cmds if "-vf" in cmd]
+
+
+def test_a_crop_of_a_clip_comes_back_at_native_pixels(tools, core, camp, fake_ff):
+    c, root = camp
+    (root / "master.mp4").write_bytes(b"\0")
+    a = store.add_asset(c["id"], "clip", "master", status="rendered", path=str(root / "master.mp4"))
+    strip = {"x": 0, "y": 1240, "width": 2560, "height": 200}
+    out = view(tools, campaign_id=c["id"], asset_id=a["id"], frames=0, around="10.5", crop=strip)
+    assert out.startswith("\x1e[multimodal-tool-v1]")
+    text, imgs = core.calls[-1]
+    assert len(imgs) == 2
+    assert "crop 2560×200 at x=0 y=1240 (source pixels) — shown at 100 % (1:1 source pixels)" in text
+    # Cropped FIRST, then bounded by the crop's own long side — i.e. not scaled at all.
+    assert (
+        _vfs(fake_ff)
+        == ["crop=2560:200:0:1240,scale='min(2560,iw)':'min(2560,ih)':force_original_aspect_ratio=decrease"] * 2
+    )
+    # JSON text works too (the tool may get a string), and an explicit max_side shows the scale.
+    fake_ff.cmds.clear()
+    view(tools, campaign_id=c["id"], asset_id=a["id"], frames=1, crop=json.dumps(strip), max_side=1280)
+    assert "downscaled to 50 %: pass max_side=2560 or crop smaller" in core.calls[-1][0]
+    assert _vfs(fake_ff)[0].startswith("crop=2560:200:0:1240,scale='min(1280,iw)'")
+
+
+def test_a_crop_on_a_contact_sheet_keeps_the_sheet_bounded(tools, core, camp, fake_ff):
+    c, root = camp
+    (root / "master.mp4").write_bytes(b"\0")
+    view(tools, campaign_id=c["id"], path="master.mp4", every_s=1, crop={"x": 0, "y": 0, "width": 2400, "height": 400})
+    text, imgs = core.calls[-1]
+    assert len(imgs) == 1 and "of the crop (cells downscaled)" in text
+    cells = [v for v in _vfs(fake_ff) if v.startswith("crop=")]
+    assert len(cells) == 12 and all(v.startswith("crop=2400:400:0:0,") for v in cells)
+    assert "scale='min(509,iw)'" in cells[0], "cells are sized from a ≤2048 sheet, not the 2400 px crop"
+
+
+def test_a_crop_of_a_still_is_checked_against_its_dimensions(tools, core, camp, fake_ff):
+    c, root = camp
+    (root / "card.png").write_bytes(_png(8, 8))
+    view(tools, campaign_id=c["id"], path="card.png", crop={"x": 2000, "y": 1300, "width": 560, "height": 140})
+    text, imgs = core.calls[-1]
+    assert "2560×1440" in text and "shown at 100 %" in text and "image 1: still (crop)" in text
+    assert _vfs(fake_ff)[-1].startswith("crop=560:140:2000:1300,scale='min(560,iw)'")
+
+
+def test_bad_crops_are_refused_clearly(tools, core, camp, fake_ff, monkeypatch):
+    c, root = camp
+    (root / "master.mp4").write_bytes(b"\0")
+    (root / "s.png").write_bytes(_png(8, 8))
+
+    def v(**kw):
+        return view(tools, campaign_id=c["id"], path="master.mp4", frames=1, **kw)
+
+    out = v(crop={"x": 100, "y": 1300, "width": 2560, "height": 200})
+    assert "falls outside the 2560×1440 frame" in out and "x + width must be ≤ 2560" in out
+    assert "falls outside" in view(
+        tools, campaign_id=c["id"], path="s.png", crop={"x": 0, "y": 1400, "width": 100, "height": 100}
+    )
+    assert "crop needs integer x, y, width, height" in v(crop={"x": 0, "y": 0, "width": 10})
+    assert "crop needs integer" in v(crop={"x": "a", "y": 0, "width": 100, "height": 100})
+    assert "x, y ≥ 0 and width, height ≥ 16px" in v(crop={"x": -1, "y": 0, "width": 100, "height": 100})
+    assert "x, y ≥ 0 and width, height ≥ 16px" in v(crop={"x": 0, "y": 0, "width": 4, "height": 100})
+    assert "crop must be {x, y, width, height}" in v(crop="not json")
+    assert "crop must be {x, y, width, height}" in v(crop="[1, 2]")
+    # max_side above 2048 only with a crop (and never above 4096).
+    assert "max_side must be 320..2048 (4096 with a crop)" in v(max_side=2560)
+    assert "max_side must be 320..4096" in v(max_side=5000, crop={"x": 0, "y": 0, "width": 100, "height": 100})
+    # A crop of a still needs ffmpeg — there's no way to cut one without it.
+    monkeypatch.setattr(deps, "ffmpeg", lambda: None)
+    assert "a crop needs ffmpeg" in view(
+        tools, campaign_id=c["id"], path="s.png", crop={"x": 0, "y": 0, "width": 100, "height": 100}
+    )
+    assert core.calls == []
+
+
+def test_a_small_crop_is_never_upscaled_past_min_side(camp, fake_ff):
+    c, root = camp
+    (root / "s.png").write_bytes(_png(8, 8))
+    res = look.view(c["id"], path="s.png", crop={"x": 0, "y": 0, "width": 100, "height": 40})
+    assert "shown at 100 %" in res["text"]
+    assert _vfs(fake_ff)[-1].startswith("crop=100:40:0:0,scale='min(320,iw)'"), "min() never upscales"
+
+
+# ── #44: the wrong-campaign error names the campaign that owns the asset ───────────────────────
+def test_the_wrong_campaign_error_names_the_owner(tools, core, camp, monkeypatch):
+    monkeypatch.setattr(deps, "ffmpeg", lambda: None)
+    c, root = camp
+    other = store.create_campaign("Caption strips")
+    odir = paths.campaign_dir(other["id"], other["name"])
+    (odir / "o.png").write_bytes(_png(8, 8))
+    oa = store.add_asset(other["id"], "still", "strip", status="captured", path=str(odir / "o.png"))
+    out = view(tools, campaign_id=c["id"], asset_id=oa["id"])
+    assert (
+        f"no asset #{oa['id']} in campaign {c['id']} — it's in campaign {other['id']} (Caption strips); "
+        f"pass campaign_id={other['id']}"
+    ) in out
+    assert "campaign_assets lists them" in look.not_in_campaign(9999, c["id"])
+    assert core.calls == []
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_ffmpeg(), reason="ffmpeg not installed")
+def test_real_crop_of_a_2560_master_is_native_size(tools, core, camp, tmp_path):
+    c, root = camp
+    still = root / "master.png"
+    _ffmpeg("-f", "lavfi", "-i", "testsrc2=size=2560x1440", "-frames:v", "1", str(still))
+    view(tools, campaign_id=c["id"], path="master.png", crop={"x": 0, "y": 1240, "width": 1280, "height": 200})
+    assert _dims(base64.b64decode(core.calls[-1][1][0]["b64"]), tmp_path) == (1280, 200)
+    clip = root / "master.mp4"
+    _ffmpeg("-f", "lavfi", "-i", "testsrc2=size=2560x1440:rate=10:duration=2", "-pix_fmt", "yuv420p", str(clip))
+    view(
+        tools, campaign_id=c["id"], path="master.mp4", frames=1, crop={"x": 0, "y": 1240, "width": 2560, "height": 200}
+    )
+    text, imgs = core.calls[-1]
+    assert "shown at 100 %" in text and _dims(base64.b64decode(imgs[0]["b64"]), tmp_path) == (2560, 200)

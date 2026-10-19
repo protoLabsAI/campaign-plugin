@@ -82,7 +82,7 @@ def _own_asset(campaign_id: int, asset_id: int) -> dict[str, Any]:
     """The asset ``asset_id`` — which must belong to ``campaign_id`` and not be approved."""
     a = store.get_asset(asset_id)
     if a is None or a["campaign_id"] != int(campaign_id):
-        raise ValueError(f"no asset #{asset_id} in campaign {campaign_id} — campaign_assets lists them")
+        raise ValueError(look.not_in_campaign(asset_id, campaign_id, a))
     if a["status"] == "approved":
         raise ValueError(f"asset #{asset_id} is approved — leave asset_id off to register the new file as a new asset")
     return a
@@ -210,7 +210,16 @@ def _keep_failed_take(
     return text, take["id"], still_ids
 
 
-def _asset_line(a: dict[str, Any]) -> str:
+def _clip(text: str, n: int) -> str:
+    one = " ".join(str(text or "").split())
+    return one if len(one) <= n else one[: n - 1].rstrip() + "…"
+
+
+NOTE_PREVIEW = 160  # chars of notes per row in campaign_assets(notes=true)
+META_DETAIL_CAP = 4000  # chars of the remaining meta JSON campaign_asset prints
+
+
+def _asset_line(a: dict[str, Any], notes: bool = False) -> str:
     dims = f" {a['width']}×{a['height']}" if a.get("width") else ""
     dur = f" {a['duration_s']:.1f}s" if a.get("duration_s") else ""
     size = f" {limits.human_bytes(a['size_bytes'])}" if a.get("size_bytes") else ""
@@ -220,10 +229,73 @@ def _asset_line(a: dict[str, Any]) -> str:
     if a.get("status") == "superseded":
         by = a.get("superseded_by") or []
         sup = " → replaced by " + ", ".join(f"#{i}" for i in by) if by else ""
+    extra = ""
+    if a.get("review_note"):
+        extra += f"\n    Review: {_clip(a['review_note'], NOTE_PREVIEW)}"
+    if notes and a.get("notes"):
+        extra += f"\n    Notes: {_clip(a['notes'], NOTE_PREVIEW)}"
     return (
         f"- #{a['id']} [{a['status']}] {a['kind']} — {a['title'] or '(untitled)'} (owner: {a['owner']})"
-        f"{sup}{dims}{dur}{size}{lim}{path}"
+        f"{sup}{dims}{dur}{size}{lim}{path}{extra}"
     )
+
+
+def asset_detail(a: dict[str, Any]) -> str:
+    """One asset in full — notes, review note, family, and the meta (marks, render spec) an agent
+    recorded — so a re-cut or a background producer can pick up where the last run stopped."""
+    c = store.get_campaign(a["campaign_id"])
+    out = [_asset_line(a), f"- campaign: #{a['campaign_id']}" + (f" {c['name']}" if c else "")]
+    if a.get("lane_id"):
+        ln = store.lane_by_id(a["campaign_id"], a["lane_id"])
+        out.append(f"- lane: {ln['name'] if ln else a['lane_id']}")
+    if a.get("spec"):
+        out.append(f"- spec: {a['spec']}")
+    if a.get("parent_id"):
+        parent = store.get_asset(a["parent_id"])
+        where = (
+            f" (in campaign {parent['campaign_id']})" if parent and parent["campaign_id"] != a["campaign_id"] else ""
+        )
+        out.append(f"- made from: #{a['parent_id']}{where}" + ("" if parent else " (no longer exists)"))
+    kids = store.children(a["id"])
+    if kids:
+        out.append(
+            "- made from it: "
+            + ", ".join(
+                f"#{k['id']} {k['kind']}"
+                + (f" (in campaign {k['campaign_id']})" if k["campaign_id"] != a["campaign_id"] else "")
+                for k in kids
+            )
+        )
+    if a.get("script_id"):
+        out.append(f"- shot script: #{a['script_id']} (campaign_script_get)")
+    if a.get("reviewed_at"):
+        out.append(f"- reviewed: {a['reviewed_at']}")
+    out.append("\n## Notes\n" + (a.get("notes") or "(none)"))
+    if a.get("review_note"):
+        out.append("\n## Review note\n" + a["review_note"])
+    meta = dict(a.get("meta") or {})
+    marks = meta.pop("marks", None) or {}
+    if marks:
+        out.append("\n## Marks (seconds in the recorded take)")
+        for k, v in marks.items():
+            try:
+                out.append(f"- {k}: {float(v):.2f}s")
+            except (TypeError, ValueError):
+                out.append(f"- {k}: {v}")
+    spec = meta.pop("spec", None)
+    if spec:
+        out.append("\n## Render spec\n" + json.dumps(spec, ensure_ascii=False, default=str))
+    for key, label in (("warnings", "Warnings"), ("violations", "Limit violations")):
+        items = meta.pop(key, None)
+        if items:
+            out.append(f"\n## {label}")
+            out += [f"- {i}" for i in (items if isinstance(items, list) else [items])]
+    if meta:
+        rest = json.dumps(meta, ensure_ascii=False, default=str, sort_keys=True)
+        if len(rest) > META_DETAIL_CAP:
+            rest = rest[:META_DETAIL_CAP] + f"… ({len(rest) - META_DETAIL_CAP} more chars)"
+        out.append("\n## Other meta\n" + rest)
+    return "\n".join(out)
 
 
 def campaign_brief(campaign_id: int) -> str:
@@ -565,11 +637,18 @@ def build_tools(registry):
 
     @tool
     def campaign_assets(
-        campaign_id: int, status: str = "", lane: str = "", kind: str = "", include_superseded: bool = False
+        campaign_id: int,
+        status: str = "",
+        lane: str = "",
+        kind: str = "",
+        include_superseded: bool = False,
+        notes: bool = False,
     ) -> str:
-        """List a campaign's assets with status, owner, size, dimensions, duration and file path,
-        optionally filtered by status, lane name, or kind. Superseded takes are left out unless
-        include_superseded is true or status='superseded'."""
+        """List a campaign's assets with status, owner, size, dimensions, duration, file path and
+        the operator's review note, optionally filtered by status, lane name, or kind. notes=true
+        adds a one-line preview of each asset's notes; campaign_asset(asset_id) shows one asset in
+        full (notes, marks, render spec). Superseded takes are left out unless include_superseded
+        is true or status='superseded'."""
         try:
             rows = store.list_assets(campaign_id, status=status, lane_id=_lane_id(campaign_id, lane), kind=kind)
         except ValueError as e:
@@ -578,10 +657,25 @@ def build_tools(registry):
         if not include_superseded and status != "superseded":
             hidden = sum(1 for a in rows if store.is_retired(a))
             rows = [a for a in rows if not store.is_retired(a)]
-        out = "\n".join(_asset_line(a) for a in rows) or "No assets match."
+        out = "\n".join(_asset_line(a, notes=bool(notes)) for a in rows) or "No assets match."
         if hidden:
             out += f"\n({hidden} superseded take(s) hidden — include_superseded=true lists them)"
         return out
+
+    @tool
+    def campaign_asset(asset_id: int, campaign_id: int = 0) -> str:
+        """Read ONE asset in full: its notes and the operator's review note (never truncated), the
+        asset it was made from and the ones made from it (in any campaign), its marks, its render
+        spec, warnings, and the rest of its recorded metadata. Use it to recover what an earlier
+        run wrote down (caption timing, a ramp recipe) before a re-cut. Pass campaign_id to check
+        the asset belongs to that campaign — when it doesn't, the reply names the one it's in."""
+        a = store.get_asset(asset_id)
+        if a is None:
+            return f"No asset with id {asset_id}."
+        if campaign_id and a["campaign_id"] != int(campaign_id):
+            msg = look.not_in_campaign(asset_id, campaign_id, a)
+            return msg[0].upper() + msg[1:]
+        return asset_detail(a)
 
     @tool
     def campaign_milestone(
@@ -769,14 +863,21 @@ def build_tools(registry):
         path: str = "",
         frames: int = 3,
         around: str = "",
-        max_side: int = 1280,
+        max_side: int = 0,
         every_s: float = 0,
         start: str | float = "",
         end: str | float = "",
+        crop: dict | str = "",
     ) -> str:
         """LOOK at a campaign file yourself — the image comes back to you as a picture, not a
         path. Pass asset_id (from campaign_assets) or a path inside the campaign's media dir.
-        A still, card or poster comes back downscaled (long side <= max_side, 320-2048). A clip
+        A still, card or poster comes back downscaled (long side <= max_side, 320-2048, default
+        1280). crop={x, y, width, height} in SOURCE pixels (the shape campaign_render takes)
+        cuts out that region first, so it comes back at 100 % — with a crop, max_side defaults to
+        the crop's long side and may go to 4096; the reply says the scale shown. That is how the
+        smallest text of a 2560- or 3840-wide master is checked at full size (a caption strip, a
+        corner badge); keep a crop's long side to ~1500 px or less, since some vision models
+        shrink larger images. A crop must lie inside the frame. A clip
         or GIF comes back as `frames` evenly spaced frames (1-3: one image each at full size;
         4-12: one contact sheet), and around=<mark name or seconds> adds the frame just before
         and just after that moment — use it on every cut, speed-ramp boundary and mark.
@@ -799,6 +900,7 @@ def build_tools(registry):
                 every_s=every_s,
                 start=start,
                 end=end,
+                crop=crop,
             )
         except (look.LookError, render.RenderError, ValueError) as e:
             return f"Can't show it — {e}"
@@ -1574,6 +1676,7 @@ def build_tools(registry):
         campaign_asset_add,
         campaign_asset_update,
         campaign_assets,
+        campaign_asset,
         campaign_milestone,
         campaign_decision,
         campaign_status,
