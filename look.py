@@ -48,6 +48,7 @@ MIN_EVERY_S, MAX_EVERY_S = 0.1, 600.0
 DEFAULT_MAX_SIDE = 1280
 MIN_SIDE, MAX_SIDE = 320, 2048
 MAX_CROP_SIDE = 4096  # max_side may go this high for a crop (a native-pixel strip of a 4K master)
+VISION_SAFE_SIDE = 1568  # many vision models downscale an image whose long side is larger
 MIN_CROP = 16  # px per side — smaller is a typo, not a region anyone can read
 AROUND_OFFSET_S = 0.3  # how far either side of `around` the two frames are taken
 JPEG_QUALITIES = (3, 6, 10, 16)  # ffmpeg -q:v (lower = better)
@@ -125,7 +126,8 @@ def resolve(campaign_id: int, asset_id: int = 0, path: str = "") -> tuple[Path, 
 def _scale(max_w: int, max_h: int, crop: dict[str, int] | None = None) -> str:
     scale = f"scale='min({max_w},iw)':'min({max_h},ih)':force_original_aspect_ratio=decrease"
     if crop:
-        return f"crop={crop['width']}:{crop['height']}:{crop['x']}:{crop['y']},{scale}"
+        # exact=1: never round an odd size/offset to the chroma grid — the caption states these
+        return f"crop={crop['width']}:{crop['height']}:{crop['x']}:{crop['y']}:exact=1,{scale}"
     return scale
 
 
@@ -142,7 +144,7 @@ def parse_crop(value: Any) -> dict[str, int] | None:
         raise LookError("crop must be {x, y, width, height} in source pixels")
     try:
         crop = {k: int(value[k]) for k in ("x", "y", "width", "height")}
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         raise LookError("crop needs integer x, y, width, height (source pixels)") from None
     if crop["x"] < 0 or crop["y"] < 0 or crop["width"] < MIN_CROP or crop["height"] < MIN_CROP:
         raise LookError(f"crop must have x, y ≥ 0 and width, height ≥ {MIN_CROP}px")
@@ -160,11 +162,20 @@ def _fit_crop(crop: dict[str, int], width: int, height: int) -> None:
         )
 
 
+def _crop_where(crop: dict[str, int]) -> str:
+    return f"crop {crop['width']}×{crop['height']} at x={crop['x']} y={crop['y']} (source pixels)"
+
+
 def _crop_note(crop: dict[str, int], max_side: int) -> str:
     long_side = max(crop["width"], crop["height"])
-    where = f"crop {crop['width']}×{crop['height']} at x={crop['x']} y={crop['y']} (source pixels)"
+    where = _crop_where(crop)
     if long_side <= max_side:
-        return f"{where} — shown at 100 % (1:1 source pixels)"
+        warn = (
+            f"; a model may shrink images over ~{VISION_SAFE_SIDE} px — crop smaller"
+            if long_side > VISION_SAFE_SIDE
+            else ""
+        )
+        return f"{where} — shown at 100 % (1:1 source pixels){warn}"
     pct = max_side * 100 / long_side
     fix = f"pass max_side={long_side} or crop smaller" if long_side <= MAX_CROP_SIDE else "crop smaller"
     return f"{where} — downscaled to {pct:.0f} %: {fix} for 100 %"
@@ -184,7 +195,9 @@ def _encode(runner, ff: str, src_args: list[str], vf: str, out: Path) -> bytes:
         data = out.read_bytes()
         if len(data) <= MAX_IMAGE_BYTES:
             return data
-    raise LookError(f"{out.name} stays over {MAX_IMAGE_BYTES} bytes even at low quality — lower max_side")
+    raise LookError(
+        f"{out.name} stays over {MAX_IMAGE_BYTES} bytes even at low quality — lower max_side or crop a smaller region"
+    )
 
 
 def _frame(runner, ff: str, src: Path, t: float, max_w: int, max_h: int, out: Path, crop=None) -> bytes:
@@ -227,12 +240,13 @@ def view(
         max_side = int(max_side or 0)
         frames = int(frames)
         every_s = float(every_s or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise LookError("frames and max_side must be integers, every_s a number of seconds") from None
     crop = parse_crop(crop)
     if every_s and not MIN_EVERY_S <= every_s <= MAX_EVERY_S:
         raise LookError(f"every_s must be {MIN_EVERY_S:g}..{MAX_EVERY_S:g} seconds")
-    if not max_side:
+    auto_side = not max_side
+    if auto_side:
         max_side = min(max(crop["width"], crop["height"]), MAX_CROP_SIDE) if crop else DEFAULT_MAX_SIDE
         max_side = max(max_side, MIN_SIDE)
     top = MAX_CROP_SIDE if crop else MAX_SIDE
@@ -292,13 +306,23 @@ def view(
     head.append(f"{info.get('width')}×{info.get('height')}, {dur:.2f}s")
     if crop:
         _fit_crop(crop, int(info.get("width") or 0), int(info.get("height") or 0))
-        head.append(_crop_note(crop, max_side))
     marks = ((asset or {}).get("meta") or {}).get("marks") or {}
     if marks:
         head.append("marks: " + ", ".join(f"{k}={v:.2f}s" for k, v in marks.items()))
     times, page_note = _span_times(start, end, every_s, frames, marks, dur, asset)
     if page_note:
         head.append(page_note)
+    n = len(times)
+    one_each = n == 1 or (not around and n <= MAX_IMAGES)
+    sheet = bool(n) and not one_each
+    if crop:
+        if sheet and not around:
+            head.append(
+                _crop_where(crop) + " — contact-sheet cells are downscaled, NOT 100 %: ask for 1–3 frames "
+                "or around= for a 1:1 look"
+            )
+        else:
+            head.append(_crop_note(crop, max_side) + (" (the contact sheet's cells are downscaled)" if sheet else ""))
 
     with tempfile.TemporaryDirectory(prefix="campaign-look-") as td:
         tmp = Path(td)
@@ -315,9 +339,6 @@ def view(
                         "label": f"{side} {around} @ {at:.2f}s",
                     }
                 )
-        room = MAX_IMAGES - len(images)
-        n = len(times)
-        one_each = n == 1 or (not around and n <= room)
         if n and one_each:
             for i, at in enumerate(times, start=1):
                 data = _frame(runner, ff, src, at, max_side, max_side, tmp / f"f{i:03d}.jpg", crop)
@@ -327,7 +348,8 @@ def view(
         elif n:
             cols = min(n, 4 if n > 9 else 3)
             rows = math.ceil(n / cols)
-            side = min(max_side, MAX_SIDE)  # a sheet is an overview — never a 4K-wide one
+            # A sheet is an overview: never 4K wide, and never shrunk to a small crop's own size.
+            side = min(max(max_side, DEFAULT_MAX_SIDE) if auto_side else max_side, MAX_SIDE)
             cell_w, cell_h = max(64, (side - 4 * (cols - 1)) // cols), max(64, (side - 4 * (rows - 1)) // rows)
             for i, at in enumerate(times, start=1):
                 _frame(runner, ff, src, at, cell_w, cell_h, tmp / f"cell{i:03d}.jpg", crop)

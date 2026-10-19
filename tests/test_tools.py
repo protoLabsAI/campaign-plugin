@@ -471,7 +471,10 @@ def test_shoot_overrides_fix_one_step_and_save_it(tools, browser_ok, ffmpeg_ok):
 def test_notes_and_meta_read_back_through_campaign_asset(tools):
     call(tools, "campaign_create", name="F1")
     call(tools, "campaign_create", name="Strips")
-    take = store.add_asset(1, "clip", "take", status="captured", meta={"marks": {"start": 1.0, "caption_a": 10.5}})
+    call(tools, "campaign_lane", campaign_id=1, name="authors", pitch="one click")
+    take = store.add_asset(
+        1, "clip", "take", status="captured", lane_id=1, meta={"marks": {"start": 1.0, "caption_a": 10.5, "odd": "x"}}
+    )
     master = store.add_asset(
         1,
         "clip",
@@ -491,7 +494,8 @@ def test_notes_and_meta_read_back_through_campaign_asset(tools):
     assert f"- made from it: #{strip['id']} still (in campaign 2)" in out
     assert '"width": 2560' in out and "steep ramp at 4s" in out and '"take_dir": "/x"' in out
     out = call(tools, "campaign_asset", asset_id=take["id"])
-    assert "## Marks" in out and "- caption_a: 10.50s" in out and "(none)" in out
+    assert "## Marks" in out and "- caption_a: 10.50s" in out and "- odd: x" in out and "(none)" in out
+    assert "- lane: authors" in out
 
     # The listing stays short: a one-line preview only with notes=true.
     listing = call(tools, "campaign_assets", campaign_id=1)
@@ -517,9 +521,11 @@ def test_the_operators_review_note_shows_in_the_listing(tools):
 
 def test_a_parent_that_is_gone_is_said_plainly(tools):
     call(tools, "campaign_create", name="F1")
-    a = store.add_asset(1, "clip", "orphan", status="rendered", parent_id=4242, meta={"blob": "y" * 5000})
+    a = store.add_asset(
+        1, "clip", "orphan", status="rendered", parent_id=4242, meta={"blob": "y" * 5000, "warnings": "one string"}
+    )
     out = call(tools, "campaign_asset", asset_id=a["id"])
-    assert "- made from: #4242 (no longer exists)" in out
+    assert "- made from: #4242 (no longer exists)" in out and "## Warnings\n- one string" in out
     assert "more chars)" in out and len(out) < 5000, "a huge meta is capped"
 
 

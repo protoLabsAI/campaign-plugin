@@ -399,13 +399,13 @@ def test_a_crop_of_a_clip_comes_back_at_native_pixels(tools, core, camp, fake_ff
     # Cropped FIRST, then bounded by the crop's own long side — i.e. not scaled at all.
     assert (
         _vfs(fake_ff)
-        == ["crop=2560:200:0:1240,scale='min(2560,iw)':'min(2560,ih)':force_original_aspect_ratio=decrease"] * 2
+        == ["crop=2560:200:0:1240:exact=1,scale='min(2560,iw)':'min(2560,ih)':force_original_aspect_ratio=decrease"] * 2
     )
     # JSON text works too (the tool may get a string), and an explicit max_side shows the scale.
     fake_ff.cmds.clear()
     view(tools, campaign_id=c["id"], asset_id=a["id"], frames=1, crop=json.dumps(strip), max_side=1280)
     assert "downscaled to 50 %: pass max_side=2560 or crop smaller" in core.calls[-1][0]
-    assert _vfs(fake_ff)[0].startswith("crop=2560:200:0:1240,scale='min(1280,iw)'")
+    assert _vfs(fake_ff)[0].startswith("crop=2560:200:0:1240:exact=1,scale='min(1280,iw)'")
 
 
 def test_a_crop_on_a_contact_sheet_keeps_the_sheet_bounded(tools, core, camp, fake_ff):
@@ -414,8 +414,9 @@ def test_a_crop_on_a_contact_sheet_keeps_the_sheet_bounded(tools, core, camp, fa
     view(tools, campaign_id=c["id"], path="master.mp4", every_s=1, crop={"x": 0, "y": 0, "width": 2400, "height": 400})
     text, imgs = core.calls[-1]
     assert len(imgs) == 1 and "of the crop (cells downscaled)" in text
+    assert "100 %" not in text.replace("NOT 100 %", "") and "contact-sheet cells are downscaled, NOT 100 %" in text
     cells = [v for v in _vfs(fake_ff) if v.startswith("crop=")]
-    assert len(cells) == 12 and all(v.startswith("crop=2400:400:0:0,") for v in cells)
+    assert len(cells) == 12 and all(v.startswith("crop=2400:400:0:0:exact=1,") for v in cells)
     assert "scale='min(509,iw)'" in cells[0], "cells are sized from a ≤2048 sheet, not the 2400 px crop"
 
 
@@ -425,7 +426,7 @@ def test_a_crop_of_a_still_is_checked_against_its_dimensions(tools, core, camp, 
     view(tools, campaign_id=c["id"], path="card.png", crop={"x": 2000, "y": 1300, "width": 560, "height": 140})
     text, imgs = core.calls[-1]
     assert "2560×1440" in text and "shown at 100 %" in text and "image 1: still (crop)" in text
-    assert _vfs(fake_ff)[-1].startswith("crop=560:140:2000:1300,scale='min(560,iw)'")
+    assert _vfs(fake_ff)[-1].startswith("crop=560:140:2000:1300:exact=1,scale='min(560,iw)'")
 
 
 def test_bad_crops_are_refused_clearly(tools, core, camp, fake_ff, monkeypatch):
@@ -447,6 +448,9 @@ def test_bad_crops_are_refused_clearly(tools, core, camp, fake_ff, monkeypatch):
     assert "x, y ≥ 0 and width, height ≥ 16px" in v(crop={"x": 0, "y": 0, "width": 4, "height": 100})
     assert "crop must be {x, y, width, height}" in v(crop="not json")
     assert "crop must be {x, y, width, height}" in v(crop="[1, 2]")
+    assert "crop needs integer" in v(crop='{"x": Infinity, "y": 0, "width": 100, "height": 100}')
+    with pytest.raises(look.LookError, match="must be integers"):
+        look.view(c["id"], path="master.mp4", every_s=1, frames=float("inf"))
     # max_side above 2048 only with a crop (and never above 4096).
     assert "max_side must be 320..2048 (4096 with a crop)" in v(max_side=2560)
     assert "max_side must be 320..4096" in v(max_side=5000, crop={"x": 0, "y": 0, "width": 100, "height": 100})
@@ -462,8 +466,23 @@ def test_a_small_crop_is_never_upscaled_past_min_side(camp, fake_ff):
     c, root = camp
     (root / "s.png").write_bytes(_png(8, 8))
     res = look.view(c["id"], path="s.png", crop={"x": 0, "y": 0, "width": 100, "height": 40})
-    assert "shown at 100 %" in res["text"]
-    assert _vfs(fake_ff)[-1].startswith("crop=100:40:0:0,scale='min(320,iw)'"), "min() never upscales"
+    assert "shown at 100 %" in res["text"] and "may shrink" not in res["text"]
+    assert _vfs(fake_ff)[-1].startswith("crop=100:40:0:0:exact=1,scale='min(320,iw)'"), "min() never upscales"
+
+
+def test_a_small_crops_contact_sheet_is_still_overview_sized(camp, fake_ff):
+    c, root = camp
+    (root / "m.mp4").write_bytes(b"\0")
+    res = look.view(c["id"], path="m.mp4", frames=6, crop={"x": 0, "y": 0, "width": 300, "height": 100})
+    cells = [v for v in _vfs(fake_ff) if v.startswith("crop=")]
+    assert len(cells) == 6 and "scale='min(424,iw)'" in cells[0], "cells sized from a 1280 sheet, not 320"
+    assert "NOT 100 %" in res["text"]
+    # around= frames with a sheet: the frames are 1:1, the sheet's cells are not — both said.
+    res = look.view(c["id"], path="m.mp4", frames=4, around="2", crop={"x": 0, "y": 0, "width": 300, "height": 100})
+    assert "shown at 100 % (1:1 source pixels) (the contact sheet's cells are downscaled)" in res["text"]
+    # A big crop at 100 % warns that a model may shrink it.
+    res = look.view(c["id"], path="m.mp4", frames=1, crop={"x": 0, "y": 0, "width": 2000, "height": 100})
+    assert "shown at 100 %" in res["text"] and "may shrink images over ~1568 px" in res["text"]
 
 
 # ── #44: the wrong-campaign error names the campaign that owns the asset ───────────────────────
