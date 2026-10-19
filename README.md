@@ -265,6 +265,79 @@ older databases need no migration; the `superseded_by` column is added on first 
 Then: `campaign_render(asset_id, outputs=[{name: hero, format: mp4, start: start, end: end,
 speed: [{from: start, to: plugins, factor: 2, ease: true}], limit: github_attachment_video_free}, …])`.
 
+## Where your media lives
+
+Everything the plugin makes stays on the agent's own disk, in one folder: the **data dir**. It
+is the `data_dir` setting when set, else the host's per-instance plugin store,
+`<instance root>/campaign/`. On a source install that's `~/.protoagent/<instance>/campaign/`
+(`~/.protoagent/default/campaign/` for the default instance). In the desktop app it's
+`workspaces/<agent>/campaign/` under the app's data folder. Each agent instance has its own.
+
+```
+<data_dir>/
+  campaign.db              SQLite: campaigns, lanes, assets, shot scripts, milestones, decisions
+  open-link.key            the secret behind the gallery's 15-minute "Open in new tab" links
+  retention-report.json    the last retention run's report
+  videos/vid-<hash>.json   campaign_produce_video job records
+  campaigns/<id>-<slug>/   one folder per campaign (the media root is campaigns/)
+    shots/<script>-<stamp>/            takes: the video, named stills, timing.json (failure.png)
+    renders/<take folder>/<stamp>/     mp4 / gif / poster cut from a take
+    cards/<template>-<stamp>/          card PNGs
+    montages/<name>-<stamp>/           montage mp4 + poster (+ gif)
+    storyboards/<stamp>/               storyboard contact sheets
+    videos/<job>-a<attempt>/           campaign_produce_video renders, contact sheet, text crop
+```
+
+Stamps are UTC (`YYYYMMDD-HHMMSS`). `campaign.db` is the source of truth: every asset's
+status, approval, review note, lineage (`parent_id`, a montage's inputs, `superseded_by`) and
+file path live there. The folders only hold bytes. A file with no row, like a storyboard sheet
+or anything you drop in by hand, never shows up in the gallery. It is never pruned or backed up
+either. `open-link.key` is created on first use (mode 600). Delete it to revoke every
+outstanding signed link; a new key is made on the next mint.
+
+**A moved asset keeps its file where it was.** `campaign_collect` with `mode="move"` (or the
+gallery's move) changes only the row's campaign. The file stays in the ORIGINAL campaign's
+folder, so a collection's assets can live under another campaign's directory. That's by design
+(#36, v0.6.4): every path check is media-root-wide or based on which campaign owns the row.
+`mode="copy"` does copy the files into the target's folder. See **Collections**.
+
+**An asset's life.** `planned` → `scripted` → `captured` (a take) / `rendered` (a render,
+card, montage) → `ready_for_review` → the operator decides:
+
+- **approved**: never deleted by retention, and backed up to protoContent when the archive
+  is on.
+- **rejected**: kept on disk. No retention rule deletes it, and it isn't backed up.
+- **superseded** (a retake replaced it, or the operator retired an approved asset): the file
+  is deleted 7 days later; the row stays as a tombstone so "Superseded by #N" still reads.
+
+Takes and renders that never reach review are deleted 7 days after their last change, unless
+something kept was made from them. Retention only deletes once the operator sets
+`retention_mode: prune`; the default, `report`, deletes nothing. See **Retention** for the
+exact rules.
+
+**What is protected where**
+
+| What | On the agent's disk | Backed up to protoContent | Deleted by retention (`prune` mode) |
+|---|---|---|---|
+| `approved` asset: its file + a catalog entry | yes | yes, when `archive_enabled` | never |
+| `ready_for_review` asset | yes | no | never (flagged stale after 14 days) |
+| `rejected` / `scripted` asset | yes | no | never |
+| `captured` take / `rendered` output nothing kept depends on | yes | no | file after 7 days untouched; the row too unless another row names it |
+| `superseded` asset (incl. an approved one the operator retired) | yes, until pruned | only if it was archived while approved | file after 7 days; row kept |
+| `planned` row with no file | row only | no | row after 30 days |
+| a take's stills, a poster, a montage's GIF (assets of their own) | yes | only if that asset is itself approved | by its own status, as above |
+| files with no row: a take's `timing.json`, a bookended clip's raw master, storyboards | yes | no | never |
+| `campaign.db`: plans, shot scripts, lineage | yes | no; only approved assets' metadata is copied to the catalog | never |
+
+**The plain consequence: only APPROVED assets ever leave the machine**, and only once the
+archive is on (`archive_enabled` + a credential). A backup copies just the approved row's own
+file, so a take's stills or a montage's poster aren't included unless they were approved too.
+Takes awaiting review, renders, intermediates, shot scripts and the database (every plan and
+the lineage of everything not approved) exist only on the agent's disk. If you need them kept,
+back up the data dir yourself. Copy `campaign.db` while the agent is stopped: it runs in WAL
+mode, so a live copy can miss recent writes. To get an archived file back, see **Getting an
+archived asset back**.
+
 ## Retention
 
 The gallery keeps what matters and lets intermediates go (operator policy, 2026-10-16):
@@ -275,7 +348,7 @@ The gallery keeps what matters and lets intermediates go (operator policy, 2026-
 | `ready_for_review` | **Never deleted**; flagged **stale** (gallery badge + report) after 14 days untouched |
 | `superseded` | The FILE is deleted 7 days after it was superseded; the row stays as a tombstone so "Superseded by #N" still reads |
 | `rendered` / `captured` | Deleted after 7 days untouched — unless anything kept depends on it. The row goes too, unless another row still names it (then it is a tombstone) |
-| `planned`, no file | The row is dropped after 30 days untouched |
+| `planned`, no file | The row is dropped after 30 days untouched, unless another row still names it |
 
 "Depends on" is a closure over everything that keeps its file (approved, ready for review,
 rejected, scripted, and anything younger than its rule): the `parent_id` chain (render →
@@ -375,6 +448,57 @@ The key, the JWT, a minted token and the PAT go only into an `Authorization` hea
 `archive_enabled`, `archive_repo`, `archive_catalog_dir`, `archive_app_id`,
 `archive_app_installation_id` and `archive_app_private_key_path` are operator-only settings —
 they decide whether, where and as whom your media goes.
+
+### Getting an archived asset back
+
+Restoring is a manual download. Nothing writes an archived file back into the agent's
+database or media folders. You need read access to protoContent (it's private) and the
+[`gh`](https://cli.github.com) CLI signed in.
+
+1. **Find the entry in the catalog**, `specs/media/catalog/<slug>.json` on protoContent's
+   `main`, one file per campaign (list them with
+   `gh api repos/protoLabsAI/protoContent/contents/specs/media/catalog --jq '.[].name'`). An
+   asset collected into another campaign is in that campaign's catalog too. Look it up by `id` (the asset id in the gallery), `title`, `file_name` or `sha256`:
+
+   ```bash
+   gh api repos/protoLabsAI/protoContent/contents/specs/media/catalog/protoagent-showcase.json \
+     -H 'Accept: application/vnd.github.raw' |
+     jq -r '.assets[] | select(.file_name == "og-1280x640.png")
+            | [.id, .release_tag, .release_asset_name, .sha256] | @tsv'
+   ```
+
+   The gallery's **backed up** badge names the release tag too (hover it). Approvals still on
+   the open `media-catalog/<slug>` PR aren't on `main` yet; read the file on that branch
+   (`?ref=media-catalog/<slug>`).
+2. **Download the release asset.** Use the entry's `release_tag` and `release_asset_name`.
+   Don't rebuild them from the catalog's slug: an asset collected into another campaign keeps
+   pointing at the release it was first uploaded to.
+
+   ```bash
+   gh release download media/protoagent-github-trending-launch-oct-13 \
+     -R protoLabsAI/protoContent -p '9257882ac2ad-og-1280x640.png'
+   ```
+
+   Asset names are `<sha256[:12]>-<file name>`: the first 12 hex digits of the file's
+   sha256, then its file name with anything outside `A-Za-z0-9._-` turned into `-` and the
+   extension lowercased. The entry's `url` is the same file's browser download link (it needs
+   a signed-in GitHub session with repo access).
+3. **Verify it** against the entry's `sha256`:
+
+   ```bash
+   echo "<sha256>  9257882ac2ad-og-1280x640.png" | shasum -a 256 -c   # sha256sum -c on Linux
+   ```
+
+**If the agent's machine is lost**, what survives in protoContent is every archived approved
+file and its catalog entry: id, title, lane, kind, dimensions, duration, size, sha256,
+approval time and note, the source campaign. What's gone is everything else in the data dir:
+`campaign.db` (plans, lanes, shot scripts, milestones, decisions, the lineage linking renders
+to takes), every file that wasn't approved, approvals the archive hadn't uploaded yet (check
+`campaign_backup` for queued or retrying ones), and any approval made while the archive was
+off. A reinstalled plugin starts with an empty gallery. A downloaded file is just a file: to put
+one back in the gallery, copy it into a campaign's folder and attach it to an asset with
+`campaign_asset_update(asset_id, path=…)`. It comes back unapproved, so the operator approves
+it again.
 
 ## Collections — keep the good ones together, start fresh
 
