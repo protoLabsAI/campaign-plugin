@@ -211,8 +211,7 @@ def _keep_failed_take(
 
 
 def _clip(text: str, n: int) -> str:
-    one = " ".join(str(text or "").split())
-    return one if len(one) <= n else one[: n - 1].rstrip() + "…"
+    return produce.clip_line(text, n)
 
 
 # ── compact replies: what a shoot/render reply carries back into the model's context ──
@@ -1046,7 +1045,7 @@ def build_tools(registry):
                 if not script.strip():
                     return "Pass script_id (a saved script) or script (YAML/JSON)."
                 data = shotscript.parse(script)
-            changed: list[int] = []
+            changed: list[int | str] = []
             if overrides not in (None, "", {}):
                 data, changed = shotscript.apply_overrides(data, _parse_obj(overrides, "overrides"))
             norm = shotscript.validate(data)

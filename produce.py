@@ -1156,7 +1156,8 @@ SUMMARY_LOG_LINES = 3  # job-log lines a status reply carries; verbose=True carr
 SUMMARY_DETAIL = 160  # chars per gate detail / reason / log line in a status reply
 
 
-def _clip1(text: Any, n: int = SUMMARY_DETAIL) -> str:
+def clip_line(text: Any, n: int = SUMMARY_DETAIL) -> str:
+    """``text`` on one line (whitespace collapsed), cut to ``n`` chars with an ellipsis."""
     one = " ".join(str(text or "").split())
     return one if len(one) <= n else one[: n - 1].rstrip() + "…"
 
@@ -1177,10 +1178,10 @@ def summary(job: dict[str, Any], verbose: bool = False) -> str:
     ]
     if job.get("gates"):
         lines.append("Self-review gates:")
-        lines += [f"- [{'PASS' if g['ok'] else 'FAIL'}] {g['label']} — {_clip1(g['detail'])}" for g in job["gates"]]
+        lines += [f"- [{'PASS' if g['ok'] else 'FAIL'}] {g['label']} — {clip_line(g['detail'])}" for g in job["gates"]]
     if job.get("reasons") and job["status"] != "done":
         lines.append("Why it isn't done:")
-        lines += [f"- {_clip1(r)}" for r in job["reasons"]]
+        lines += [f"- {clip_line(r)}" for r in job["reasons"]]
     d = job.get("delivery") or {}
     bases = link_bases()
     files = d.get("files") or {}
@@ -1204,5 +1205,5 @@ def summary(job: dict[str, Any], verbose: bool = False) -> str:
     shown = log_lines if verbose else log_lines[-SUMMARY_LOG_LINES:]
     if shown:
         lines.append("Log:" if verbose else f"Recent (of {len(log_lines)}; verbose=true for all):")
-        lines += [f"  {x if verbose else _clip1(x)}" for x in shown]
+        lines += [f"  {x if verbose else clip_line(x)}" for x in shown]
     return "\n".join(lines)
