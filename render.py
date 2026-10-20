@@ -11,8 +11,17 @@ Each output spec says what to cut and how to ship it::
      "limit": "github_attachment_video_free",   # a hard-limit id (limits.py) …
      "max_bytes": 8000000}                      # … and/or an explicit ceiling
 
-* **mp4** — H.264, yuv420p, ``+faststart``; when there's a size ceiling it steps CRF up,
-  then width down, until the file fits.
+* **mp4** — H.264 (libx264 ``-preset slow``), yuv420p, ``+faststart``, at ``crf``
+  ``DELIVERABLE_CRF`` (16 — the same quality as the capture master) unless the spec names a ``crf``.
+
+**A size ceiling never silently degrades a deliverable.** With a platform ``limit`` that caps
+bytes (a documented hard cap, e.g. GitHub's 10 MB attachment), the mp4 steps CRF up, then width
+down, until it fits — and every step past ``QUALITY_FLOOR_CRF`` (20) or below full width comes
+back as a ``warnings`` entry naming what was traded. A bare ``max_bytes`` with no platform limit
+is a wish, not a cap: the CRF steps up to ``QUALITY_FLOOR_CRF`` at full width and stops there;
+a file still over it is kept at that quality and reported in ``warnings`` (not a violation). An
+explicit ``crf`` above the floor is the caller choosing a smaller file and is honoured as the
+ladder's start.
 * **gif** — palettegen/paletteuse (``stats_mode=diff``, bayer dither, rectangle diffs);
   steps fps and width down until the file fits.
 * **poster** — one PNG frame at ``at`` (default: the start).
@@ -68,6 +77,12 @@ MAX_WIDTH = 7680
 MAX_FPS = 60
 MAX_OUTPUTS = 12
 FFMPEG_TIMEOUT_S = 600  # one ffmpeg run
+# Deliverable quality (Josh 10-15: 2K device-pixel capture, crisp smallest text at 100 %). The
+# capture master is crf 16 (capture.py); every deliverable mp4 — campaign_render, the brand
+# bookends, produce_video's review cut, montages — defaults to the same, libx264 preset slow.
+DELIVERABLE_CRF = 16
+# The worst CRF a byte ceiling may push a deliverable to WITHOUT a platform limit behind it.
+QUALITY_FLOOR_CRF = 20
 OUTPUT_BUDGET_S = 1200  # one output's whole size ladder
 
 
@@ -285,6 +300,7 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
         crop["width"] -= crop["width"] % 2
         crop["height"] -= crop["height"] % 2
     max_bytes = _bounded_int(spec, "max_bytes", 1_000, 10**12, name)
+    limit_bytes = None
     width = _bounded_int(spec, "width", 16, MAX_WIDTH, name)
     crf = _bounded_int(spec, "crf", 0, 51, name)
     fps = None
@@ -301,7 +317,8 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
         if row is None:
             raise RenderError(f"output {name}: unknown limit {limit_id!r} — campaign_limits lists them")
         if row.get("max_bytes"):
-            max_bytes = min(int(max_bytes), int(row["max_bytes"])) if max_bytes else int(row["max_bytes"])
+            limit_bytes = int(row["max_bytes"])
+            max_bytes = min(int(max_bytes), limit_bytes) if max_bytes else limit_bytes
     return {
         "name": name,
         "format": fmt,
@@ -314,8 +331,10 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
         "crop": crop,
         "width": width,
         "fps": fps,
-        "crf": 23 if crf is None else crf,
+        "crf": DELIVERABLE_CRF if crf is None else crf,
         "max_bytes": int(max_bytes) if max_bytes else None,
+        # the platform cap behind max_bytes (a ``limit`` row's bytes), or None for a bare max_bytes
+        "limit_bytes": limit_bytes,
         "limit": limit_id,
         "at": resolve_time(spec.get("at"), marks, f"{name}.at"),
         "title": str(spec.get("title") or ""),
@@ -549,9 +568,15 @@ def poster_cmd(ff: str, src: str, dst: str, at: float, crop: dict | None, width:
     return cmd + ["-frames:v", "1", "-update", "1", dst]
 
 
-def mp4_ladder(crf: int, width: int | None, src_width: int) -> list[tuple[int, int | None]]:
-    """(crf, width) attempts in order — quality first, then size."""
+def mp4_ladder(crf: int, width: int | None, src_width: int, *, degrade: bool = True) -> list[tuple[int, int | None]]:
+    """(crf, width) attempts in order — quality first, then size.
+
+    ``degrade=False`` (a bare ``max_bytes``, no platform limit): CRF only, at full width, never
+    past ``max(crf, QUALITY_FLOOR_CRF)``."""
     w = width or src_width or None
+    if not degrade:
+        top = quality_floor(crf)
+        return [(c, w) for c in range(crf, top, 4)] + [(top, w)]
     steps: list[tuple[int, int | None]] = [(min(crf + d, 40), w) for d in (0, 4, 8, 12)]
     if w:
         for factor, c in ((0.8, crf + 8), (0.8, crf + 12), (0.64, crf + 12), (0.5, crf + 12)):
@@ -618,10 +643,17 @@ def render_output(
     else:
         segs = segments(spec["start"], spec["end"], spec["ramps"], spec.get("eases"))
         if spec["format"] == "mp4":
+            capped = bool(spec.get("limit_bytes"))
             ladder = (
-                mp4_ladder(spec["crf"], spec["width"], src_w) if spec["max_bytes"] else [(spec["crf"], spec["width"])]
+                mp4_ladder(spec["crf"], spec["width"], src_w, degrade=capped)
+                if spec["max_bytes"]
+                else [(spec["crf"], spec["width"])]
             )
+            full_w, floor = spec["width"] or src_w or None, quality_floor(spec["crf"])
             for crf, width in ladder:
+                degrading = crf > floor or bool(full_w and width and width < full_w)
+                if degrading and attempts and attempts[-1]["size_bytes"] <= (spec.get("limit_bytes") or 0):
+                    break  # it already fits the platform cap; only a tighter bare max_bytes is unmet
                 base = timeline_filter(segs, spec["crop"], width if width != src_w else None)
                 _ff(runner, mp4_cmd(ff, src, str(dst), base, crf=crf, fps=spec["fps"] or 30))
                 size = dst.stat().st_size if dst.exists() else 0
@@ -650,7 +682,13 @@ def render_output(
 
     info = probe(dst, runner) if dst.exists() else {"width": 0, "height": 0, "duration_s": 0, "size_bytes": 0}
     violations: list[str] = []
-    if spec["max_bytes"] and info["size_bytes"] > spec["max_bytes"]:
+    warnings = list(spec.get("warnings") or [])
+    if spec["format"] == "mp4" and attempts:
+        warnings += quality_notes(spec, attempts, src_w, info["size_bytes"])
+    over = bool(spec["max_bytes"] and info["size_bytes"] > spec["max_bytes"])
+    if over and spec["format"] == "mp4" and not (spec.get("limit_bytes") and info["size_bytes"] > spec["limit_bytes"]):
+        over = False  # over a bare max_bytes only: quality_notes said so; not a hard-limit violation
+    if over:
         violations.append(
             f"{limits.human_bytes(info['size_bytes'])} is still over the {limits.human_bytes(spec['max_bytes'])} ceiling "
             f"after {len(attempts)} attempts"
@@ -668,6 +706,48 @@ def render_output(
         **info,
         "attempts": attempts,
         "violations": violations,
-        "warnings": list(spec.get("warnings") or []),
+        "warnings": warnings,
         "format": spec["format"],
     }
+
+
+def quality_floor(crf: int) -> int:
+    """The worst CRF a bare ``max_bytes`` may push a deliverable to: the caller's own crf if
+    it's already above ``QUALITY_FLOOR_CRF``, else the floor."""
+    return max(int(crf), QUALITY_FLOOR_CRF)
+
+
+def size_notes(
+    *, crf: int, last_crf: int, traded: list[str], limit: str, max_bytes: int | None, limit_bytes: int | None, size: int
+) -> list[str]:
+    """The size-ceiling warnings shared by render and montage — so what a ceiling cost (or would
+    have cost) a deliverable is never silent. ``traded`` lists the degradations a platform
+    ``limit`` forced (e.g. ``"crf 16 → 24"``); empty when nothing past the floor was traded."""
+    out: list[str] = []
+    if limit_bytes and traded:
+        out.append(
+            f"quality traded to fit {limit} ({limits.human_bytes(max_bytes)}): " + ", ".join(traded)
+            + " — small text may soften; ship the full-quality render where the platform allows it"
+        )  # fmt: skip
+    if max_bytes and size > max_bytes and not (limit_bytes and size > limit_bytes):
+        out.append(
+            f"kept deliverable quality (crf {last_crf}): {limits.human_bytes(size)} is over max_bytes "
+            f"{limits.human_bytes(max_bytes)}, and a bare max_bytes may not push a deliverable past "
+            f"crf {quality_floor(crf)} — pass a platform limit (campaign_limits) when one really caps the "
+            "file, or an explicit higher crf / smaller size"
+        )
+    return out
+
+
+def quality_notes(spec: dict[str, Any], attempts: list[dict[str, Any]], src_w: int, size: int) -> list[str]:
+    """Say what a size ceiling cost (or would have cost) an mp4 — never let it happen silently."""
+    last, full_w = attempts[-1], spec["width"] or src_w or None
+    traded = []
+    if last["crf"] > quality_floor(spec["crf"]):
+        traded.append(f"crf {spec['crf']} → {last['crf']}")
+    if full_w and last.get("width") and last["width"] < full_w:
+        traded.append(f"width {full_w} → {last['width']} px")
+    return size_notes(
+        crf=spec["crf"], last_crf=last["crf"], traded=traded, limit=spec["limit"], max_bytes=spec["max_bytes"],
+        limit_bytes=spec.get("limit_bytes"), size=size,
+    )  # fmt: skip

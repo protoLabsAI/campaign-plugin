@@ -230,8 +230,9 @@ def test_mp4_ladder_steps_crf_then_width_until_it_fits(tmp_path):
     ff = FakeFF(sizes=[12_000_000, 11_000_000, 9_500_000])
     s = _spec(limit="github_attachment_video_free")
     r = render.render_output("in.webm", tmp_path, s, marks=MARKS, source={"width": 2560}, runner=ff)
-    assert [a["crf"] for a in r["attempts"]] == [23, 27, 31]
+    assert [a["crf"] for a in r["attempts"]] == [16, 20, 24]
     assert r["violations"] == [] and r["size_bytes"] == 9_500_000
+    assert any("quality traded" in w and "crf 16 → 24" in w for w in r["warnings"]), r["warnings"]
     assert ladder_monotonic(render.mp4_ladder(23, None, 2560))
 
 
@@ -492,7 +493,7 @@ def test_the_size_ladder_stops_at_its_time_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(render.time, "monotonic", lambda: next(clock))
     ff = FakeFF(sizes=[50_000_000] * 20)
     r = render.render_output(
-        "/x.webm", tmp_path, _spec(max_bytes=1_000_000), marks=MARKS, source={"width": 1280}, runner=ff
+        "/x.webm", tmp_path, _spec(limit="github_attachment_video_free"), marks=MARKS, source={"width": 1280}, runner=ff
     )
     assert len(r["attempts"]) == 1 and "render budget" in r["violations"][0]
 
@@ -510,3 +511,45 @@ def test_the_shot_scripting_worked_example_is_a_valid_script_and_a_continuous_re
     spec = render.normalize_output(out, {m: float(i) for i, m in enumerate(marks)}, 99.0)
     assert spec["continuous"] and all(f <= render.MAX_CONTINUOUS_FACTOR for _, _, f in spec["ramps"])
     assert spec["warnings"] == [] and all(spec["eases"]), "the example's ramps are eased"
+
+
+# ── deliverable quality (Josh 10-15: 2K, crisp smallest text) ──────────────────────────
+
+
+def test_deliverable_mp4_defaults_to_crf_16_preset_slow():
+    assert render.DELIVERABLE_CRF <= 17 and render.QUALITY_FLOOR_CRF == 20
+    s = _spec()
+    assert s["crf"] == render.DELIVERABLE_CRF == 16
+    joined = " ".join(render.mp4_cmd("ffmpeg", "in.webm", "out.mp4", "[0:v]null[base]", crf=s["crf"], fps=30))
+    for flag in ("-c:v libx264", "-preset slow", "-crf 16", "-pix_fmt yuv420p", "-movflags +faststart"):
+        assert flag in joined
+    assert _spec(crf=26)["crf"] == 26, "an explicit crf is the caller choosing a smaller file"
+
+
+def test_a_bare_max_bytes_never_degrades_past_crf_20_and_warns_instead(tmp_path):
+    ff = FakeFF(sizes=[30_000_000, 25_000_000, 20_000_000, 15_000_000])
+    r = render.render_output(
+        "in.webm", tmp_path, _spec(max_bytes=8_000_000), marks=MARKS, source={"width": 2560}, runner=ff
+    )
+    assert [(a["crf"], a["width"]) for a in r["attempts"]] == [(16, 2560), (20, 2560)], "CRF only, full width, ≤ 20"
+    assert r["violations"] == [], "a bare max_bytes is a wish, not a hard limit"
+    assert any("kept deliverable quality" in w for w in r["warnings"]), r["warnings"]
+    assert render.mp4_ladder(16, None, 2560, degrade=False) == [(16, 2560), (20, 2560)]
+    assert render.mp4_ladder(24, None, 2560, degrade=False) == [(24, 2560)]
+
+
+def test_a_bare_max_bytes_that_fits_is_silent(tmp_path):
+    ff = FakeFF(sizes=[5_000_000])
+    r = render.render_output(
+        "in.webm", tmp_path, _spec(max_bytes=8_000_000), marks=MARKS, source={"width": 2560}, runner=ff
+    )
+    assert [a["crf"] for a in r["attempts"]] == [16] and r["warnings"] == [] and r["violations"] == []
+
+
+def test_a_platform_limit_may_degrade_but_says_so_and_a_tighter_bare_max_bytes_does_not(tmp_path):
+    # fits the 10 MB platform cap at crf 20, but not the tighter bare 5 MB → stops at crf 20
+    ff = FakeFF(sizes=[12_000_000, 9_000_000, 4_000_000])
+    s = _spec(limit="github_attachment_video_free", max_bytes=5_000_000)
+    r = render.render_output("in.webm", tmp_path, s, marks=MARKS, source={"width": 2560}, runner=ff)
+    assert [a["crf"] for a in r["attempts"]] == [16, 20]
+    assert r["violations"] == [] and any("kept deliverable quality" in w for w in r["warnings"])

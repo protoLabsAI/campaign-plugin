@@ -1119,8 +1119,10 @@ def build_tools(registry):
         px), width, fps, and limit (a hard-limit id such as github_attachment_video_free) and/or
         max_bytes, and bookends (mp4 only: brand — the default, protoLabs bookends v1: splash bumper →
         fade → title card → edge sweep → the clip → edge sweep → bumper → fade → Star CTA, titled by
-        the output's title — or none for a bare clip). mp4 is H.264/yuv420p/faststart; when a size ceiling is set, mp4 steps CRF then
-        width and gif steps fps then width until it fits. Reports final size, dimensions and
+        the output's title — or none for a bare clip). mp4 is H.264 (preset slow)/yuv420p/faststart at crf 16 —
+        deliverable quality — unless you pass crf. A platform limit that caps bytes steps an mp4's CRF then
+        width until it fits and warns when that went past crf 20; a bare max_bytes only goes to crf 20 and,
+        if still over, keeps the quality and warns instead. gif steps fps then width until it fits. Reports final size, dimensions and
         duration, and anything still over a hard limit (which then can't be marked ready)."""
         if (reason := deps.need_ffmpeg()) is not None:
             return reason
@@ -1183,15 +1185,17 @@ def build_tools(registry):
                 notes=notes,
             )
             made.append(a["id"])
-            booked = _bookend_render(c, a, spec, r, out_dir) if spec["bookends"] == "brand" else ""
+            size_notes: list[str] = []
+            booked = _bookend_render(c, a, spec, r, out_dir, size_notes) if spec["bookends"] == "brand" else ""
             if booked.startswith("/"):
                 a = store.get_asset(a["id"])
                 r = {**r, "path": a["path"], "size_bytes": a["size_bytes"], "width": a["width"],
-                     "height": a["height"], "duration_s": a["duration_s"]}  # fmt: skip
+                     "height": a["height"], "duration_s": a["duration_s"],
+                     "warnings": [*r["warnings"], *(f"bookends: {n}" for n in size_notes)]}  # fmt: skip
             elif booked:
                 r = {**r, "warnings": [*r["warnings"], booked]}
             flag = f"  ⚠ {'; '.join(r['violations'])}" if r["violations"] else ""
-            flag += f"  ⚠ continuity: {'; '.join(r['warnings'])}" if r["warnings"] else ""
+            flag += f"  ⚠ notes: {'; '.join(r['warnings'])}" if r["warnings"] else ""
             lines.append(
                 f"- #{a['id']} {spec['name']}.{Path(r['path']).suffix.lstrip('.')} — {limits.human_bytes(r['size_bytes'])}, "
                 f"{r['width']}×{r['height']}"
@@ -1736,20 +1740,30 @@ def _multimodal_fn():
 
 
 def _bookend_render(
-    c: dict[str, Any], a: dict[str, Any], spec: dict[str, Any], r: dict[str, Any], out_dir: Path
+    c: dict[str, Any],
+    a: dict[str, Any],
+    spec: dict[str, Any],
+    r: dict[str, Any],
+    out_dir: Path,
+    size_notes: list[str] | None = None,
 ) -> str:
     """Wrap a freshly rendered mp4 in the brand's bookends (protoLabs bookends v1) — a montage of
-    [intro, the clip, outro] at the clip's own size — and point the asset at it. Returns the new
-    path, '' when the brand has no bookends, or why it couldn't (the plain render is kept)."""
+    [intro, the clip, outro] at the clip's own size and the render's own crf (deliverable quality,
+    16, unless the spec chose one) — and point the asset at it. Returns the new path, '' when the
+    brand has no bookends, or why it couldn't (the plain render is kept). What a size ceiling cost
+    the bookended file is appended to ``size_notes``."""
     if not (intromod.preset() and outromod.preset()):
         return ""
     title = spec["title"] or a["title"]
     opts = {"name": f"{spec['name']}-bookends", "title": title, "size": f"{r['width'] // 2 * 2}x{r['height'] // 2 * 2}",
-            "fps": spec["fps"] or 30, "poster": False, "limit": spec["limit"] or "", "max_bytes": spec["max_bytes"]}  # fmt: skip
+            "fps": spec["fps"] or 30, "poster": False, "limit": spec["limit"] or "", "max_bytes": spec["max_bytes"],
+            "crf": spec["crf"]}  # fmt: skip
     try:
         m = montage.render_montage(c["id"], [{"clip": a["id"]}], opts, out_dir / "bookends")
     except (montage.MontageError, render.RenderError) as e:
         return f"bookends skipped — {e}"
+    if size_notes is not None:
+        size_notes += [w for w in m.get("warnings") or [] if w.startswith(("quality traded", "kept deliverable"))]
     store.update_asset(a["id"], path=m["path"], size_bytes=m["size_bytes"], width=m["width"], height=m["height"],
                        duration_s=m["duration_s"], meta={**(a.get("meta") or {}), "bookends": montage.BOOKENDS_RECIPE,
                        "unbookended": r["path"]})  # fmt: skip

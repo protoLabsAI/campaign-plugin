@@ -94,7 +94,7 @@ pass `bearer_env`). Pass `allow_other_console=true` only when the operator expli
 DIFFERENT console recorded. Never work around a refusal.
 
 It returns a job id at once. The job records in real time (≈ the predicted length + ~20 s),
-measures the first settled frame and the final caption, renders a review cut (crf 18) and a
+measures the first settled frame and the final caption, renders a review cut (crf 16) and a
 GitHub-sized variant (≤ 10 MB), then runs the gates. Same inputs again returns the same job —
 don't start a second one; `force=True` only when the operator wants a re-record. When the reply
 says **REUSED**, tell the requester you delivered an existing video, not a new recording.

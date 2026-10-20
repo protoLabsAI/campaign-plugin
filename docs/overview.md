@@ -18,8 +18,10 @@ product: the planning + production half of a "Brand & Launch" agent.
   2560×1600 H.264 take (CDP screencast frames, held across idle stretches, assembled at a
   constant frame rate) so small text stays crisp without shrinking the UI.
 - **Renders** — ffmpeg trims the head/tail by mark, speed-ramps dead time, crops, and encodes
-  H.264 mp4 (yuv420p, faststart) and palette-optimised GIFs, stepping quality down until the
-  file fits its **hard** limit — and refusing to call it ready if it still doesn't. Clips are
+  H.264 mp4 (libx264 preset slow, crf 16, yuv420p, faststart — the capture master's quality) and
+  palette-optimised GIFs. Only a platform **hard** limit may step an mp4's quality down to fit
+  (and the report says what it traded); a file still over one isn't called ready. A bare
+  `max_bytes` never pushes a deliverable past crf 20 — see [Hard limits](limits.md#deliverable-quality). Clips are
   **continuous**: there are no interior cuts, and a ramp above 4× is flagged in the render
   report as a jump cut unless the output says `continuous: false` (a deliberate time-lapse).
   A ramp can **ease** in and out (`ease: true` or seconds) — a smooth time-remap instead of a
