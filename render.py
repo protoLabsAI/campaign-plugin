@@ -575,7 +575,7 @@ def mp4_ladder(crf: int, width: int | None, src_width: int, *, degrade: bool = T
     past ``max(crf, QUALITY_FLOOR_CRF)``."""
     w = width or src_width or None
     if not degrade:
-        top = max(crf, QUALITY_FLOOR_CRF)
+        top = quality_floor(crf)
         return [(c, w) for c in range(crf, top, 4)] + [(top, w)]
     steps: list[tuple[int, int | None]] = [(min(crf + d, 40), w) for d in (0, 4, 8, 12)]
     if w:
@@ -649,7 +649,7 @@ def render_output(
                 if spec["max_bytes"]
                 else [(spec["crf"], spec["width"])]
             )
-            full_w, floor = spec["width"] or src_w or None, max(spec["crf"], QUALITY_FLOOR_CRF)
+            full_w, floor = spec["width"] or src_w or None, quality_floor(spec["crf"])
             for crf, width in ladder:
                 degrading = crf > floor or bool(full_w and width and width < full_w)
                 if degrading and attempts and attempts[-1]["size_bytes"] <= (spec.get("limit_bytes") or 0):
@@ -711,28 +711,43 @@ def render_output(
     }
 
 
-def quality_notes(spec: dict[str, Any], attempts: list[dict[str, Any]], src_w: int, size: int) -> list[str]:
-    """Say what a size ceiling cost (or would have cost) an mp4 — never let it happen silently."""
-    last = attempts[-1]
+def quality_floor(crf: int) -> int:
+    """The worst CRF a bare ``max_bytes`` may push a deliverable to: the caller's own crf if
+    it's already above ``QUALITY_FLOOR_CRF``, else the floor."""
+    return max(int(crf), QUALITY_FLOOR_CRF)
+
+
+def size_notes(
+    *, crf: int, last_crf: int, traded: list[str], limit: str, max_bytes: int | None, limit_bytes: int | None, size: int
+) -> list[str]:
+    """The size-ceiling warnings shared by render and montage — so what a ceiling cost (or would
+    have cost) a deliverable is never silent. ``traded`` lists the degradations a platform
+    ``limit`` forced (e.g. ``"crf 16 → 24"``); empty when nothing past the floor was traded."""
     out: list[str] = []
-    full_w = spec["width"] or src_w or None
-    if spec.get("limit_bytes"):
-        traded = []
-        if last["crf"] > max(spec["crf"], QUALITY_FLOOR_CRF):
-            traded.append(f"crf {spec['crf']} → {last['crf']}")
-        if full_w and last.get("width") and last["width"] < full_w:
-            traded.append(f"width {full_w} → {last['width']} px")
-        if traded:
-            out.append(
-                f"quality traded to fit {spec['limit']} ({limits.human_bytes(spec['max_bytes'])}): "
-                + ", ".join(traded)
-                + " — small text may soften; ship the full-quality render where the platform allows it"
-            )
-    if spec["max_bytes"] and size > spec["max_bytes"] and not (spec.get("limit_bytes") and size > spec["limit_bytes"]):
+    if limit_bytes and traded:
         out.append(
-            f"kept deliverable quality (crf {last['crf']}): {limits.human_bytes(size)} is over "
-            f"max_bytes {limits.human_bytes(spec['max_bytes'])}, and a bare max_bytes may not push a "
-            f"deliverable past crf {max(spec['crf'], QUALITY_FLOOR_CRF)} — pass a platform limit "
-            "(campaign_limits) when one really caps the file, or an explicit higher crf / smaller width"
+            f"quality traded to fit {limit} ({limits.human_bytes(max_bytes)}): " + ", ".join(traded)
+            + " — small text may soften; ship the full-quality render where the platform allows it"
+        )  # fmt: skip
+    if max_bytes and size > max_bytes and not (limit_bytes and size > limit_bytes):
+        out.append(
+            f"kept deliverable quality (crf {last_crf}): {limits.human_bytes(size)} is over max_bytes "
+            f"{limits.human_bytes(max_bytes)}, and a bare max_bytes may not push a deliverable past "
+            f"crf {quality_floor(crf)} — pass a platform limit (campaign_limits) when one really caps the "
+            "file, or an explicit higher crf / smaller size"
         )
     return out
+
+
+def quality_notes(spec: dict[str, Any], attempts: list[dict[str, Any]], src_w: int, size: int) -> list[str]:
+    """Say what a size ceiling cost (or would have cost) an mp4 — never let it happen silently."""
+    last, full_w = attempts[-1], spec["width"] or src_w or None
+    traded = []
+    if last["crf"] > quality_floor(spec["crf"]):
+        traded.append(f"crf {spec['crf']} → {last['crf']}")
+    if full_w and last.get("width") and last["width"] < full_w:
+        traded.append(f"width {full_w} → {last['width']} px")
+    return size_notes(
+        crf=spec["crf"], last_crf=last["crf"], traded=traded, limit=spec["limit"], max_bytes=spec["max_bytes"],
+        limit_bytes=spec.get("limit_bytes"), size=size,
+    )  # fmt: skip

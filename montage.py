@@ -1268,22 +1268,16 @@ def encode_notes(opts: dict[str, Any], attempts: list[dict[str, Any]], size: int
     """Say what a size ceiling cost (or would have cost) the montage — never silently."""
     if not attempts:
         return []
-    last, floor = attempts[-1], max(opts["crf"], render.QUALITY_FLOOR_CRF)
-    cap, out = opts.get("limit_bytes"), []
-    if cap and (last.get("bitrate") or last["crf"] > floor):
-        how = f"a {last['bitrate'] // 1000} kb/s cap" if last.get("bitrate") else f"crf {last['crf']}"
-        out.append(
-            f"quality traded to fit {opts['limit']} ({limits.human_bytes(opts['max_bytes'])}): crf {opts['crf']} → {how}"
-            " — small text may soften; ship the full-quality render where the platform allows it"
-        )
-    if opts["max_bytes"] and size > opts["max_bytes"] and not (cap and size > cap):
-        out.append(
-            f"kept deliverable quality (crf {last['crf']}): {limits.human_bytes(size)} is over max_bytes "
-            f"{limits.human_bytes(opts['max_bytes'])}, and a bare max_bytes may not push a deliverable past "
-            f"crf {floor} — pass a platform limit (campaign_limits) when one really caps the file, or an explicit "
-            "higher crf / smaller size"
-        )
-    return out
+    last = attempts[-1]
+    traded = []
+    if last.get("bitrate"):
+        traded.append(f"crf {opts['crf']} → a {last['bitrate'] // 1000} kb/s cap")
+    elif last["crf"] > render.quality_floor(opts["crf"]):
+        traded.append(f"crf {opts['crf']} → crf {last['crf']}")
+    return render.size_notes(
+        crf=opts["crf"], last_crf=last["crf"], traded=traded, limit=opts["limit"], max_bytes=opts["max_bytes"],
+        limit_bytes=opts.get("limit_bytes"), size=size,
+    )  # fmt: skip
 
 
 def encode_cmd(ff: str, src: str, dst: str, *, crf: int, bitrate: int | None = None) -> list[str]:
@@ -1307,7 +1301,7 @@ def encode_ladder(crf: int, max_bytes: int | None, duration: float, *, degrade: 
     if not max_bytes:
         return [{"crf": crf}]
     if not degrade:
-        top = max(crf, render.QUALITY_FLOOR_CRF)
+        top = render.quality_floor(crf)
         return [{"crf": c} for c in range(crf, top, 4)] + [{"crf": top}]
     steps = [{"crf": crf}, {"crf": min(crf + 4, 40)}, {"crf": min(crf + 8, 40)}]
     dur = max(duration, 0.5)
@@ -1638,7 +1632,7 @@ def render_montage(
 
         dst = out_dir / f"{opts['name']}.mp4"
         attempts: list[dict[str, Any]] = []
-        floor = max(opts["crf"], render.QUALITY_FLOOR_CRF)
+        floor = render.quality_floor(opts["crf"])
         ladder = encode_ladder(opts["crf"], opts["max_bytes"], timeline["total"], degrade=bool(opts.get("limit_bytes")))
         for step in ladder:
             degrading = bool(step.get("bitrate")) or step["crf"] > floor
