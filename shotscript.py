@@ -138,6 +138,9 @@ TOP_KEYS = {
     "init_script",
     "steps",
 }
+# What `overrides` may replace at the top level: every setting but the script's identity
+# (`name` — a saved script is re-saved under its own name) and its `steps` (overridden by number).
+OVERRIDABLE_TOP_KEYS = TOP_KEYS - {"name", "steps"}
 STEP_OPS = (
     "goto",
     "click",
@@ -1014,26 +1017,39 @@ def validate(text_or_obj: Any) -> dict[str, Any]:
     return out
 
 
-def apply_overrides(data: dict[str, Any], overrides: Any) -> tuple[dict[str, Any], list[int]]:
+def apply_overrides(data: dict[str, Any], overrides: Any) -> tuple[dict[str, Any], list[int | str]]:
     """A one-step fix without resubmitting the script: ``{N: <change>}`` per step number (1-based,
     as validation errors and failed takes number them). ``<change>`` is either a whole step —
     ``{click: {role: button, name: Save}}``, replacing step N — or options merged into step N's
-    mapping — ``{timeout_ms: 90000}``. Returns a NEW raw script (validate it next) and the step
-    numbers changed; raises :class:`ScriptError` naming every bad entry."""
+    mapping — ``{timeout_ms: 90000}``. A top-level key (``base_url``, ``color_scheme``,
+    ``viewport``… — anything but ``name`` and ``steps``) replaces that setting, so the SAME saved
+    script re-records against another sandbox or theme without resubmitting it. Returns a NEW
+    raw script (validate it next) and what changed — step numbers, then top-level keys; raises
+    :class:`ScriptError` naming every bad entry."""
     import copy
 
     if not isinstance(overrides, dict) or not overrides:
-        raise ScriptError(["overrides must be a mapping of step number → {op: {...}} or {option: value}"])
+        raise ScriptError(
+            ["overrides must be a mapping of step number → {op: {...}} or {option: value}, or setting → value"]
+        )
     out = copy.deepcopy(data)
     steps = out.get("steps")
     if not isinstance(steps, list) or not steps:
         raise ScriptError(["the script has no `steps:` list to override"])
     problems: list[str] = []
     changed: list[int] = []
+    settings: list[str] = []
     for key, change in overrides.items():
+        if isinstance(key, str) and key.strip() in OVERRIDABLE_TOP_KEYS:
+            out[key.strip()] = copy.deepcopy(change)
+            settings.append(key.strip())
+            continue
         n = int(key) if isinstance(key, int) or (isinstance(key, str) and key.strip().isdigit()) else None
         if n is None or not 1 <= n <= len(steps):
-            problems.append(f"overrides: {key!r} is not a step number 1..{len(steps)}")
+            problems.append(
+                f"overrides: {key!r} is not a step number 1..{len(steps)} or a top-level setting "
+                f"({', '.join(sorted(OVERRIDABLE_TOP_KEYS))})"
+            )
             continue
         if not isinstance(change, dict) or not change:
             problems.append(f"overrides step {n}: give {{op: {{...}}}} to replace it or {{option: value}} to change it")
@@ -1054,7 +1070,7 @@ def apply_overrides(data: dict[str, Any], overrides: Any) -> tuple[dict[str, Any
         changed.append(n)
     if problems:
         raise ScriptError(problems)
-    return out, sorted(changed)
+    return out, [*sorted(changed), *sorted(settings)]
 
 
 def resolve_url(script: dict[str, Any], url: str) -> str:

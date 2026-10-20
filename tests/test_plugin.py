@@ -39,6 +39,7 @@ TOOLS = {
     "campaign_script_save",
     "campaign_script_get",
     "campaign_shoot",
+    "campaign_sandbox_reset",
     "campaign_render",
     "campaign_card",
     "campaign_view",

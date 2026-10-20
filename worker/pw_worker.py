@@ -18,7 +18,7 @@ Usage (by the host, never by hand)::
 
 Job (``v: 1``) — secrets travel ONLY in this stdin payload, never argv or a file::
 
-    {"v": 1, "kind": "shoot" | "card" | "probe", "report_path": "...",
+    {"v": 1, "kind": "shoot" | "card" | "probe" | "reset", "report_path": "...",
      "fence": {"block_paths": ["<regex, case-insensitive, on every normalized form of the path>", ...]},   # REQUIRED
      # shoot: "script": {validated script, goto steps carry "_url"}, "out_dir": "...",
      #        "bearer": "<token or ''>"
@@ -1357,9 +1357,122 @@ def run_probe(job: dict[str, Any], playwright_factory: Callable | None = None) -
     return {"responses": out}, ""
 
 
+# A SANDBOX console's server-side state between takes (``campaign_sandbox_reset``): what a
+# recording leaves behind that the next take must not inherit. Each entry: the list GET, the
+# key holding the rows, the row's id field(s), and the DELETE path template. Paths are the
+# protoAgent console's own routes (chat sessions, the artifact plugin, goals).
+RESET_RECIPES: dict[str, dict[str, Any]] = {
+    "sessions": {"list": "/api/chat/sessions?limit=200", "key": "sessions", "id": ("id", "session_id"),
+                 "delete": "/api/chat/sessions/{id}"},
+    "artifacts": {"list": "/api/plugins/artifact/history", "key": "artifacts", "id": ("id",),
+                  "delete": "/api/plugins/artifact/artifact/{id}"},
+    "goals": {"list": "/api/goals", "key": "goals", "id": ("session_id",), "delete": "/api/goals/{id}"},
+}  # fmt: skip
+RESET_MAX_ROUNDS = 5  # a list is paged (sessions: 200 a page) — re-list until it comes back empty
+RESET_TIMEOUT_MS = 10000
+
+
+def run_reset(job: dict[str, Any], playwright_factory: Callable | None = None) -> tuple[dict[str, Any], str]:
+    """Clear a sandbox console's chat sessions / artifacts / goals (and optionally set its
+    theme) — plain HTTP through Playwright's request context, no browser. Every request goes
+    to ``base_url``'s origin only (the host checked that origin is a sandbox, never the
+    operator's live console or this agent's own), never to a fenced path, never following a
+    redirect. Before deleting anything it checks the target IS a protoAgent console: its
+    ``/api/chat/sessions`` answers 200 with a ``sessions`` list."""
+    from urllib.parse import quote
+
+    fence = _fence_patterns(job)
+    home = origin(str(job.get("base_url") or ""))
+    if not home:
+        return {}, "reset needs an http(s) base_url"
+    bearer = str(job.get("bearer") or "")
+    headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
+    clear = [c for c in job.get("clear") or [] if c in RESET_RECIPES]
+    theme = job.get("theme") if isinstance(job.get("theme"), dict) else None
+    out: dict[str, Any] = {"origin": home, "cleared": {}, "left": {}, "errors": []}
+
+    def url_for(path: str) -> str:
+        url = home + path
+        if origin(url) != home or path_blocked(url, fence):
+            raise ValueError(f"refusing {path}: off the sandbox origin or fenced")
+        return url
+
+    factory = playwright_factory or _default_factory
+    with factory() as pw:
+        ctx = pw.request.new_context()
+        try:
+
+            def call(method: str, path: str, data: Any = None):
+                return ctx.fetch(url_for(path), method=method, headers=headers, data=data,
+                                 timeout=RESET_TIMEOUT_MS, max_redirects=0)  # fmt: skip
+
+            def rows(recipe: dict[str, Any]) -> list[dict[str, Any]] | None:
+                r = call("GET", recipe["list"])
+                if int(r.status) != 200:
+                    return None
+                body = r.json()
+                got = body.get(recipe["key"]) if isinstance(body, dict) else None
+                return [x for x in got if isinstance(x, dict)] if isinstance(got, list) else None
+
+            try:
+                first = rows(RESET_RECIPES["sessions"])
+            except Exception as e:  # noqa: BLE001 — refused / DNS / not JSON
+                return out, f"{home} isn't answering as a protoAgent console ({first_line(e)}) — nothing was cleared"
+            if first is None:
+                return out, (
+                    f"{home}/api/chat/sessions didn't answer 200 with a sessions list — not a protoAgent console, "
+                    "or its auth refused the script's credentials. Nothing was cleared"
+                )
+            for name in clear:
+                recipe = RESET_RECIPES[name]
+                done = 0
+                for _ in range(RESET_MAX_ROUNDS):
+                    try:
+                        batch = rows(recipe)
+                    except Exception as e:  # noqa: BLE001
+                        out["errors"].append(f"{name}: list failed ({first_line(e)})")
+                        batch = None
+                    if batch is None:
+                        if done == 0 and not any(e.startswith(name) for e in out["errors"]):
+                            out["errors"].append(f"{name}: not available on this console (skipped)")
+                        break
+                    ids = [str(next((x[k] for k in recipe["id"] if x.get(k)), "")) for x in batch]
+                    ids = [i for i in ids if i]
+                    if not ids:
+                        break
+                    gone = 0
+                    for i in ids:
+                        try:
+                            r = call("DELETE", recipe["delete"].format(id=quote(i, safe="")))
+                            if int(r.status) < 300:
+                                gone += 1
+                            else:
+                                out["errors"].append(f"{name} {i}: HTTP {r.status}")
+                        except Exception as e:  # noqa: BLE001
+                            out["errors"].append(f"{name} {i}: {first_line(e)}")
+                    done += gone
+                    if gone == 0:
+                        break
+                out["cleared"][name] = done
+                try:
+                    left = rows(recipe)
+                    out["left"][name] = len(left) if left is not None else None
+                except Exception:  # noqa: BLE001
+                    out["left"][name] = None
+            if theme is not None:
+                try:
+                    r = call("PUT", "/api/theme", {"theme": theme})
+                    out["theme"] = int(r.status)
+                except Exception as e:  # noqa: BLE001
+                    out["errors"].append(f"theme: {first_line(e)}")
+        finally:
+            ctx.dispose()
+    return out, ""
+
+
 # ── dispatch ───────────────────────────────────────────────────────────────────
 
-RUNNERS = {"shoot": run_shoot, "card": run_card, "probe": run_probe}
+RUNNERS = {"shoot": run_shoot, "card": run_card, "probe": run_probe, "reset": run_reset}
 
 
 def _scrub(value: Any, secret: str) -> Any:

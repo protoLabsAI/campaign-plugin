@@ -23,18 +23,20 @@ or a render report is not a review. Before `ready_for_review` you must have view
 - **every still** of the take — `campaign_view(campaign_id, asset_id=<still id>)` for each
   (the take's stills are listed in `campaign_assets` with `kind=still`), plus every card and
   poster you're handing over;
-- **the clip's flow, ~1 frame per second across the WHOLE clip** —
-  `campaign_view(campaign_id, asset_id=<clip id>, every_s=1)` returns the first 12 seconds as
-  one contact sheet; a longer clip is paged, and the reply names the next page
-  (`NEXT PAGE: … start=12`) — call it until no page is left (a 30 s clip is 3 calls). Six
-  evenly spaced frames of a 30 s clip can't show a missing chunk of action; one a second can.
-  `start`/`end` (seconds or marks) narrow it to the action. Use `frames=3` (with `start`/`end`
-  for a span) for full-size frames when text must be read;
+- **the clip's flow: ONE 12-frame contact sheet per review pass** —
+  `campaign_view(campaign_id, asset_id=<clip id>, frames=12)` over the whole clip, or with
+  `start`/`end` (seconds or marks) over just the action so the 12 frames land where things
+  happen. Every image you view stays in the conversation, so a pass is one sheet, not page
+  after page of 1-second sheets. Only where that sheet shows a possible gap (something appears
+  "already done" between two tiles), look closer at THAT span: `every_s=1` with `start`/`end`
+  around it (one page). Use `frames=3` (with `start`/`end`) for full-size frames when text must
+  be read;
 - **both sides of every cut** — `around=<mark>` on the take for each mark you trimmed or
   speed-ramped at (`around` also takes seconds in the rendered file), so a jump never lands on
   a half-drawn dialog, a spinner, or a frame with something private in it.
 
-At most 3 images come back per call — call again rather than skipping. If `campaign_view`
+At most 3 images come back per call. A re-render is a new review pass: one new sheet, plus
+`around=` the cuts you changed — not the whole set again. If `campaign_view`
 says vision isn't available, you have NOT reviewed the asset: say so in the ready note and ask
 the operator to look in the gallery.
 
@@ -70,7 +72,7 @@ the operator to look in the gallery.
    mark. No dead air in the middle — speed-ramp it (≤4×, eased, only where nothing new
    appears) — never cut it out. Ends on a ~2.5 s hold on the result.
 8. **Continuous — no missing action.** Operator feedback on real clips: *"too many cut frames,
-   missing chunks of action."* Walking the ~1 s frames, the action must play through from its
+   missing chunks of action."* Across the sheet's frames, the action must play through from its
    start to its result with no jump: nothing appears "already done" between two frames. Every
    new UI element (a panel opening, a row landing, a status change, streamed text) is visible
    for **≥ 0.5 s** — if it flashes past inside a speed ramp, end the ramp before it and

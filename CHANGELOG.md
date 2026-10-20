@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.8.0
+
+Less of the campaign tools' output in the agent's context (#48). brandLaunch's night of takes
+grew one chat thread from 64k to 478k prompt tokens (132.5M in all), partly because of these
+tools' replies and of how the skills told the agent to use them.
+
+- **`campaign_shoot` / `campaign_render` / `campaign_video_status` reply with a short summary.**
+  A take names its asset id, its take dir once (files relative to it), duration, size, marks and
+  still ids. A failed take quotes its error once, without Playwright's call log, plus the three
+  steps before it and the `overrides={N: …}` call that fixes it. A render names its render dir
+  once, one line per output and one line per warning. A video job's status shows one line per
+  gate and file under one directory and the last 3 log lines; `verbose=true` shows the whole
+  log. The full error, timing log, failure still and render attempts stay on the asset
+  (`campaign_asset`). Measured on representative replies: shoot 862 → 622 chars, failed shoot
+  with a real Playwright error 1,990 → 931, render 1,340 → 774, video status 2,122 → 1,459.
+- **Save a script once, iterate by id.** `campaign_shoot(overrides=…)` now also takes top-level
+  settings (`{"base_url": …, "color_scheme": …}`) besides step numbers, so one saved script
+  records another sandbox or theme without the YAML being resent. `campaign_script_save` says
+  "Unchanged" (and points at overrides) when the same script is saved again, and
+  `campaign_script_get(steps="20-30")` shows only the steps being fixed.
+- **New `campaign_sandbox_reset`.** It clears a protoAgent sandbox console's chat sessions,
+  artifacts and goals (and optionally sets its theme preset) between takes, replacing the
+  hand-written `browser_eval` cleanup. It only targets a console a saved script records, uses
+  that script's auth, runs in the browser worker, and refuses a non-loopback console, the
+  operator's :7870 / :7871 instances and this agent's own console before sending anything.
+  The producer subagent has it.
+- **Skills keep the main thread small.** One asset per `task(campaign_producer)`, a fresh
+  sandbox per clip, one 12-frame contact sheet per review pass (1 s pages only over a span the
+  sheet flags), and save-once / iterate-by-id in shot-scripting. See
+  [Keeping the agent's context small](docs/usage.md#keeping-the-agents-context-small).
+
 ## 0.7.1
 
 - **Deliverables render at crf 16, the capture master's quality.** `campaign_render` defaulted

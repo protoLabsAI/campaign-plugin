@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -1151,8 +1152,19 @@ def absolute(url: str, bases: list[str]) -> str:
     return bases[0].rstrip("/") + url
 
 
-def summary(job: dict[str, Any]) -> str:
-    """The status text a tool / route returns."""
+SUMMARY_LOG_LINES = 3  # job-log lines a status reply carries; verbose=True carries them all
+SUMMARY_DETAIL = 160  # chars per gate detail / reason / log line in a status reply
+
+
+def _clip1(text: Any, n: int = SUMMARY_DETAIL) -> str:
+    one = " ".join(str(text or "").split())
+    return one if len(one) <= n else one[: n - 1].rstrip() + "…"
+
+
+def summary(job: dict[str, Any], verbose: bool = False) -> str:
+    """The status text a tool / route returns — compact: one line per gate, file and reason,
+    the files under ONE directory, the last few log lines. ``verbose`` adds the whole job log
+    (the job file keeps it either way; ``GET /videos/{id}`` returns all of it)."""
     inp = job["inputs"]
     lines = [
         *(
@@ -1164,25 +1176,33 @@ def summary(job: dict[str, Any]) -> str:
         f"status: {job['status']} · stage: {job.get('stage')} · progress {round(progress(job) * 100)}% · attempt {job.get('attempt', 0)}",
     ]
     if job.get("gates"):
-        lines.append("\nSelf-review gates:")
-        lines += [f"- [{'PASS' if g['ok'] else 'FAIL'}] {g['label']} — {g['detail']}" for g in job["gates"]]
+        lines.append("Self-review gates:")
+        lines += [f"- [{'PASS' if g['ok'] else 'FAIL'}] {g['label']} — {_clip1(g['detail'])}" for g in job["gates"]]
     if job.get("reasons") and job["status"] != "done":
-        lines.append("\nWhy it isn't done:")
-        lines += [f"- {r}" for r in job["reasons"]]
+        lines.append("Why it isn't done:")
+        lines += [f"- {_clip1(r)}" for r in job["reasons"]]
     d = job.get("delivery") or {}
     bases = link_bases()
-    if d.get("files"):
-        lines.append("\nFiles:")
-        for k, p in d["files"].items():
+    files = d.get("files") or {}
+    if files:
+        try:
+            root = Path(os.path.commonpath([str(Path(p).parent) for p in files.values()]))
+        except ValueError:  # different drives — no common root
+            root = None
+        lines.append(f"Files (in {root}):" if root else "Files:")
+        for k, p in files.items():
+            name = str(Path(p).relative_to(root)) if root else str(p)
             link = absolute((d.get("links") or {}).get(k) or "", bases)
             aid = (d.get("assets") or {}).get(k)
-            lines.append(f"- {k}: {p}" + (f" (asset #{aid})" if aid else "") + (f"\n  link: {link}" if link else ""))
+            lines.append(f"- {k}: {name}" + (f" (asset #{aid})" if aid else "") + (f" link: {link}" if link else ""))
     if d.get("links"):
         lines.append(
-            "\nTo a remote caller (A2A, /v1) give the links above — they download the file directly; "
-            "there is no Artifact panel or Download button on their side."
-            + ("" if bases else " The links are relative to this agent's base URL — prefix it.")
+            "Remote caller (A2A, /v1): give the links — they download directly; no Artifact panel there."
+            + ("" if bases else " Prefix them with this agent's base URL.")
         )
-    lines.append("\nRecent:")
-    lines += [f"  {x}" for x in (job.get("log") or [])[-6:]]
+    log_lines = job.get("log") or []
+    shown = log_lines if verbose else log_lines[-SUMMARY_LOG_LINES:]
+    if shown:
+        lines.append("Log:" if verbose else f"Recent (of {len(log_lines)}; verbose=true for all):")
+        lines += [f"  {x if verbose else _clip1(x)}" for x in shown]
     return "\n".join(lines)

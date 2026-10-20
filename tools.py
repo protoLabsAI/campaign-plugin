@@ -18,7 +18,7 @@ from typing import Annotated, Any
 
 from langchain_core.tools import tool
 
-from . import cards, deps, limits, look, montage, paths, produce, render, shoot, shotscript, store
+from . import cards, deps, limits, look, montage, paths, produce, render, sandbox, shoot, shotscript, store
 from . import intro as intromod
 from . import outro as outromod
 
@@ -199,13 +199,13 @@ def _keep_failed_take(
         still_ids.append(st["id"])
     reached = ", ".join(f"{k}={v:.2f}s" for k, v in marks.items()) or "none"
     text = (
-        f"The recording was KEPT → asset #{take['id']} [captured] — {note}\n"
-        f"- video: {r['video']} ({take['duration_s']:.1f}s, usable up to the failure)\n"
-        f"- timing log: {r.get('timing', '')}\n- marks reached: {reached}\n"
-        + (f"- stills: {', '.join(f'#{i}' for i in still_ids)}\n" if still_ids else "")
-        + (f"- not attached to asset #{asset_id}: a failed take never fills a planned slot\n" if asset_id else "")
-        + f"campaign_view it, and if the footage before the failure is enough, cut it with "
-        f"campaign_render(asset_id={take['id']}, …) — end at a time or a mark it reached."
+        f"Footage KEPT → asset #{take['id']} [captured], {take['duration_s']:.1f}s usable up to the failure; "
+        f"marks reached: {reached}"
+        + (f"; stills {', '.join(f'#{i}' for i in still_ids)}" if still_ids else "")
+        + (f" (not attached to planned asset #{asset_id} — a failed take never fills a slot)" if asset_id else "")
+        + f"\n- take dir: {r.get('dir') or Path(r['video']).parent} ({Path(r['video']).name}, timing.json"
+        + (", failure.png" if r.get("failure_png") else "")
+        + ")"
     )
     return text, take["id"], still_ids
 
@@ -213,6 +213,36 @@ def _keep_failed_take(
 def _clip(text: str, n: int) -> str:
     one = " ".join(str(text or "").split())
     return one if len(one) <= n else one[: n - 1].rstrip() + "…"
+
+
+# ── compact replies: what a shoot/render reply carries back into the model's context ──
+# A night of brandLaunch takes put ~2 kB per shoot reply into one thread that grew to 478k
+# tokens (#48): the same error three times, every path twice, a coaching paragraph. Replies
+# now carry the ids, ONE directory, the numbers and the next call; the full detail (the
+# whole Playwright error and call log, timing log, render attempts) stays on the asset —
+# campaign_asset(id) reads it back.
+ERROR_PREVIEW = 300  # chars of a step error a shoot reply quotes
+WARNING_PREVIEW = 300  # chars per render warning line
+
+
+def _short_error(text: str) -> str:
+    """A Playwright error without its ``Call log:`` tail (it restates the step), on one line."""
+    head = str(text or "").split(" | Call log:", 1)[0].split("\nCall log:", 1)[0]
+    return _clip(head, ERROR_PREVIEW)
+
+
+def _failed_label(take: dict[str, Any]) -> str:
+    """``FAILED at step N`` for a failed take — not its whole note (the error is on the asset)."""
+    n = ((take.get("meta") or {}).get("failed") or {}).get("step") or 0
+    return f"FAILED at step {n}" if n else "FAILED"
+
+
+def _rel(path: str, base: Path) -> str:
+    """``path`` relative to ``base`` when it's inside it, else the full path."""
+    try:
+        return str(Path(path).relative_to(base))
+    except ValueError:
+        return str(path)
 
 
 NOTE_PREVIEW = 160  # chars of notes per row in campaign_assets(notes=true)
@@ -883,9 +913,10 @@ def build_tools(registry):
         and just after that moment — use it on every cut, speed-ramp boundary and mark.
         start/end (seconds or a mark name) limit the frames to that span. every_s=1 takes a
         frame every second from start instead of `frames` — up to 12 per call (one contact
-        sheet); a longer span is paged and the reply names the NEXT PAGE's start, so a ~1 s
-        review of a whole clip is a few calls. At most 3 images per call (around's two + one
-        sheet). This is how the asset-review self-check is done:
+        sheet); a longer span is paged and the reply names the NEXT PAGE's start — use it on a
+        span a sheet flagged, not to page a whole clip. A review pass is ONE 12-frame sheet
+        (frames=12) plus around= each cut: every image stays in the conversation. At most 3
+        images per call (around's two + one sheet). This is how the asset-review self-check is done:
         read every still and the cut frames for secrets, home paths, emails and usernames on
         screen (terminal and canvas text too), clutter, the wrong theme, and legibility at half
         size."""
@@ -920,9 +951,12 @@ def build_tools(registry):
     # ── shot scripts ─────────────────────────────────────────────────────────
     @tool
     def campaign_script_save(campaign_id: int, script: str, name: str = "") -> str:
-        """Validate and save a shot script (YAML or JSON) to a campaign, so a take can be
-        re-recorded identically later. Validation reports every problem with its step number
-        (unknown step, missing target, bad timezone…). Pass script='template' to get an
+        """Validate and save a NEW shot script (YAML or JSON) to a campaign, so a take can be
+        re-recorded identically later. Save a script ONCE, then iterate on it by id:
+        campaign_shoot(script_id=…, overrides={N: step-change, "base_url": …}) fixes a step or
+        points the same script at another sandbox / theme without resending it — never paste the
+        whole YAML again for a small change. Validation reports every problem with its step
+        number (unknown step, missing target, bad timezone…). Pass script='template' to get an
         annotated example to adapt. Follow the shot-scripting skill: prefer role/text targets
         over CSS classes, hold frames long enough to read, redact secrets, fix the timezone."""
         if script.strip().lower() == "template":
@@ -932,29 +966,44 @@ def build_tools(registry):
             if name:
                 data["name"] = name
             norm = shotscript.validate(data)
+            prior = next((r for r in store.scripts(campaign_id) if r["name"] == norm["name"]), None)
+            if prior is not None and prior["body"] == data:
+                return (
+                    f"Unchanged — shot script #{prior['id']} {norm['name']!r} already holds exactly this. "
+                    f"Record it with campaign_shoot(campaign_id={campaign_id}, script_id={prior['id']}); change "
+                    "it with overrides=…, not by saving it again."
+                )
             row = store.save_script(campaign_id, norm["name"], data)
         except shotscript.ScriptError as e:
             return "Not saved — fix these and resend:\n" + "\n".join(f"- {p}" for p in e.problems)
         except ValueError as e:
             return f"Not saved — {e}"
         return (
-            f"Saved shot script #{row['id']} {norm['name']!r} ({len(norm['steps'])} steps). "
-            f"Record it with campaign_shoot(campaign_id={campaign_id}, script_id={row['id']})."
+            f"Saved shot script #{row['id']} {norm['name']!r} ({len(norm['steps'])} steps"
+            + (", replacing the earlier version" if prior is not None else "")
+            + f"). Record it with campaign_shoot(campaign_id={campaign_id}, script_id={row['id']}); "
+            "iterate with overrides=… on that id."
         )
 
     @tool
-    def campaign_script_get(script_id: int) -> str:
-        """Read a saved shot script back as YAML — the whole script as saved, every step
-        commented with its number (the numbers validation errors and failed takes use). Use it
-        to fix a script without rewriting it from memory: change one step with
-        campaign_shoot(script_id=…, overrides={N: …}), or edit the YAML and campaign_script_save
-        it again. campaign_get lists a campaign's scripts by id."""
+    def campaign_script_get(script_id: int, steps: str = "") -> str:
+        """Read a saved shot script back as YAML — every step commented with its number (the
+        numbers validation errors and failed takes use). steps='20-30' (or '27') shows only
+        those steps plus the settings, so fixing one step doesn't pull the whole script into
+        context. Use it to fix a script without rewriting it from memory: change one step with
+        campaign_shoot(script_id=…, overrides={N: …}). campaign_get lists a campaign's scripts
+        by id."""
         row = store.get_script(script_id)
         if row is None:
             return f"No shot script #{script_id} — campaign_get(campaign_id) lists a campaign's scripts."
+        try:
+            span = _step_span(steps, len(row["body"].get("steps") or []))
+        except ValueError as e:
+            return str(e)
         return (
-            f"Shot script #{row['id']} {row['name']!r} (campaign {row['campaign_id']}, saved {row['updated']}):\n"
-            f"```yaml\n{_script_yaml(row['body'])}```"
+            f"Shot script #{row['id']} {row['name']!r} (campaign {row['campaign_id']}, saved {row['updated']}"
+            + (f"; steps {span[0]}–{span[1]} of {len(row['body'].get('steps') or [])}" if span else "")
+            + f"):\n```yaml\n{_script_yaml(row['body'], span)}```"
         )
 
     @tool
@@ -972,10 +1021,14 @@ def build_tools(registry):
         2560×1600 from a 1280×800 viewport at device_scale_factor 2, for crisp small text), the
         named stills, and a timing log of every mark as campaign assets (status 'captured'). Pass script_id for a saved script, or script (YAML/JSON) to
         validate, save and run in one go. Pass asset_id to fill a planned asset with this take.
-        overrides={N: change} fixes step N (1-based, as errors number them) without resubmitting
-        the script: a whole step ({"click": {"role": "button", "name": "Save"}}) replaces it,
-        options ({"timeout_ms": 90000}) are merged into it. The patched script is validated like
-        any other and SAVED (same name), so the take stays re-recordable.
+        THE ITERATION PATH: save a script once, then re-shoot it by script_id with overrides —
+        never resend the whole script. overrides={N: change} fixes step N (1-based, as errors
+        number them): a whole step ({"click": {"role": "button", "name": "Save"}}) replaces it,
+        options ({"timeout_ms": 90000}) are merged into it; a top-level setting
+        ({"base_url": "http://127.0.0.1:7944", "color_scheme": "light"}) replaces that setting, so
+        one script records another sandbox or theme. The patched script is validated like any
+        other and SAVED (same name), so the take stays re-recordable. The reply is a short
+        summary (asset ids, the take dir, marks); campaign_asset(id) has the full detail.
         On a failed step you get the step number, the error, and a screenshot of the page at
         that moment — and the recording up to the failure is KEPT as a new 'captured' clip noted
         'FAILED at step N: …' with the marks it reached, so campaign_render can still cut a beat
@@ -1016,23 +1069,35 @@ def build_tools(registry):
             res = shoot.run(norm, out_dir)
         except shoot.ShootError as e:
             r = e.result
-            tail = "\n".join(
-                f"  {s['index']}. {s['desc']} @{s.get('t_start', 0):.1f}s"
-                + (f" — ERROR {s['error']}" if s.get("error") else "")
-                for s in r.get("steps", [])[-6:]
-            )
-            msg = f"Take failed — {e}\n\nLast steps:\n{tail or '  (none ran)'}"
-            if r.get("failure_png"):
-                msg += f"\n\nScreenshot at failure: {r['failure_png']}" + _embed(
-                    r["failure_png"], "image/png", "failure"
+            n = r.get("failed_step") or 0
+            before = [s for s in r.get("steps", []) if not s.get("error")][-3:]
+            msg = f"Take failed — {_short_error(str(e))}"
+            if before:
+                msg += "\n- steps before it: " + " · ".join(
+                    f"{s['index']}. {_clip(s['desc'], 60)} @{s.get('t_start', 0):.1f}s" for s in before
                 )
+            kept_id = 0
             if r.get("video") and Path(r["video"]).is_file():
-                kept, take_id, still_ids = _keep_failed_take(
+                kept, kept_id, still_ids = _keep_failed_take(
                     campaign_id, norm, r, str(e), script_id, lane_id, title, asset_id
                 )
-                _emit("shoot_finished", {"campaign_id": campaign_id, "asset_id": take_id, "stills": still_ids})
-                msg += "\n\n" + kept
-            msg += "\n\nFix the step (a role/text target is sturdier than CSS; add a wait_for before it) and re-shoot."
+                _emit("shoot_finished", {"campaign_id": campaign_id, "asset_id": kept_id, "stills": still_ids})
+                msg += "\n" + kept
+            elif r.get("failure_png"):
+                msg += f"\n- failure still: {r['failure_png']}"
+            fix = f"{{{n}: {{...}}}}" if n else "{N: {...}}"
+            msg += (
+                "\nNext: fix the step (a role/text target, a wait_for before it, its own timeout_ms) with "
+                f"campaign_shoot(campaign_id={campaign_id}, script_id={script_id}, overrides={fix}) — don't resend "
+                "the script."
+            )
+            if kept_id:
+                msg += (
+                    f" If the kept footage already holds the beat, cut it: campaign_render(asset_id={kept_id}, …) "
+                    f"ending at a reached mark. Full error + timing log: campaign_asset({kept_id})."
+                )
+            if r.get("failure_png"):
+                msg += _embed(r["failure_png"], "image/png", "failure")
             return msg
         except Exception as e:  # noqa: BLE001 — a browser launch failure etc. should read clearly
             log.exception("[campaign] shoot failed")
@@ -1046,7 +1111,10 @@ def build_tools(registry):
             err = f"the recording can't be read ({problem}) — it may be truncated"
             kept, take_id, still_ids = _keep_failed_take(campaign_id, norm, r, err, script_id, lane_id, title, asset_id)
             _emit("shoot_finished", {"campaign_id": campaign_id, "asset_id": take_id, "stills": still_ids})
-            return f"Take failed — {err}\n\n{kept}\n\nRe-shoot it."
+            return (
+                f"Take failed — {err}\n{kept}\n"
+                f"Next: re-shoot it — campaign_shoot(campaign_id={campaign_id}, script_id={script_id})."
+            )
         facts = _file_facts(res["video"]) if res.get("video") else {}
         meta = {
             "timing": res["timing"],
@@ -1090,20 +1158,50 @@ def build_tools(registry):
         marks = ", ".join(f"{k}={v:.2f}s" for k, v in res["marks"].items()) or "none"
         out = (
             f"Recorded take → asset #{take['id']} ({take['duration_s']:.1f}s, {take['width']}×{take['height']}, "
-            f"{limits.human_bytes(take['size_bytes'])})\n"
-            f"- video: {res['video']}\n- timing log: {res['timing']}\n- marks: {marks}\n"
+            f"{limits.human_bytes(take['size_bytes'])}) from script #{script_id}\n"
+            f"- take dir: {res['dir']} ({_rel(res.get('video', ''), Path(res['dir']))}, timing.json)\n"
+            f"- marks: {marks}\n"
             + (f"- capture: {res['capture_note']}\n" if res.get("capture_note") else "")
             + f"- stills: {', '.join(f'#{i}' for i in still_ids) or 'none'}\n"
             + "".join(f"- {n}\n" for n in superseded)
-            + "\n"
-            "LOOK at it before rendering — campaign_view each still (asset_id) and the clip around its marks "
-            "(legible? anything secret on screen?) — then cut it with "
-            f"campaign_render(asset_id={take['id']}, outputs=[…])."
+            + f"Next: LOOK (campaign_view each still + ONE 12-frame sheet of the clip), then "
+            f"campaign_render(asset_id={take['id']}, outputs=[…]). Re-take: campaign_shoot(script_id={script_id}, "
+            "overrides=…), never the whole script again."
         )
         first = next(iter(res["screenshots"].values()), "")
         if first:
             out += _embed(first, "image/png", f"{norm['name']} still")
         return out
+
+    @tool
+    def campaign_sandbox_reset(
+        campaign_id: int,
+        script_id: int = 0,
+        base_url: str = "",
+        clear: list[str] | str = "",
+        theme: str = "",
+    ) -> str:
+        """Reset a protoAgent SANDBOX console between takes — delete its chat sessions, artifacts
+        and goals so the next take starts clean (clear= any of sessions, artifacts, goals;
+        default all three), and optionally set its theme preset (theme='gruvbox', in the script's
+        color_scheme). Use it instead of hand-written browser_eval cleanup. The target is the
+        console a saved shot script records: script_id (its base_url), or base_url matching one
+        of the campaign's scripts, or — with neither — the one console its scripts share. It
+        REFUSES, before sending anything, a console that isn't on this machine, the operator's
+        :7870 / :7871 instances, and this agent's own console (and refuses when it can't tell
+        which console is its own). Requests use the script's own auth (bearer_env /
+        storage_state). Returns one line: what was cleared and anything left."""
+        if (reason := deps.need_browser()) is not None:
+            return reason
+        try:
+            res = sandbox.reset(campaign_id, script_id=script_id, base_url=base_url, clear=clear, theme=theme)
+        except sandbox.SandboxError as e:
+            return f"Not reset — {e}"
+        except ValueError as e:
+            return f"Not reset — {e}"
+        except shoot.WorkerError as e:
+            return f"Not reset — the browser worker couldn't run: {e}"
+        return sandbox.describe(res)
 
     # ── render ───────────────────────────────────────────────────────────────
     @tool
@@ -1161,7 +1259,7 @@ def build_tools(registry):
                 hint = ""
                 if failed and "neither seconds nor a mark" in str(e):
                     hint = (
-                        f" — this take {take.get('notes') or 'failed'}, so marks after that step were never "
+                        f" — this take {_failed_label(take)}, so marks after that step were never "
                         "reached: end at a time (seconds) or a mark it did reach"
                     )
                 lines.append(f"- {raw.get('name', '?') if isinstance(raw, dict) else raw}: FAILED — {e}{hint}")
@@ -1194,29 +1292,26 @@ def build_tools(registry):
                      "warnings": [*r["warnings"], *(f"bookends: {n}" for n in size_notes)]}  # fmt: skip
             elif booked:
                 r = {**r, "warnings": [*r["warnings"], booked]}
-            flag = f"  ⚠ {'; '.join(r['violations'])}" if r["violations"] else ""
-            flag += f"  ⚠ notes: {'; '.join(r['warnings'])}" if r["warnings"] else ""
             lines.append(
-                f"- #{a['id']} {spec['name']}.{Path(r['path']).suffix.lstrip('.')} — {limits.human_bytes(r['size_bytes'])}, "
-                f"{r['width']}×{r['height']}"
-                + (f", {r['duration_s']:.1f}s" if r["duration_s"] else "")
-                + f" ({len(r['attempts'])} attempt{'s' if len(r['attempts']) != 1 else ''}){flag}\n    {r['path']}"
+                f"- #{a['id']} {_rel(r['path'], out_dir)} — {limits.human_bytes(r['size_bytes'])}, "
+                f"{r['width']}×{r['height']}" + (f", {r['duration_s']:.1f}s" if r["duration_s"] else "")
             )
+            lines += [f"    ⚠ VIOLATES: {_clip(v, WARNING_PREVIEW)}" for v in r["violations"]]
+            lines += [f"    ⚠ {_clip(w, WARNING_PREVIEW)}" for w in r["warnings"]]
         if made and take["status"] in ("planned", "scripted", "captured"):
             store.update_asset(take["id"], status="rendered")
         _emit("render_finished", {"campaign_id": c["id"], "source_asset_id": take["id"], "assets": made})
         return (
             (
-                f"Rendering from a FAILED take ({take.get('notes') or 'failed'}) — only footage up to the "
-                "failure exists.\n"
+                f"Rendering from a FAILED take ({_failed_label(take)}) — only footage up to the failure exists.\n"
                 if failed
                 else ""
             )
-            + "Rendered:\n"
+            + (f"Rendered into {out_dir}:\n" if made else "Rendered:\n")
             + "\n".join(lines)
             + (
-                "\n\nRun the asset-review self-check — campaign_view each file and its cut points — then "
-                "campaign_asset_update(…, status='ready_for_review')."
+                "\nNext: asset-review — campaign_view each file (one 12-frame sheet + around= each cut), then "
+                "campaign_asset_update(…, status='ready_for_review'). Attempts + specs: campaign_asset(id)."
                 if made
                 else ""
             )
@@ -1637,14 +1732,15 @@ def build_tools(registry):
         )
 
     @tool
-    def campaign_video_status(job_id: str = "", wait_s: int = 0) -> str:
+    def campaign_video_status(job_id: str = "", wait_s: int = 0, verbose: bool = False) -> str:
         """Progress of a campaign_produce_video job: stage (recording → measuring → rendering →
         reviewing → delivering), percent, the self-review gate table (PASS/FAIL each) and, once
         it ends, the files (review mp4, GitHub-sized mp4, contact sheet, 100 % text crop) with
         their asset ids and signed download links. wait_s (≤ 600) blocks until the job ends or
         that many seconds pass — use it from an API/A2A turn that must return the finished file.
         No job_id lists recent jobs. Status 'needs_review' means a gate failed: say so and why —
-        never present that video as finished."""
+        never present that video as finished. The reply is compact (one line per gate and file,
+        the last 3 log lines); verbose=true adds the whole job log."""
         if not job_id:
             jobs = produce.list_jobs(10)
             if not jobs:
@@ -1663,7 +1759,7 @@ def build_tools(registry):
             job = produce.load(job_id)
         if job is None:
             return f"No video job {job_id!r} — campaign_video_status() lists recent ones."
-        out = produce.summary(job)
+        out = produce.summary(job, verbose=bool(verbose))
         if (n := _attach(job)) > 0:
             out += f"\n\n{n} file(s) attached to this reply (a remote caller receives them as files)."
         sheet = (job.get("delivery") or {}).get("files", {}).get("sheet")
@@ -1689,6 +1785,7 @@ def build_tools(registry):
         campaign_script_save,
         campaign_script_get,
         campaign_shoot,
+        campaign_sandbox_reset,
         campaign_render,
         campaign_card,
         campaign_view,
@@ -1703,9 +1800,26 @@ def build_tools(registry):
     ]
 
 
-def _script_yaml(body: dict[str, Any]) -> str:
+def _step_span(raw: Any, total: int) -> tuple[int, int] | None:
+    """``"20-30"`` / ``"27"`` → (first, last), 1-based and clamped; ``""`` → None (all)."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    parts = [p.strip() for p in text.replace("–", "-").split("-", 1)]
+    try:
+        lo, hi = int(parts[0]), int(parts[-1])
+    except ValueError:
+        raise ValueError(f"steps must be 'N' or 'N-M' (1..{total}), got {raw!r}") from None
+    lo, hi = max(1, min(lo, hi)), min(total, max(lo, hi))
+    if lo > total:
+        raise ValueError(f"steps {raw!r} is past the end — the script has {total} steps")
+    return lo, hi
+
+
+def _script_yaml(body: dict[str, Any], span: tuple[int, int] | None = None) -> str:
     """A saved script as YAML that round-trips (``shotscript.parse`` reads it back to ``body``),
-    each step preceded by a ``# step N`` comment."""
+    each step preceded by a ``# step N`` comment. With ``span``, only those steps (an excerpt —
+    it doesn't round-trip)."""
     import yaml
 
     def dump(obj: Any, flow: bool | None = None) -> str:
@@ -1719,6 +1833,8 @@ def _script_yaml(body: dict[str, Any]) -> str:
     if isinstance(steps, list):
         out += "steps:\n"
         for i, st in enumerate(steps, start=1):
+            if span and not span[0] <= i <= span[1]:
+                continue
             nested = isinstance(st, dict) and any(isinstance(v, (dict, list)) for v in st.values())
             item = dump([st], flow=None if nested else False).rstrip("\n").replace("\n", "\n  ")
             out += f"  # step {i}\n  {item}\n"

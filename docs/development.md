@@ -67,6 +67,7 @@ playwright. CI runs both: the unit job, and an integration job that installs Chr
 | `surface.py` | The library surface: retention + archive ticks |
 | `openlink.py` | Signed links for "Open in new tab" |
 | `subagents.py` | The `campaign_producer` subagent |
+| `sandbox.py` | `campaign_sandbox_reset`: resolve + guard a sandbox console, then clear it via the worker |
 | `threads.py` | Run a blocking call on a fresh worker thread |
 | `skills/` | The five skills |
 | `docs/assets/` | Screenshots used by the README and docs (WebP) |
