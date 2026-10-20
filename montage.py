@@ -32,9 +32,11 @@ cut the take into two items (two beats) if it needs that.
   stays crisp. A colour wipe of duration T covers the last T/2 of one item and the first T/2
   of the next and doesn't shorten the timeline; an ``xfade`` of T overlaps the two by T.
 
-The graph renders once to a near-lossless master; the shipped mp4 (H.264 High, yuv420p,
-``+faststart``) is encoded from it, stepping CRF and then a capped bitrate until it fits the
-size ceiling. A poster PNG and (optionally) a GIF — kept only if it fits its limit — come from
+The graph renders once to a near-lossless master; the shipped mp4 (H.264 High, preset slow,
+yuv420p, ``+faststart``) is encoded from it at ``crf`` 16 (``render.DELIVERABLE_CRF``). Under a
+platform ``limit`` that caps bytes it steps CRF and then a capped bitrate until it fits, and says
+in ``warnings`` when that went past crf 20; a bare ``max_bytes`` only steps CRF up to
+``render.QUALITY_FLOOR_CRF`` (20) and, if still over, keeps that quality and warns instead. A poster PNG and (optionally) a GIF — kept only if it fits its limit — come from
 the same master.
 
 ``storyboard`` renders a contact sheet instead (one frame per item, a swatch for each
@@ -121,7 +123,7 @@ OUTPUT_DEFAULTS: dict[str, Any] = {
     "reduced_motion": False,  # true: every moving transition becomes a cut (dissolves stay)
     "limit": "",  # a hard-limit id (campaign_limits) the mp4 must meet
     "max_bytes": None,  # and/or an explicit ceiling
-    "crf": 20,
+    "crf": render.DELIVERABLE_CRF,  # 16 — the capture master's quality; ≤ 17 for any deliverable
     "poster": True,
     "poster_at": None,  # seconds into the montage; default: the middle of the first clip
     "gif": False,  # also try a GIF — kept only if it fits gif_limit
@@ -301,7 +303,7 @@ def normalize_output(output: Any) -> dict[str, Any]:
     if not isinstance(o.get("reduced_motion"), bool):
         problems.append("output.reduced_motion must be true or false")
     crf = _num(o["crf"], "output.crf", problems, 0, 40)
-    max_bytes = None
+    max_bytes = limit_bytes = None
     if o.get("max_bytes") not in (None, "", 0):
         mb = _num(o["max_bytes"], "output.max_bytes", problems, 1000, 10**12)
         max_bytes = int(mb) if mb else None
@@ -310,7 +312,8 @@ def normalize_output(output: Any) -> dict[str, Any]:
     if limit_id and row is None:
         problems.append(f"output.limit: unknown limit {limit_id!r} — campaign_limits lists them")
     if row and row.get("max_bytes"):
-        max_bytes = min(max_bytes, int(row["max_bytes"])) if max_bytes else int(row["max_bytes"])
+        limit_bytes = int(row["max_bytes"])
+        max_bytes = min(max_bytes, limit_bytes) if max_bytes else limit_bytes
     gif_limit = str(o.get("gif_limit") or "")
     if o.get("gif") and gif_limit and limits.get(gif_limit) is None:
         problems.append(f"output.gif_limit: unknown limit {gif_limit!r}")
@@ -343,8 +346,9 @@ def normalize_output(output: Any) -> dict[str, Any]:
         "transition": default_tr,
         "transition_duration": float(o["transition_duration"] or 0.45),
         "reduced_motion": bool(o.get("reduced_motion")),
-        "crf": int(crf if crf is not None else 20),
+        "crf": int(crf if crf is not None else render.DELIVERABLE_CRF),
         "max_bytes": max_bytes,
+        "limit_bytes": limit_bytes,  # the platform cap behind max_bytes; None for a bare max_bytes
         "limit": limit_id,
         "poster": bool(o["poster"]),
         "poster_at": poster_at,
@@ -1260,6 +1264,28 @@ def master_cmd(ff: str, args: list[str], graph: str, dst: str, fps: float) -> li
     ]  # fmt: skip
 
 
+def encode_notes(opts: dict[str, Any], attempts: list[dict[str, Any]], size: int) -> list[str]:
+    """Say what a size ceiling cost (or would have cost) the montage — never silently."""
+    if not attempts:
+        return []
+    last, floor = attempts[-1], max(opts["crf"], render.QUALITY_FLOOR_CRF)
+    cap, out = opts.get("limit_bytes"), []
+    if cap and (last.get("bitrate") or last["crf"] > floor):
+        how = f"a {last['bitrate'] // 1000} kb/s cap" if last.get("bitrate") else f"crf {last['crf']}"
+        out.append(
+            f"quality traded to fit {opts['limit']} ({limits.human_bytes(opts['max_bytes'])}): crf {opts['crf']} → {how}"
+            " — small text may soften; ship the full-quality render where the platform allows it"
+        )
+    if opts["max_bytes"] and size > opts["max_bytes"] and not (cap and size > cap):
+        out.append(
+            f"kept deliverable quality (crf {last['crf']}): {limits.human_bytes(size)} is over max_bytes "
+            f"{limits.human_bytes(opts['max_bytes'])}, and a bare max_bytes may not push a deliverable past "
+            f"crf {floor} — pass a platform limit (campaign_limits) when one really caps the file, or an explicit "
+            "higher crf / smaller size"
+        )
+    return out
+
+
 def encode_cmd(ff: str, src: str, dst: str, *, crf: int, bitrate: int | None = None) -> list[str]:
     """The shipped mp4: H.264 High, yuv420p, square pixels, moov up front."""
     cmd = [
@@ -1273,10 +1299,16 @@ def encode_cmd(ff: str, src: str, dst: str, *, crf: int, bitrate: int | None = N
     return cmd + [dst]
 
 
-def encode_ladder(crf: int, max_bytes: int | None, duration: float) -> list[dict[str, int]]:
-    """Quality first (CRF), then a capped average bitrate that lands under the ceiling."""
+def encode_ladder(crf: int, max_bytes: int | None, duration: float, *, degrade: bool = True) -> list[dict[str, int]]:
+    """Quality first (CRF), then a capped average bitrate that lands under the ceiling.
+
+    ``degrade=False`` (a bare ``max_bytes``, no platform limit): CRF only, never past
+    ``max(crf, render.QUALITY_FLOOR_CRF)``."""
     if not max_bytes:
         return [{"crf": crf}]
+    if not degrade:
+        top = max(crf, render.QUALITY_FLOOR_CRF)
+        return [{"crf": c} for c in range(crf, top, 4)] + [{"crf": top}]
     steps = [{"crf": crf}, {"crf": min(crf + 4, 40)}, {"crf": min(crf + 8, 40)}]
     dur = max(duration, 0.5)
     for frac in (0.9, 0.75, 0.6):
@@ -1606,7 +1638,12 @@ def render_montage(
 
         dst = out_dir / f"{opts['name']}.mp4"
         attempts: list[dict[str, Any]] = []
-        for step in encode_ladder(opts["crf"], opts["max_bytes"], timeline["total"]):
+        floor = max(opts["crf"], render.QUALITY_FLOOR_CRF)
+        ladder = encode_ladder(opts["crf"], opts["max_bytes"], timeline["total"], degrade=bool(opts.get("limit_bytes")))
+        for step in ladder:
+            degrading = bool(step.get("bitrate")) or step["crf"] > floor
+            if degrading and attempts and attempts[-1]["size_bytes"] <= (opts.get("limit_bytes") or 0):
+                break  # it already fits the platform cap; only a tighter bare max_bytes is unmet
             _ff(runner, encode_cmd(ff, str(master), str(dst), crf=step["crf"], bitrate=step.get("bitrate")), None)
             size = dst.stat().st_size if dst.exists() else 0
             attempts.append({**step, "size_bytes": size})
@@ -1614,9 +1651,11 @@ def render_montage(
                 break
         info = render.probe(dst, lambda c: runner(c, None))
         violations: list[str] = []
-        if opts["max_bytes"] and info["size_bytes"] > opts["max_bytes"]:
+        warnings += encode_notes(opts, attempts, info["size_bytes"])
+        cap = opts.get("limit_bytes")
+        if cap and info["size_bytes"] > cap:
             violations.append(
-                f"{limits.human_bytes(info['size_bytes'])} is still over the {limits.human_bytes(opts['max_bytes'])} "
+                f"{limits.human_bytes(info['size_bytes'])} is still over the {limits.human_bytes(cap)} "
                 f"ceiling after {len(attempts)} attempts — cut beats or use a smaller preset"
             )
         if opts["limit"]:

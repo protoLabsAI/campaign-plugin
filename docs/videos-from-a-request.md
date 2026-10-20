@@ -23,7 +23,7 @@ It runs as a **background job** (a worker thread in the plugin; one at a time): 
 take (`quality: 2k` → `device_scale_factor` = 2560 ÷ viewport width + `capture: device`; an
 Atlas script also gets a `last-slide` mark) → **measure** the first settled frame after `start`
 (the in-point) and, for Atlas footage, when the final caption is fully up and starts fading →
-**render** `[intro] → walkthrough → [outro]` twice: a review cut (crf 18) and a GitHub variant
+**render** `[intro] → walkthrough → [outro]` twice: a review cut (crf 16) and a GitHub variant
 held under `github_attachment_video_free` (10 MB) → **self-review** → **deliver**.
 
 **Self-review gates** — all must pass before a job is `done`:

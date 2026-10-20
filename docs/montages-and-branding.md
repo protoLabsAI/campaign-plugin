@@ -22,7 +22,7 @@ campaign_storyboard(campaign_id, sequence, output={...})
 `output` (a mapping, or just a preset name): `name`, `title`, `preset` (`landscape`
 1920×1080 · `vertical` 1080×1920 · `square` 1080×1080) or `size: WxH`, `fit`
 (`auto` · `letterbox` · `crop`), `fps` (30), `background`, `transition` (`edge_sweep`), `reduced_motion` and
-`transition_duration` (0.45 s), `limit` / `max_bytes`, `crf`, `poster`, `poster_at`, `gif`,
+`transition_duration` (0.45 s), `limit` / `max_bytes`, `crf` (16), `poster`, `poster_at`, `gif`,
 `gif_limit`, `gif_width`, `label_font`, `card_engine` (`auto` · `html` · `ffmpeg`),
 `label_engine` (`auto` · `drawtext` · `html` · `none`). Unknown keys anywhere are refused, with
 every problem listed at once.
@@ -68,9 +68,11 @@ every problem listed at once.
   without `drawtext` (e.g. Homebrew's) gets the same lower third as a transparent HTML overlay;
   with neither, labels are skipped and the reply says so. Vertical labels sit above the
   bottom ~22 % where Shorts/Reels draw their own UI.
-- **Output**: the graph renders once to a near-lossless master; the mp4 (H.264 High, yuv420p,
-  `+faststart`) is encoded from it, stepping CRF and then a capped bitrate until it fits the
-  size ceiling. A `limit` is checked twice — length/orientation/dimensions before rendering,
+- **Output**: the graph renders once to a near-lossless master; the mp4 (H.264 High, preset
+  slow, yuv420p, `+faststart`) is encoded from it at `crf` 16 (deliverable quality). Under a
+  platform `limit` it steps CRF and then a capped bitrate until it fits, warning when that went
+  past crf 20; a bare `max_bytes` stops at crf 20 and warns instead
+  (see [Deliverable quality](limits.md#deliverable-quality)). A `limit` is checked twice — length/orientation/dimensions before rendering,
   size after. The poster is a PNG at the middle of the first clip (or `poster_at`); the GIF
   (`gif: true`) is kept only if it fits `gif_limit` (GitHub's 10 MB by default).
 - **Approval**: a montage may use clips that are only `ready_for_review` (or earlier) — the
@@ -104,7 +106,8 @@ generated with the DS snapshot; the bumper is `brands/protolabs/protoagent-splas
   GIF-style loops and other cuts that must not have them; `true` makes them required.
 - **campaign_render** — each mp4 output takes `bookends: brand` (the default for a full clip) or
   `none`; the plain render is wrapped in the bookends at its own size (title = the output's
-  `title`, else the asset's) and the asset points at the bookended file. GIFs and posters never
+  `title`, else the asset's) at the render's own `crf` (16 unless the output names one), and
+  the asset points at the bookended file. GIFs and posters never
   get them.
 
 ## The video end-card recipe (brand outro)

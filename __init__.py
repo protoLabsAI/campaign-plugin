@@ -22,7 +22,7 @@ import logging
 
 log = logging.getLogger("protoagent.plugins.campaign")
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 
 def _host_store(registry) -> str:

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.1
+
+- **Deliverables render at crf 16, the capture master's quality.** `campaign_render` defaulted
+  to crf 23, the brand bookends and montages to crf 20, and `campaign_produce_video`'s review
+  cut to crf 18, so a crisp 2K take was re-encoded softer at every step. Every deliverable mp4
+  (render, bookends, the produce review cut, montages) now defaults to crf 16 with libx264
+  `-preset slow`, yuv420p and `+faststart`. The bookends wrap a render at that render's own crf.
+  An explicit `crf` still wins.
+- **A size ceiling no longer degrades a deliverable silently.** A bare `max_bytes` with no
+  platform limit only steps CRF up to 20 at full width. If the file is still over, it is kept at
+  that quality with a `kept deliverable quality …` warning instead of being pushed to crf 27+.
+  It is not a violation. A platform `limit` that caps bytes (GitHub's 10 MB) may still step CRF
+  and width or bitrate down to fit, but any step past crf 20 is reported as
+  `quality traded to fit …`. The render report's flag is now `⚠ notes:` (it was
+  `⚠ continuity:`), since it carries these too. See [Deliverable quality](docs/limits.md#deliverable-quality).
+
 ## 0.7.0
 
 - **The producer can open the skills its prompt cites** (#42). `campaign_producer`'s prompt told

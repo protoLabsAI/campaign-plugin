@@ -105,6 +105,7 @@ def test_campaign_render_wraps_a_full_clip_in_the_bookends(kit, tmp_path, monkey
     out = tools._bookend_render(c, a, spec, r, tmp_path)
     assert out.endswith("hero-bookends.mp4") and seen["seq"] == [{"clip": a["id"]}]
     assert seen["opts"]["title"] == "Hero cut" and seen["opts"]["size"] == "2560x1440"
+    assert seen["opts"]["crf"] == render.DELIVERABLE_CRF == 16, "bookends keep the render's deliverable quality"
     got = store.get_asset(a["id"])
     assert got["path"] == out and got["meta"]["bookends"] == "protoLabs bookends v1"
     assert got["meta"]["unbookended"] == str(plain)

@@ -7,7 +7,7 @@ worker thread:
     record   the take (``capture: device`` at the requested quality — 2k = 2560 px wide)
     measure  the first SETTLED frame after ``start`` (the cut's in-point — never mid-motion)
              and, for Atlas footage, when the final caption is fully up / starts fading
-    render   [intro] → the walkthrough (in → ``end``) → [outro] as a review mp4 (crf 18) and a
+    render   [intro] → the walkthrough (in → ``end``) → [outro] as a review mp4 (crf 16) and a
              GitHub-sized variant (``github_attachment_video_free``, ≤ 10 MB)
     review   automated gates (:func:`review`) + review assets: a labelled contact sheet and a
              100 % crop of the densest small text
@@ -756,7 +756,7 @@ def _render(
     gh_opts: dict[str, Any] = {"name": f"{name}-gh", "size": size, "fps": int(job.get("gh_fps") or 30),
                                "limit": GH_LIMIT, "poster": False}  # fmt: skip
     for key, opts in (
-        ("final", {"name": name, "size": size, "crf": 18, "fps": 30, "poster": False}),
+        ("final", {"name": name, "size": size, "crf": render.DELIVERABLE_CRF, "fps": 30, "poster": False}),
         ("gh", gh_opts),
     ):
         r = rm(c["id"], seq, opts, base)

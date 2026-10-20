@@ -33,7 +33,7 @@ plan → shot script → take → render / card / montage → ready_for_review �
 ## Quick start
 
 ```bash
-python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.7.0
+python -m server plugin install https://github.com/protoLabsAI/campaign-plugin --ref v0.7.1
 ```
 
 Installing doesn't enable it. Turn it on in **Settings → Plugins → Campaign Studio**, or:

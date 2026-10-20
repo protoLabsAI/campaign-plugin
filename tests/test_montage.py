@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from campaign import deps, limits, montage, paths, store
+from campaign import deps, limits, montage, paths, render, store
 from conftest import have_chromium, have_ffmpeg
 
 LOOK = {
@@ -323,6 +323,30 @@ def test_encode_is_h264_high_yuv420p_faststart_and_the_ladder_caps_bitrate():
     assert [s["crf"] for s in ladder[:3]] == [20, 24, 28]
     assert ladder[3]["bitrate"] == int(10_000_000 * 8 * 0.9 / 40)
     assert "-maxrate" in montage.encode_cmd("ffmpeg", "m", "o", crf=0, bitrate=1_800_000)
+
+
+def test_montage_deliverable_defaults_to_crf_16_and_a_bare_max_bytes_stops_at_20():
+    assert montage.OUTPUT_DEFAULTS["crf"] == render.DELIVERABLE_CRF == 16
+    o = _opts()
+    assert o["crf"] == 16 and o["max_bytes"] is None and o["limit_bytes"] is None
+    assert "-preset slow" in " ".join(montage.encode_cmd("ffmpeg", "m", "o", crf=o["crf"]))
+    bare = _opts(max_bytes=8_000_000)
+    assert bare["limit_bytes"] is None
+    assert montage.encode_ladder(16, 8_000_000, 40, degrade=False) == [{"crf": 16}, {"crf": 20}]
+    capped = _opts(limit="github_attachment_video_free")
+    assert capped["limit_bytes"] == capped["max_bytes"] == 10_000_000
+
+
+def test_montage_encode_notes_never_degrade_silently():
+    capped = {"crf": 16, "limit": "github_attachment_video_free", "limit_bytes": 10_000_000, "max_bytes": 10_000_000}
+    assert montage.encode_notes(capped, [{"crf": 16, "size_bytes": 9}, {"crf": 20, "size_bytes": 8}], 8) == []
+    traded = montage.encode_notes(capped, [{"crf": 24, "size_bytes": 9}], 9)
+    assert traded and "quality traded" in traded[0] and "crf 16 → crf 24" in traded[0]
+    bare = {"crf": 16, "limit": "", "limit_bytes": None, "max_bytes": 5_000_000}
+    kept = montage.encode_notes(
+        bare, [{"crf": 16, "size_bytes": 9_000_000}, {"crf": 20, "size_bytes": 8_000_000}], 8_000_000
+    )
+    assert kept and "kept deliverable quality" in kept[0]
 
 
 def test_find_font_prefers_the_brand_family_then_falls_back(tmp_path, monkeypatch):

@@ -266,3 +266,26 @@ def test_every_image_the_docs_show_is_in_the_repo():
             if not re.match(r"https?:", src) and not (doc.parent / src).is_file():
                 missing.append(f"{doc.relative_to(_ROOT)} → {src}")
     assert not missing, f"images referenced but not in the repo: {missing}"
+
+
+# ── deliverable quality ───────────────────────────────────────────────────────────────
+
+
+def _render_constant(name: str) -> int:
+    for node in ast.parse((_ROOT / "render.py").read_text()).body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == name for t in node.targets):
+            return int(ast.literal_eval(node.value))
+    raise AssertionError(f"render.py defines no {name}")
+
+
+def test_the_docs_state_the_deliverable_crf_the_code_uses():
+    """Deliverables are crf ≤ 17 (Josh 10-15: 2K, crisp smallest text); the docs say the number
+    the code uses, and no doc or skill still quotes an old default."""
+    crf, floor = _render_constant("DELIVERABLE_CRF"), _render_constant("QUALITY_FLOOR_CRF")
+    assert crf <= 17
+    quality = (_DOCS / "limits.md").read_text()
+    assert "## Deliverable quality" in quality
+    assert f"crf {crf}**" in quality and f"crf {floor}" in quality and "-preset slow" in quality
+    for path in [*_DOCS.glob("*.md"), *(_ROOT / "skills").glob("*/SKILL.md")]:
+        for quoted in re.findall(r"review cut \(crf (\d+)\)", path.read_text()):
+            assert int(quoted) == crf, f"{path.name} quotes the review cut at crf {quoted}; the code uses {crf}"

@@ -202,6 +202,8 @@ def test_one_request_runs_to_a_delivered_self_reviewed_video(world, tmp_path):
     assert seq[2] == {"outro": True}
     assert [r["opts"].get("limit") for r in world.renders] == [None, "github_attachment_video_free"]
     assert world.renders[0]["opts"]["size"] == "2560x1440"
+    assert world.renders[0]["opts"]["crf"] == 16, "the review cut is a deliverable: crf ≤ 17, not 18+"
+    assert "crf" not in world.renders[1]["opts"], "the GitHub variant starts at the montage default (16) too"
     d = job["delivery"]
     assert set(d["assets"]) == {"final", "gh", "sheet", "text_crop"}
     assert store.get_asset(d["assets"]["final"])["status"] == "ready_for_review"

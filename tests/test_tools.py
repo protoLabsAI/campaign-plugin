@@ -268,7 +268,7 @@ def test_render_flags_a_steep_ramp_as_a_jump_cut_but_lets_it_through_review(tool
     call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT)
     spec = [{"name": "hero", "format": "mp4", "start": 0, "end": 5, "speed": [{"from": 1, "to": 3, "factor": 8}]}]
     out = call(tools, "campaign_render", asset_id=1, outputs=spec)
-    assert "⚠ continuity:" in out and "jump cut" in out, out
+    assert "⚠ notes:" in out and "jump cut" in out, out
     hero = next(a for a in store.list_assets(1, kind="clip") if a["parent_id"] == 1)
     assert "jump cut" in hero["meta"]["warnings"][0] and not hero["notes"]
     assert "abruptly" in hero["meta"]["warnings"][1], "an un-eased steep ramp is also flagged as abrupt"
