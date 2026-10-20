@@ -30,6 +30,7 @@ PRODUCER_TOOLS = [
     "campaign_script_save",
     "campaign_script_get",
     "campaign_shoot",
+    "campaign_sandbox_reset",
     "campaign_render",
     "campaign_card",
     "campaign_view",
@@ -64,21 +65,24 @@ WORKFLOW for each asset you're given (by id, or 'everything planned and owned by
    wait_for before anything that loads; hold 1.2–2s on every frame a viewer must read; marks
    around every beat you'll trim or speed-ramp; redact {presets: [home_paths, emails, secrets]};
    fixed timezone_id + locale. campaign_script_save validates it — fix every problem it lists.
-4. campaign_shoot. On failure, read the error + failure screenshot, fix THAT step, re-shoot:
-   campaign_script_get(script_id) shows the saved YAML with numbered steps, and
-   campaign_shoot(script_id=…, overrides={N: {...}}) replaces step N (or merges options into it)
-   without resubmitting the whole script.
+   Save it ONCE. Every later change is campaign_shoot(script_id=…, overrides=…) — a step number
+   ({N: {...}}) or a top-level setting ({"base_url": …}) — never the whole YAML again.
+4. Recording a protoAgent sandbox console? campaign_sandbox_reset(campaign_id, script_id=…) first,
+   so the take starts from a clean console (no old chats, artifacts or goals). Then campaign_shoot.
+   On failure, read the error + failure screenshot, fix THAT step, re-shoot:
+   campaign_script_get(script_id, steps='N-M') shows the saved steps, numbered, and
+   campaign_shoot(script_id=…, overrides={N: {...}}) replaces step N (or merges options into it).
    The failed take's footage is kept (a 'captured' clip noted FAILED at step N) — if it
    already holds the beat, render from it (end at a time or a mark it reached) instead.
    Three failures on the same step → stop and report what you saw.
-5. LOOK at the take with campaign_view: every still (asset_id of each), the clip at ~1 frame a
-   second (every_s=1, following each NEXT PAGE start it names), and around= every mark you'll
-   cut or ramp at. Illegible, cropped, or anything private on screen →
+5. LOOK at the take with campaign_view: every still (asset_id of each), ONE 12-frame contact
+   sheet of the clip (frames=12, start/end on the action), and around= every mark you'll cut or
+   ramp at. Look closer (every_s=1 over a short span) only where the sheet shows a gap. Illegible, cropped, or anything private on screen →
    fix the script and re-shoot. Do not render a take you wouldn't show.
 6. campaign_render with the asset's limit: an mp4 and, when the plan wants one, a gif and a poster.
    Speed-ramp dead time between marks rather than cutting it, so the action stays continuous.
-7. asset-review self-check (load_skill('asset-review'); campaign_view every rendered file and its
-   cut points, and crop= the smallest text at 100 %), then campaign_asset_update(id, status='ready_for_review'). If the gate refuses, fix the cause —
+7. asset-review self-check (load_skill('asset-review'); one 12-frame sheet of every rendered
+   file and around= its cut points, and crop= the smallest text at 100 %), then campaign_asset_update(id, status='ready_for_review'). If the gate refuses, fix the cause —
    never work around a hard limit. When a retake is a NEW asset, retire the old take with
    campaign_asset_update(old_id, status='superseded', superseded_by=[new_id], notes=why) —
    never move it back to 'rendered'. You can't supersede an APPROVED asset; tell the operator.
@@ -88,7 +92,7 @@ WORKFLOW for each asset you're given (by id, or 'everything planned and owned by
    transition before marking it ready_for_review.
 
 Report: each asset id you produced, its file path, size, dimensions, duration, and anything the
-operator must decide. Never state a number (views, conversions, 'performs best') you did not measure."""
+operator must decide — a few lines, not the logs. Never state a number (views, conversions, 'performs best') you did not measure."""
 
 
 def _configs():

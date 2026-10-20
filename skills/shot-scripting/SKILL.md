@@ -7,7 +7,7 @@ description: >-
   the app's own view (not just its chat/command surface), marks, redaction of secrets, fixed
   timezone/locale, pre-seeded browser storage, and file uploads. Triggers: "record a demo of", "capture a clip of", "shoot the flow",
   "the take failed", "re-record", "make a GIF of the app doing X".
-tools: [campaign_script_save, campaign_script_get, campaign_shoot, campaign_view, campaign_get, browser_open, browser_snapshot, browser_screenshot]
+tools: [campaign_script_save, campaign_script_get, campaign_shoot, campaign_sandbox_reset, campaign_view, campaign_get, browser_open, browser_snapshot, browser_screenshot]
 ---
 
 # Shot scripts
@@ -15,6 +15,46 @@ tools: [campaign_script_save, campaign_script_get, campaign_shoot, campaign_view
 A take is only as repeatable as its script. The same script must produce the same clip next
 week, after a restyle, on another machine. Start from `campaign_script_save(campaign_id,
 "template")`.
+
+## Save once, iterate by id
+
+Every argument you send stays in the conversation. Pasting a 2 KB script into every re-shoot
+is how one night of takes filled a thread (42 full-script saves). So:
+
+1. `campaign_script_save(campaign_id, script)` **once** — it replies with the script id.
+2. Record it: `campaign_shoot(campaign_id, script_id=N)`.
+3. Every change after that is an **override on the same id**, never the YAML again:
+
+   ```python
+   campaign_shoot(
+       campaign_id=2,
+       script_id=214,
+       overrides={
+           23: {"click": {"role": "button", "name": "Close", "exact": True}},  # replace step 23
+           27: {"timeout_ms": 90000},  # merge into step 27
+           "base_url": "http://127.0.0.1:7951",  # the same script against another sandbox
+           "color_scheme": "light",  # …or another theme
+       },
+   )
+   ```
+
+   The patched script is validated and saved under the same name, so the next re-shoot starts
+   from it. `campaign_script_get(N, steps="20-30")` shows just the steps you're fixing.
+4. Save a NEW script only for a genuinely different clip (another beat, another flow).
+
+## A fresh console per take
+
+A protoAgent console remembers the last take: old chat tabs, artifacts in the panel, a running
+goal — and the next take opens on them. Before each take of a sandbox console, reset it:
+
+```python
+campaign_sandbox_reset(campaign_id=2, script_id=214)  # sessions, artifacts, goals
+campaign_sandbox_reset(campaign_id=2, script_id=214, theme="gruvbox")  # …and set its theme
+```
+
+It clears only the console that script records, with the script's own auth, and refuses the
+operator's :7870 / :7871 consoles and this agent's own. Never hand-write a `browser_eval`
+cleanup snippet for this, and never point a reset at a console you weren't asked to record.
 
 ## Explore first
 
@@ -340,9 +380,9 @@ The error names the step, the cause, and a `failure.png`. Look at the screenshot
 Fix that ONE step and re-shoot. Same step failing three times → report to the operator with
 the screenshot rather than flailing.
 
-You don't have to resubmit the whole script to fix one step. `campaign_script_get(script_id)`
-shows the saved YAML with every step numbered (`# step 5`), and `campaign_shoot` takes
-`overrides` keyed by those numbers:
+Never resubmit the whole script to fix one step. `campaign_script_get(script_id)` (or
+`steps="3-7"` for a slice) shows the saved YAML with every step numbered (`# step 5`), and
+`campaign_shoot` takes `overrides` keyed by those numbers:
 
 ```python
 campaign_shoot(
@@ -356,7 +396,9 @@ campaign_shoot(
 ```
 
 The patched script is validated like any other (a bad override records nothing) and saved
-under the same name, so the next re-shoot uses the fix too.
+under the same name, so the next re-shoot uses the fix too. The failure reply quotes the error
+once, without Playwright's call log; `campaign_asset(<kept take id>)` has the full error, the
+timing log and the failure still when the short form isn't enough.
 
 **The recording is never thrown away.** A take that fails after it started recording keeps its
 `.webm`, `timing.json` and `failure.png`, and is registered as a NEW `captured` clip whose note

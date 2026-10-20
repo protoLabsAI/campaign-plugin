@@ -484,7 +484,7 @@ def test_status_attaches_the_files_and_speaks_to_remote_callers(world, registry,
     assert [n for _u, n in attached] == ["protoagent-in-85-seconds.mp4", "protoagent-in-85-seconds-gh.mp4",
                                          "protoagent-in-85-seconds-sheet.png"]  # fmt: skip
     assert "3 file(s) attached" in out and "link: https://agent.example/media/" in out
-    assert "no Artifact panel or Download button on their side" in out
+    assert "Remote caller (A2A, /v1): give the links" in out and "no Artifact panel there" in out
     again = registry.tool("campaign_produce_video")
     assert again  # the tool exists; reuse wording is covered below
 

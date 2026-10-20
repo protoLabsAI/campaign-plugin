@@ -126,8 +126,8 @@ def test_shoot_failure_is_actionable(tools, browser_ok, ffmpeg_ok):
     call(tools, "campaign_create", name="L")
     out = call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT)
     assert out.startswith("Take failed — step 3 (click role='button' name='Go') failed")
-    assert "Screenshot at failure:" in out and "failure.png" in out
-    assert "Fix the step" in out
+    assert "failure.png" in out and "![failure](" in out
+    assert "Next: fix the step" in out and "overrides={3: {...}}" in out
 
 
 def test_a_failed_take_keeps_a_playable_video_asset_with_its_failure_note(tools, browser_ok, ffmpeg_ok):
@@ -136,8 +136,8 @@ def test_a_failed_take_keeps_a_playable_video_asset_with_its_failure_note(tools,
     call(tools, "campaign_create", name="L")
     call(tools, "campaign_asset_add", campaign_id=1, kind="clip", title="planned hero")
     out = call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT, asset_id=1)
-    assert "The recording was KEPT → asset #2 [captured]" in out, out
-    assert "marks reached: start=" in out and "not attached to asset #1" in out
+    assert "Footage KEPT → asset #2 [captured]" in out, out
+    assert "marks reached: start=" in out and "not attached to planned asset #1" in out
     take = store.get_asset(2)
     assert take["kind"] == "clip" and take["status"] == "captured" and take["script_id"] == 1
     assert take["notes"].startswith("FAILED at step 3: click role='button' name='Go' — ")
@@ -268,7 +268,7 @@ def test_render_flags_a_steep_ramp_as_a_jump_cut_but_lets_it_through_review(tool
     call(tools, "campaign_shoot", campaign_id=1, script=SCRIPT)
     spec = [{"name": "hero", "format": "mp4", "start": 0, "end": 5, "speed": [{"from": 1, "to": 3, "factor": 8}]}]
     out = call(tools, "campaign_render", asset_id=1, outputs=spec)
-    assert "⚠ notes:" in out and "jump cut" in out, out
+    assert "    ⚠ speed factor 8" in out and "jump cut" in out, out
     hero = next(a for a in store.list_assets(1, kind="clip") if a["parent_id"] == 1)
     assert "jump cut" in hero["meta"]["warnings"][0] and not hero["notes"]
     assert "abruptly" in hero["meta"]["warnings"][1], "an un-eased steep ramp is also flagged as abrupt"

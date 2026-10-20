@@ -93,6 +93,20 @@ When they answer in chat, record it: `campaign_decision(campaign_id, decision_id
 `show_component("table", …)`. For a narrative plan document, render `campaign_get` as an
 artifact (`show_artifact`). Then ask for the open decisions — one message, numbered.
 
+## 8. Producing it — one asset per producer task
+
+Once the plan is agreed, don't record from this thread. Hand each agent-owned asset to the
+producer subagent, **one asset per task**:
+
+```
+task(campaign_producer, "Campaign 2, asset #41: <the spec in one line>. Report the asset ids, paths, sizes.")
+```
+
+The take → look → fix → re-take loop is long and noisy; inside the subagent it stays out of the
+operator's thread, which only gets the ids and paths back. A thread that recorded nine clips
+itself grew from 64k to 478k prompt tokens in one night. Give each clip a fresh task (and a
+fresh sandbox — `campaign_sandbox_reset` — when the take records a protoAgent console).
+
 ## Video bookends — protoLabs bookends v1 (default)
 
 Every video asset in the plan ships with **protoLabs bookends v1** unless the shot list says

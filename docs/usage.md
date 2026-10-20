@@ -62,3 +62,25 @@ shot scripts), `asset-review` (the self-check before `ready_for_review`), `monta
 (plan, storyboard and cut a montage) and `produce-walkthrough-video` (a finished video from a
 plain request). The `campaign_producer` subagent and its tool allowlist are described in the
 [tools reference](tools.md#the-producer-subagent).
+
+### Keeping the agent's context small
+
+Production is noisy: a take, a look, a fix, a re-take, a render, another look. Done in the
+operator's chat thread, every one of those replies stays in its context — a night of
+brandLaunch takes grew one thread from 64k to 478k prompt tokens (issue #48). The skills say
+how to keep it small, and the tools are built for it:
+
+- **One asset per `task(campaign_producer)`.** The lead thread hands the producer one asset id
+  and gets back ids and paths; the take/look/fix loop lives and ends in the subagent's context.
+- **Save a script once, iterate by id.** `campaign_script_save` once, then
+  `campaign_shoot(script_id=…, overrides=…)`: a step number fixes a step, a top-level key
+  (`base_url`, `color_scheme`) points the same script at another sandbox or theme. Resending the
+  YAML for a one-line change is what filled the thread.
+- **One 12-frame contact sheet per review pass** (`campaign_view(…, frames=12)` or one
+  `every_s` page), plus `around=` each cut — not page after page of 1-second sheets.
+- **A fresh session per clip.** `campaign_sandbox_reset` clears the sandbox console the script
+  records (its chats, artifacts, goals) before the next take, instead of a hand-written
+  `browser_eval` snippet.
+- **Short replies.** `campaign_shoot` / `campaign_render` / `campaign_video_status` reply with
+  ids, one directory, the numbers and the next call; the full logs stay on the asset
+  (`campaign_asset`) or the job (`verbose=true`).

@@ -102,7 +102,8 @@ says **REUSED**, tell the requester you delivered an existing video, not a new r
 ## 5. Report progress
 
 Tell the requester it's running and roughly how long. `campaign_video_status(job_id)` gives the
-stage and percent. In an API/A2A turn that must return the file, poll with
+stage and percent in a few lines (one per gate and file, the last 3 log lines); add
+`verbose=true` only when you need the whole job log to diagnose a failure. In an API/A2A turn that must return the file, poll with
 `campaign_video_status(job_id, wait_s=300)` until it ends. In the console you don't need to
 wait: when the job ends, this chat gets a follow-up turn telling you to deliver.
 
