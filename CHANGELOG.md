@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Shot scripts can target inline chat app cards.** `frame: {card: …, title: …, nth: …}`
+  scrolls a lazy-mounted card into view, waits for its iframe to load within the step's
+  timeout, and holds it in view through clicks, typing and slider drags. A title alone
+  selects from `section.pl-frame-card`; existing URL and selector frames still work.
+
 ## 0.8.0
 
 Less of the campaign tools' output in the agent's context (#48). brandLaunch's night of takes

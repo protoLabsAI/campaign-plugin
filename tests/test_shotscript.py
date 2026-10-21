@@ -417,3 +417,214 @@ def test_the_template_lists_every_step_op():
     for op in shotscript.STEP_OPS:
         assert op in tpl.split("# Every step op", 1)[1], op
     assert validate(tpl)["name"] == "install-from-url"
+
+
+@pytest.mark.parametrize(
+    "spec, normalized",
+    [
+        ({"card": ".app"}, {"card": ".app"}),
+        ({"card": ".app", "nth": 1}, {"card": ".app", "nth": 1}),
+        ({"title": "Mortgage calculator"}, {"card": "section.pl-frame-card", "title": "Mortgage calculator"}),
+    ],
+)
+def test_inline_card_frame_validation(spec, normalized):
+    s = validate(_with({"click": {"selector": "button", "frame": spec}}))
+    assert s["steps"][1]["target"]["frame"] == normalized
+    assert "card=" in shotscript.describe_step(s["steps"][1])
+
+
+@pytest.mark.parametrize(
+    "spec, key",
+    [
+        ({"card": ".app", "typo": 1}, "typo"),
+        ({"card": ""}, "card"),
+        ({"title": 3}, "title"),
+        ({"card": ".app", "nth": -1}, "nth"),
+        ({"card": ".app", "nth": True}, "nth"),
+        ({"card": ".app", "nth": "1"}, "nth"),
+        ({"nth": 1}, "nth"),
+        ({"card": ".app", "url": "app"}, "url"),
+        ({"title": "App", "selector": "iframe"}, "selector"),
+    ],
+)
+def test_inline_card_frame_errors_name_key(spec, key):
+    assert key in _problems(_with({"click": {"selector": "button", "frame": spec}}))
+
+
+@pytest.mark.parametrize("op", ["click", "type", "drag"])
+@pytest.mark.parametrize("failure", [None, "mount", "action"])
+def test_worker_inline_card_scroll_mount_act_and_release(tmp_path, op, failure):
+    from unittest.mock import Mock
+
+    from campaign.worker import pw_worker as worker
+
+    events = []
+    page, parent, card, iframe, element, frame, target, hold = [Mock() for _ in range(8)]
+    page.main_frame = parent
+    parent.locator.return_value = card
+    parent.get_by_text.return_value.and_.return_value = "visible title"
+    card.filter.return_value = card
+    card.nth.return_value = card
+    card.wait_for.side_effect = lambda **kw: events.append("card attached")
+
+    def start_hold(js, **kw):
+        assert js == worker._CARD_HOLD_JS
+        assert 0 < kw["timeout"] <= 1000
+        events.append("in-page scroll and hold")
+        return hold
+
+    card.evaluate_handle.side_effect = start_hold
+    card.locator.return_value = iframe
+
+    def mount(**kw):
+        events.append("wait iframe attached")
+        assert kw["state"] == "attached"
+        assert 0 < kw["timeout"] <= 1000
+        if failure == "mount":
+            raise TimeoutError("mount failed")
+
+    iframe.wait_for.side_effect = mount
+    iframe.element_handle.return_value = element
+    element.content_frame.side_effect = [None, frame]
+    frame.wait_for_load_state.side_effect = lambda *a, **kw: events.append("frame loaded")
+    frame.locator.return_value = target
+    target.bounding_box.return_value = {"x": 10, "y": 10, "width": 100, "height": 20}
+
+    def action(*args, **kw):
+        events.append("act")
+        if failure == "action":
+            raise ValueError("action failed")
+
+    target.click.side_effect = action
+    page.mouse.down.side_effect = action
+    hold.evaluate.side_effect = lambda js: events.append("release")
+    step = {
+        "op": op,
+        "target": {
+            "selector": "input",
+            "frame": {
+                "card": ".app",
+                "title": "Mortgage calculator",
+                "nth": 1,
+            },
+        },
+        "dx": 100,
+        "dy": 0,
+        "text": "123",
+        "delay_ms": 10,
+    }
+    if failure:
+        with pytest.raises((TimeoutError, ValueError), match=f"{failure} failed"):
+            worker._do(page, None, step, 1000, tmp_path, {}, {}, 0)
+    else:
+        worker._do(page, None, step, 1000, tmp_path, {}, {}, 0)
+    expected = ["card attached", "in-page scroll and hold", "wait iframe attached"]
+    if failure != "mount":
+        expected += ["frame loaded", "act"]
+        element.dispose.assert_called()
+        if op == "type" and not failure:
+            page.keyboard.type.assert_called_once_with("123", delay=10)
+    assert events == [*expected, "release"]
+    card.nth.assert_called_once_with(1)
+    card.filter.assert_called_once_with(has="visible title")
+    card.scroll_into_view_if_needed.assert_not_called()
+    hold.dispose.assert_called_once()
+
+
+def test_inline_card_hold_rescrolls_and_cleans_up():
+    import shutil
+    import subprocess
+
+    from campaign.worker import pw_worker as worker
+
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    # Execute the actual hold JS against a fake DOM: no browser or host dependency.
+    script = (
+        """
+const assert = require('node:assert/strict');
+let tick, listener, scrolls = 0, removed = false, cleared = false, y = 20;
+global.setInterval = fn => { tick = fn; return 7; };
+global.clearInterval = id => { assert.equal(id, 7); cleared = true; };
+const scroller = {
+  scrollTop: 0, scrollLeft: 0,
+  addEventListener: (name, fn) => { assert.equal(name, 'scroll'); listener = fn; },
+  removeEventListener: (name, fn) => { assert.equal(fn, listener); removed = true; }
+};
+const card = {
+  isConnected: true,
+  closest: selector => { assert.equal(selector, '.pl-convo-scroll'); return scroller; },
+  scrollIntoView: opts => {
+    assert.equal(opts.block, 'center'); assert.equal(opts.behavior, 'instant');
+    scrolls++; scroller.scrollTop = 400; y = 20;
+  },
+  getBoundingClientRect: () => ({top: y})
+};
+"""
+        + f"\nconst stop = ({worker._CARD_HOLD_JS})(card);\n"
+        + """
+assert.equal(scrolls, 1);
+tick(); assert.equal(scrolls, 1);
+scroller.scrollTop = 900; listener(); assert.equal(scrolls, 2);
+assert.equal(scroller.scrollTop, 400);
+y = 150; tick(); assert.equal(scrolls, 3);
+card.isConnected = false; scroller.scrollTop = 1000; tick(); assert.equal(scrolls, 3);
+stop(); assert.ok(removed && cleared);
+"""
+    )
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True, timeout=10)
+
+
+@pytest.mark.parametrize("card_first", [True, False])
+def test_inline_card_chain_keeps_parent_scope_and_shared_deadline(monkeypatch, card_first):
+    from unittest.mock import Mock
+
+    from campaign.worker import pw_worker as worker
+
+    page, outer, inner = Mock(), Mock(), Mock()
+    clock = [0.0]
+    monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
+    holds = []
+    card_spec, url_spec = {"card": ".app"}, {"url": "inner"}
+    spec = {**(card_spec if card_first else url_spec), "frame": url_spec if card_first else card_spec}
+
+    def card(page_arg, parent, level, deadline, held):
+        assert page_arg is page and held is holds
+        assert deadline == 1.0 and level == card_spec
+        assert parent is (page.main_frame if card_first else outer)
+        clock[0] += 0.25
+        return outer if card_first else inner
+
+    def find(parent, level):
+        assert level == url_spec
+        assert parent is (outer if card_first else page.main_frame)
+        clock[0] += 0.25
+        return inner if card_first else outer
+
+    monkeypatch.setattr(worker, "_card_frame", card)
+    monkeypatch.setattr(worker, "_find_frame", find)
+    assert worker.resolve_frame(page, spec, 1000, holds=holds) is inner
+
+
+def test_inline_card_mount_uses_step_budget_and_releases_on_expiry(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+
+    from campaign.worker import pw_worker as worker
+
+    page, card, hold = Mock(), Mock(), Mock()
+    page.main_frame.locator.return_value = card
+    card.evaluate_handle.return_value = hold
+    clock = [0.0]
+    monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
+
+    def expire(**kw):
+        assert kw["timeout"] == 1000
+        clock[0] = 1.1
+
+    card.locator.return_value.wait_for.side_effect = expire
+    step = {"op": "click", "target": {"selector": "button", "frame": {"card": ".app"}}}
+    with pytest.raises(TimeoutError, match="Timeout waiting"):
+        worker._do(page, None, step, 1000, tmp_path, {}, {}, 0)
+    card.locator.return_value.element_handle.assert_not_called()
+    hold.evaluate.assert_called_once_with("stop => stop()")
+    hold.dispose.assert_called_once()
