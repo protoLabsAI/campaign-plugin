@@ -59,6 +59,33 @@ nesting one level (`frame: {…, frame: {…}}`). The frame is waited for within
   - screenshot: {name: terminal, frame: /plugins/terminal/view}   # frame only = the iframe element
 ```
 
+**Inline chat app cards (ADR 0118).** These cards mount their iframe only near the
+viewport. Use `frame: {card: "section.pl-frame-card"}` to scroll the card into view
+in-page before waiting for its iframe to attach and load. `card` is a CSS selector;
+it defaults to `section.pl-frame-card` when only `title` is given. `title` matches
+exact visible title text within the card. Optional `nth` is a non-negative, 0-based
+integer selecting among matching cards (after title filtering); otherwise the card
+must be unique. Card frames can nest using `frame`, just like URL/selector frames,
+but cannot combine `card`/`title` with `url`/`selector` at the same level.
+
+The worker holds the card in view through the step, re-centering it if the chat
+scrolls or the layout moves. Cards taller than the visible chat area can scroll to
+expose edge controls; the hold re-centers them only when they leave view. The hold
+is released even if the step fails. Mounting
+and loading consume the step's timeout; the action gets the remaining time.
+Clicks, typing, and slider drags use the same targets as other frames:
+
+```yaml
+  - drag:
+      frame: {title: "Mortgage calculator"}
+      target: {role: slider, name: "Interest rate"}
+      to: {dx: 120, dy: 0}
+      timeout_ms: 30000
+  - screenshot:
+      name: mortgage-result
+      frame: {card: "section.pl-frame-card", title: "Mortgage calculator", nth: 0}
+```
+
 Masks and redaction reach into every frame, including ones that load later. CSS can't reach
 text drawn on a `<canvas>`, so for xterm.js terminals `redact` filters what the terminal is
 **given** to draw: `Terminal.prototype.write`/`writeln` are wrapped when the xterm bundle sets

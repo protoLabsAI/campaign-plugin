@@ -162,7 +162,7 @@ STEP_OPS = (
 )
 TARGET_KEYS = ("selector", "role", "text", "label", "placeholder", "test_id")
 TARGET_OPTS = ("name", "exact", "nth")
-FRAME_KEYS = ("url", "selector", "frame")
+FRAME_KEYS = ("url", "selector", "card", "title", "nth", "frame")
 MAX_FRAME_DEPTH = 2  # a frame, and one frame inside it
 COLOR_SCHEMES = ("light", "dark", "no-preference")
 MASK_MODES = ("blur", "hide", "remove")
@@ -326,25 +326,28 @@ def _nth(raw: Any) -> int | str | None:
 
 
 def _frame(raw: Any, where: str, problems: list[str], depth: int = 1) -> dict[str, Any] | None:
-    """``frame:`` — which ``<iframe>`` a target lives in: ``{url, selector, frame}``.
+    """``frame:`` — which ``<iframe>`` a target lives in: ``{url, selector, card, title, nth, frame}``.
 
     ``url`` is a substring of the frame's URL (a glob on the whole URL when it holds ``*?[``);
     ``selector`` is a CSS selector for the ``<iframe>`` element in the parent; a nested ``frame``
-    goes one level deeper. A bare string is a ``url``. Unknown keys are errors."""
+    goes one level deeper. ``card`` locates a lazy inline card, optionally by visible ``title``
+    and 0-based ``nth``. A bare string is a ``url``. Unknown keys are errors."""
     if isinstance(raw, str):
         raw = {"url": raw}
     if not isinstance(raw, dict):
-        problems.append(f"{where}: must be a URL string or {{url: …, selector: …}}, got {type(raw).__name__}")
+        problems.append(
+            f"{where}: must be a URL string or {{url: …, selector: …}} / {{card: …, title: …, nth: …}}, got {type(raw).__name__}"
+        )
         return None
     bad = False
     for k in raw:
         if k not in FRAME_KEYS:
             problems.append(
-                f"{where}: unknown frame key `{k}`{_suggest(k, FRAME_KEYS)} — a frame takes url, selector, frame"
+                f"{where}: unknown frame key `{k}`{_suggest(k, FRAME_KEYS)} — a frame takes url, selector, card, title, nth, frame"
             )
             bad = True
     out: dict[str, Any] = {}
-    for k in ("url", "selector"):
+    for k in ("url", "selector", "card", "title"):
         if k in raw:
             v = raw[k]
             if not isinstance(v, str) or not v.strip():
@@ -352,9 +355,26 @@ def _frame(raw: Any, where: str, problems: list[str], depth: int = 1) -> dict[st
                 bad = True
             else:
                 out[k] = v.strip()
+    card_form = "card" in raw or "title" in raw
+    if card_form:
+        out.setdefault("card", "section.pl-frame-card")
+        for k in ("url", "selector"):
+            if k in raw:
+                problems.append(f"{where}.{k}: cannot combine with card/title")
+                bad = True
+    if "nth" in raw:
+        if not card_form:
+            problems.append(f"{where}.nth: requires card or title")
+            bad = True
+        elif type(raw["nth"]) is not int or raw["nth"] < 0:
+            problems.append(f"{where}.nth: must be a non-negative integer")
+            bad = True
+        else:
+            out["nth"] = raw["nth"]
     if not out and not bad:
         problems.append(
-            f"{where}: needs a `url` (substring or glob of the frame's URL) and/or a `selector` (the iframe)"
+            f"{where}: needs a `url` (substring or glob of the frame's URL) and/or a `selector` (the iframe), "
+            "or a `card` selector / visible `title`"
         )
         bad = True
     if raw.get("frame") is not None:
@@ -1083,7 +1103,7 @@ def resolve_url(script: dict[str, Any], url: str) -> str:
 def describe_frame(f: dict[str, Any] | None) -> str:
     if not f:
         return ""
-    parts = [f"{k}={f[k]!r}" for k in ("url", "selector") if k in f]
+    parts = [f"{k}={f[k]!r}" for k in ("url", "selector", "card", "title", "nth") if k in f]
     inner = describe_frame(f.get("frame"))
     return "frame(" + " ".join(parts) + ")" + (f" > {inner}" if inner else "")
 

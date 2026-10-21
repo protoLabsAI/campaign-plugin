@@ -612,7 +612,7 @@ def frame_url_matches(url: str, pattern: str) -> bool:
 def describe_frame(spec: dict[str, Any] | None) -> str:
     if not spec:
         return ""
-    parts = [f"{k}={spec[k]!r}" for k in ("url", "selector") if k in spec]
+    parts = [f"{k}={spec[k]!r}" for k in ("url", "selector", "card", "title", "nth") if k in spec]
     inner = describe_frame(spec.get("frame"))
     return "frame(" + " ".join(parts) + ")" + (f" > {inner}" if inner else "")
 
@@ -664,14 +664,125 @@ def _find_frame(parent, spec: dict[str, Any]):
     return _find_frame(found[0], spec["frame"]) if spec.get("frame") else found[0]
 
 
-def resolve_frame(page, spec: dict[str, Any], timeout: float):
+# The hold runs in the parent document while synchronous Playwright actions are waiting.
+# Preserve the anchor for ordinary cards. Tall cards must be free to scroll to edge
+# controls while still visible; re-centering those would undo Playwright action scrolling.
+_CARD_HOLD_JS = """card => {
+  const scroller = card.closest('.pl-convo-scroll') || document.scrollingElement;
+  const center = () => card.scrollIntoView({block: 'center', behavior: 'instant'});
+  center();
+  let top = scroller.scrollTop, left = scroller.scrollLeft;
+  let y = card.getBoundingClientRect().top;
+  const hold = () => {
+    if (!card.isConnected) return;
+    const rect = card.getBoundingClientRect();
+    const port = scroller === document.scrollingElement
+      ? {top: 0, bottom: window.innerHeight} : scroller.getBoundingClientRect();
+    const viewportTop = Math.max(0, port.top);
+    const viewportBottom = Math.min(window.innerHeight, port.bottom);
+    // Visibility, not a fixed center, keeps oversized cards mounted. Accept the
+    // action's new vertical anchor before either the scroll event or timer can undo it.
+    if (rect.height > viewportBottom - viewportTop &&
+        rect.bottom > viewportTop && rect.top < viewportBottom &&
+        scroller.scrollLeft === left) {
+      top = scroller.scrollTop;
+      y = rect.top;
+      return;
+    }
+    if (scroller.scrollTop !== top || scroller.scrollLeft !== left ||
+        Math.abs(card.getBoundingClientRect().top - y) > 1) {
+      center();
+      top = scroller.scrollTop;
+      left = scroller.scrollLeft;
+      y = card.getBoundingClientRect().top;
+    }
+  };
+  scroller.addEventListener('scroll', hold);
+  const timer = setInterval(hold, 16);
+  return () => {
+    clearInterval(timer);
+    scroller.removeEventListener('scroll', hold);
+  };
+}"""
+
+
+def _release_holds(holds):
+    for handle in reversed(holds):
+        try:
+            handle.evaluate("stop => stop()")
+        except Exception:  # parent navigation already destroyed the hold
+            pass
+        finally:
+            try:
+                handle.dispose()
+            except Exception:  # the browser may have closed with the failed step
+                pass
+
+
+def _card_frame(page, parent, spec, deadline, holds):
+    def remaining():
+        left = (deadline - time.monotonic()) * 1000
+        if left <= 0:
+            raise TimeoutError(f"Timeout waiting for {describe_frame(spec)}")
+        return left
+
+    card = parent.locator(spec.get("card", "section.pl-frame-card"))
+    if "title" in spec:
+        title = parent.get_by_text(spec["title"], exact=True).and_(parent.locator(":visible"))
+        card = card.filter(has=title)
+    if "nth" in spec:
+        card = card.nth(spec["nth"])
+    card.wait_for(state="attached", timeout=remaining())
+    holds.append(card.evaluate_handle(_CARD_HOLD_JS, timeout=remaining()))
+    iframe = card.locator("iframe")
+    iframe.wait_for(state="attached", timeout=remaining())
+    while True:
+        el = iframe.element_handle(timeout=remaining())
+        try:
+            frame = el.content_frame()
+        finally:
+            el.dispose()
+        if frame is not None:
+            frame.wait_for_load_state("domcontentloaded", timeout=remaining())
+            return frame
+        page.wait_for_timeout(min(50, remaining()))
+
+
+def _has_card(spec):
+    return bool(spec and ("card" in spec or "title" in spec or _has_card(spec.get("frame"))))
+
+
+def _resolve_card_chain(page, spec, timeout, holds):
+    deadline = time.monotonic() + timeout / 1000
+    parent = page.main_frame
+    while spec:
+        left = (deadline - time.monotonic()) * 1000
+        if left <= 0:
+            raise TimeoutError(f"Timeout waiting for {describe_frame(spec)}")
+        level = {k: v for k, v in spec.items() if k != "frame"}
+        if "card" in level or "title" in level:
+            parent = _card_frame(page, parent, level, deadline, holds)
+        else:
+            parent = resolve_frame(page, level, left, parent=parent)
+        spec = spec.get("frame")
+    return parent
+
+
+def resolve_frame(page, spec: dict[str, Any], timeout: float, *, parent=None, holds=None):
     """The Frame ``spec`` names, waiting for it (an iframe attaches and navigates after its
     parent loads) for at most ``timeout`` ms. A miss names every frame the page DOES have."""
+    if _has_card(spec):
+        owned_holds = [] if holds is None else holds
+        try:
+            return _resolve_card_chain(page, spec, timeout, owned_holds)
+        finally:
+            if holds is None:
+                _release_holds(owned_holds)
     deadline = time.monotonic() + timeout / 1000
     last = ""
     while True:
         try:
-            f = _find_frame(page.main_frame, spec)
+            f = _find_frame(parent if parent is not None else page.main_frame, spec)
             if f is not None:
                 return f
         except FrameAmbiguous:
@@ -1165,17 +1276,30 @@ def scoped(root, step: dict[str, Any]):
 
 def _do(page, context, step, timeout, out_dir: Path, marks, stills, t0) -> None:
     target = step.get("target")
-    # A frame target: find the frame first (within the step's timeout), then the element in it.
-    root, timeout = _in_frame(page, (target or {}).get("frame") or step.get("frame"), timeout)
-    root = scoped(root, step)
+    spec = (target or {}).get("frame") or step.get("frame")
+    holds = []
+    root = page
+    acting = False
     try:
+        if _has_card(spec):
+            started = time.monotonic()
+            root = resolve_frame(page, spec, timeout, holds=holds)
+            timeout -= (time.monotonic() - started) * 1000
+            if timeout <= 0:
+                raise TimeoutError(f"Timeout waiting for {describe_frame(spec)}")
+        else:
+            root, timeout = _in_frame(page, spec, timeout)
+        root = scoped(root, step)
+        acting = True
         _act(page, root, context, step, timeout, out_dir, marks, stills, t0)
     except Exception as e:
         # Playwright's strict mode refused an ambiguous target: say WHICH elements matched and
         # how to pick one, instead of a bare "resolved to 2 elements".
-        if target and step["op"] in ACTION_OPS and "nth" not in target and is_strict_violation(e):
+        if acting and target and step["op"] in ACTION_OPS and "nth" not in target and is_strict_violation(e):
             raise AmbiguousTarget(ambiguity_message(root, target)) from e
         raise
+    finally:
+        _release_holds(holds)
 
 
 def _act(page, root, context, step, timeout, out_dir: Path, marks, stills, t0) -> None:
