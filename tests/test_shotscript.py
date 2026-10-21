@@ -543,11 +543,14 @@ def test_inline_card_hold_rescrolls_and_cleans_up():
     script = (
         """
 const assert = require('node:assert/strict');
-let tick, listener, scrolls = 0, removed = false, cleared = false, y = 20;
+let tick, listener, scrolls = 0, removed = false, cleared = false, y = 20, height = 200;
+global.window = {innerHeight: 800};
+global.document = {scrollingElement: null};
 global.setInterval = fn => { tick = fn; return 7; };
 global.clearInterval = id => { assert.equal(id, 7); cleared = true; };
 const scroller = {
   scrollTop: 0, scrollLeft: 0,
+  getBoundingClientRect: () => ({top: 100, bottom: 700}),
   addEventListener: (name, fn) => { assert.equal(name, 'scroll'); listener = fn; },
   removeEventListener: (name, fn) => { assert.equal(fn, listener); removed = true; }
 };
@@ -558,7 +561,7 @@ const card = {
     assert.equal(opts.block, 'center'); assert.equal(opts.behavior, 'instant');
     scrolls++; scroller.scrollTop = 400; y = 20;
   },
-  getBoundingClientRect: () => ({top: y})
+  getBoundingClientRect: () => ({top: y, bottom: y + height, height})
 };
 """
         + f"\nconst stop = ({worker._CARD_HOLD_JS})(card);\n"
@@ -568,7 +571,25 @@ tick(); assert.equal(scrolls, 1);
 scroller.scrollTop = 900; listener(); assert.equal(scrolls, 2);
 assert.equal(scroller.scrollTop, 400);
 y = 150; tick(); assert.equal(scrolls, 3);
-card.isConnected = false; scroller.scrollTop = 1000; tick(); assert.equal(scrolls, 3);
+// A mounted iframe expands beyond the visible chat viewport. Playwright scrolls
+// first to a control at the top, then to one at the bottom. Neither the listener
+// nor ticks during click retries / coordinate-based drags may shift that target.
+height = 1200;
+for (const edge of [100, -500]) {
+  y = edge; scroller.scrollTop += 250;
+  const actionScroll = scroller.scrollTop;
+  listener();
+  for (let i = 0; i < 24; i++) tick();
+  assert.equal(y, edge);
+  assert.equal(scroller.scrollTop, actionScroll);
+  assert.equal(scrolls, 3);
+}
+// Leaving the clipped chat viewport in either direction still restores the card.
+y = -1100; listener(); assert.equal(scrolls, 4);
+y = 700; tick(); assert.equal(scrolls, 5);
+// A later shrink returns to the ordinary card's anchored hold.
+height = 200; y = 150; tick(); assert.equal(scrolls, 6);
+card.isConnected = false; scroller.scrollTop = 1000; tick(); assert.equal(scrolls, 6);
 stop(); assert.ok(removed && cleared);
 """
     )

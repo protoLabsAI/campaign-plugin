@@ -665,8 +665,8 @@ def _find_frame(parent, spec: dict[str, Any]):
 
 
 # The hold runs in the parent document while synchronous Playwright actions are waiting.
-# Restore only after scrolling or layout movement, avoiding continuous scrollIntoView calls
-# that would fight an action's own scrolling inside a tall iframe.
+# Preserve the anchor for ordinary cards. Tall cards must be free to scroll to edge
+# controls while still visible; re-centering those would undo Playwright action scrolling.
 _CARD_HOLD_JS = """card => {
   const scroller = card.closest('.pl-convo-scroll') || document.scrollingElement;
   const center = () => card.scrollIntoView({block: 'center', behavior: 'instant'});
@@ -675,6 +675,20 @@ _CARD_HOLD_JS = """card => {
   let y = card.getBoundingClientRect().top;
   const hold = () => {
     if (!card.isConnected) return;
+    const rect = card.getBoundingClientRect();
+    const port = scroller === document.scrollingElement
+      ? {top: 0, bottom: window.innerHeight} : scroller.getBoundingClientRect();
+    const viewportTop = Math.max(0, port.top);
+    const viewportBottom = Math.min(window.innerHeight, port.bottom);
+    // Visibility, not a fixed center, keeps oversized cards mounted. Accept the
+    // action's new vertical anchor before either the scroll event or timer can undo it.
+    if (rect.height > viewportBottom - viewportTop &&
+        rect.bottom > viewportTop && rect.top < viewportBottom &&
+        scroller.scrollLeft === left) {
+      top = scroller.scrollTop;
+      y = rect.top;
+      return;
+    }
     if (scroller.scrollTop !== top || scroller.scrollLeft !== left ||
         Math.abs(card.getBoundingClientRect().top - y) > 1) {
       center();

@@ -69,7 +69,9 @@ must be unique. Card frames can nest using `frame`, just like URL/selector frame
 but cannot combine `card`/`title` with `url`/`selector` at the same level.
 
 The worker holds the card in view through the step, re-centering it if the chat
-scrolls or the layout moves, then releases the hold even if the step fails. Mounting
+scrolls or the layout moves. Cards taller than the visible chat area can scroll to
+expose edge controls; the hold re-centers them only when they leave view. The hold
+is released even if the step fails. Mounting
 and loading consume the step's timeout; the action gets the remaining time.
 Clicks, typing, and slider drags use the same targets as other frames:
 
