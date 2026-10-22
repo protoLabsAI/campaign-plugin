@@ -327,12 +327,13 @@ class Art:
             and (self.look.get("fonts") or {}).get("heading")
         ):
             self.notes.append(f"captions use {self.font_how}")
-        self._cache: dict[tuple[int, int], list[str]] = {}
+        self._cache: dict[tuple, list[str]] = {}
 
     def pngs(self, timed: list[dict[str, Any]], w: int, h: int) -> list[str]:
-        if (w, h) in self._cache:
-            return self._cache[(w, h)]
-        d = self.workdir / f"captions-{w}x{h}"
+        key = (w, h, tuple(c["text"] for c in timed))  # same size AND the same captions
+        if key in self._cache:
+            return self._cache[key]
+        d = self.workdir / f"captions-{w}x{h}-{len(self._cache)}"  # never overwrite an earlier set
         d.mkdir(parents=True, exist_ok=True)
         out: list[str] = []
         font_rel = ""
@@ -358,7 +359,7 @@ class Art:
             else:
                 page = caption_html(lines, w, h, self.look, self.bar)
                 out.append(str(self._page(page, w, h, str(png))))
-        self._cache[(w, h)] = out
+        self._cache[key] = out
         return out
 
     def _page(self, page: str, w: int, h: int, dst: str) -> str:

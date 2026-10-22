@@ -231,6 +231,25 @@ def test_bookends_wrap_the_captioned_clip_and_the_cards_get_none(tmp_path, monke
     assert store.get_asset(a["id"])["meta"]["captions"] == meta["captions"], "what was burned in survives bookending"
 
 
+def test_caption_art_is_cached_per_size_and_caption_list(tmp_path):
+    pages = []
+
+    def page(html, w, h, dst):
+        pages.append(dst)
+        Path(dst).write_bytes(b"png")
+        return dst
+
+    look = {"colors": {"bg": "#101010", "fg": "#ffffff", "accent": "#22c55e"}, "fonts": {}}
+    art = captions.Art(tmp_path, engine="html", page_renderer=page, look=look)
+    one = [{"text": "One", "out_start": 0, "out_end": 2}]
+    two = [{"text": "Two", "out_start": 0, "out_end": 2}]
+    first = art.pngs(one, 640, 360)
+    assert art.pngs(one, 640, 360) == first and len(pages) == 1, "same size and captions: drawn once"
+    other = art.pngs(two, 640, 360)
+    assert other != first and len(pages) == 2, "another caption list at the same size is drawn, not served stale"
+    assert Path(first[0]).parent != Path(other[0]).parent, "and never overwrites the first set's files"
+
+
 # ── the real thing ───────────────────────────────────────────────────────────
 def _region_luma(path: Path, t: float, box: tuple[int, int, int, int]) -> float:
     """Mean luma of one rectangle of the frame shown at output time ``t``."""

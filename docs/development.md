@@ -48,6 +48,7 @@ playwright. CI runs both: the unit job, and an integration job that installs Chr
 | `deps.py` | Probing playwright, Chromium and ffmpeg; the setup banner |
 | `capture.py` | `capture: device` frames → a constant-frame-rate H.264 take |
 | `render.py` | A take → mp4 / gif / poster under a hard limit |
+| `captions.py` | Timed lower-third captions for `campaign_render`: source→output timing, hold, wrap, PNG art, overlay graph |
 | `cards.py` | Branded HTML templates → PNG |
 | `templates/` | The card templates |
 | `brand.py` | The brand look: kit file, settings fallbacks, defaults |
