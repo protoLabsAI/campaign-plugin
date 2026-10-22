@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.0
+
 - **Timed captions on `campaign_render`.** `captions: [{text, start, end} | {text, at}]` burns
   lower-third captions (accent bar + brand box, heading font, 0.2 s fades) into an mp4 or gif.
   Times are source seconds or marks — the `speed` ramps' clock — mapped through the ramps, so
@@ -10,7 +12,7 @@
   vertical safe area) or is refused. Bookends wrap the captioned clip, so the cards carry none;
   the take is never modified. The asset records `meta.captions` (re-passable) and
   `meta.caption_timing`. See [Captions](docs/montages-and-branding.md#captions).
-- **`campaign_render` refuses unknown keys (#51).** A spec key it doesn't know — top level,
+- **`campaign_render` refuses unknown keys (#51, #55).** A spec key it doesn't know — top level,
   `speed` ramp, `crop` or caption — fails before anything renders, naming the key, the allowed
   set and a likely fix (`'ramps' → did you mean 'speed'?`). Every previously valid key still works.
 
