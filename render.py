@@ -9,7 +9,12 @@ Each output spec says what to cut and how to ship it::
      "crop": {"x": 0, "y": 0, "width": 2560, "height": 1440},     # source pixels
      "width": 1280, "fps": 30,
      "limit": "github_attachment_video_free",   # a hard-limit id (limits.py) …
-     "max_bytes": 8000000}                      # … and/or an explicit ceiling
+     "max_bytes": 8000000,                      # … and/or an explicit ceiling
+     "captions": [{"text": "Send the form", "start": "typed", "end": 5.5}]}  # see captions.py
+
+**Strict keys.** A key the spec doesn't know — at the top level, in a ``speed`` ramp, a
+``crop`` or a caption — is refused with the allowed set (``ramps`` silently rendering no ramp
+wasted a whole pass, #51). ``OUTPUT_KEYS`` / ``SPEED_KEYS`` / ``CROP_KEYS`` are the contract.
 
 * **mp4** — H.264 (libx264 ``-preset slow``), yuv420p, ``+faststart``, at ``crf``
   ``DELIVERABLE_CRF`` (16 — the same quality as the capture master) unless the spec names a ``crf``.
@@ -58,6 +63,7 @@ The ffmpeg runner is injectable so the suite tests command building with no ffmp
 
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import subprocess
@@ -88,6 +94,42 @@ OUTPUT_BUDGET_S = 1200  # one output's whole size ladder
 
 class RenderError(RuntimeError):
     pass
+
+
+OUTPUT_KEYS = (
+    "name", "format", "title", "start", "end", "speed", "continuous", "crop", "width", "fps", "crf",
+    "limit", "max_bytes", "at", "bookends", "captions",
+)  # fmt: skip
+SPEED_KEYS = ("from", "to", "factor", "ease")
+CROP_KEYS = ("x", "y", "width", "height")
+# Names an agent reaches for that mean a real key.
+KEY_ALIASES = {
+    "ramps": "speed", "ramp": "speed", "speeds": "speed", "speed_ramps": "speed",
+    "caption": "captions", "subtitles": "captions", "subs": "captions", "lower_thirds": "captions",
+    "label": "captions", "labels": "captions", "in": "start", "out": "end", "from": "start", "to": "end",
+    "speed_factor": "factor", "rate": "factor", "easing": "ease", "w": "width", "h": "height", "time": "at",
+}  # fmt: skip
+
+
+def refuse_unknown(obj: dict[str, Any], allowed: tuple[str, ...], what: str) -> None:
+    """Raise on any key ``obj`` has that ``allowed`` doesn't — naming it and the allowed set."""
+    extra = [k for k in obj if k not in allowed]
+    if not extra:
+        return
+    hints = []
+    for k in extra:
+        guess = KEY_ALIASES.get(str(k).lower())
+        if guess not in allowed:
+            close = difflib.get_close_matches(str(k), allowed, n=1, cutoff=0.75)
+            guess = close[0] if close else None
+        if guess:
+            hints.append(f"{k!r} → did you mean {guess!r}?")
+    raise RenderError(
+        f"{what}: unknown key{'s' if len(extra) > 1 else ''} {', '.join(repr(k) for k in extra)} — allowed: "
+        + ", ".join(allowed)
+        + (f" ({'; '.join(hints)})" if hints else "")
+        + ". Nothing was rendered."
+    )
 
 
 def _default_runner(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -237,6 +279,7 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
     name = str(spec.get("name") or "")
     if not _NAME_RE.match(name):
         raise RenderError(f"output name {name!r} must be short: letters, digits, - _ .")
+    refuse_unknown(spec, OUTPUT_KEYS, f"output {name}")
     fmt = str(spec.get("format") or "").lower()
     if fmt not in FORMATS:
         raise RenderError(f"output {name}: format must be one of {', '.join(FORMATS)}")
@@ -255,6 +298,7 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
     for r in spec.get("speed") or []:
         if not isinstance(r, dict):
             raise RenderError(f"output {name}: each speed ramp must be a mapping {{from, to, factor, ease}}")
+        refuse_unknown(r, SPEED_KEYS, f"output {name}: speed ramp")
         a = resolve_time(r.get("from"), marks, f"{name}.speed.from")
         b = resolve_time(r.get("to"), marks, f"{name}.speed.to")
         try:
@@ -291,6 +335,8 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
             raise RenderError(f"output {name}: speed ramps overlap ({a1:.2f}–{b1:.2f} and {a2:.2f}…)")
     crop = spec.get("crop")
     if crop is not None:
+        if isinstance(crop, dict):
+            refuse_unknown(crop, CROP_KEYS, f"output {name}: crop")
         try:
             crop = {k: int(crop[k]) for k in ("x", "y", "width", "height")}
         except (KeyError, TypeError, ValueError):
@@ -311,6 +357,11 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
             raise RenderError(f"output {name}: fps must be a number") from None
         if not 1 <= fps <= MAX_FPS:  # also rejects NaN
             raise RenderError(f"output {name}: fps {spec['fps']} is outside 1..{MAX_FPS}")
+    from . import captions as capmod
+
+    caps = capmod.normalize(spec.get("captions"), marks, name)
+    if caps and fmt == "poster":
+        raise RenderError(f"output {name}: captions are timed — they burn into an mp4 or a gif, not a poster")
     limit_id = str(spec.get("limit") or "")
     if limit_id:
         row = limits.get(limit_id)
@@ -341,6 +392,8 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
         # protoLabs bookends v1 around a FULL clip (mp4): brand (the default) | none. A GIF or a
         # poster never gets them (loops and stills).
         "bookends": _bookends(spec.get("bookends"), fmt, name),
+        # [{text, start, end|None, n}] in SOURCE seconds (captions.py maps them onto the output)
+        "captions": caps,
     }
 
 
@@ -523,18 +576,34 @@ def timeline_filter(segs: list[Segment], crop: dict | None, width: int | None) -
     return f"[0:v]{','.join(post)}[base]"
 
 
-def mp4_cmd(ff: str, src: str, dst: str, base_filter: str, *, crf: int, fps: float) -> list[str]:
-    fc = f"{base_filter};[base]fps={_fmt(fps)},format=yuv420p[out]"
+Captions = tuple  # (extra input args, the overlay chain from [cfps] to [framed])
+
+
+def _with_captions(base_filter: str, fps: float, caps: Captions | None) -> tuple[list[str], str]:
+    """(extra input args, the graph head): the timeline at ``fps``, then any caption overlays.
+    The next filter is appended straight onto the head (without captions the graph is unchanged)."""
+    if not caps:
+        return [], f"{base_filter};[base]fps={_fmt(fps)},"
+    inputs, chain = caps
+    return list(inputs), f"{base_filter};[base]fps={_fmt(fps)}[cfps];{chain};[framed]"
+
+
+def mp4_cmd(
+    ff: str, src: str, dst: str, base_filter: str, *, crf: int, fps: float, caps: Captions | None = None
+) -> list[str]:
+    inputs, graph = _with_captions(base_filter, fps, caps)
+    fc = f"{graph}format=yuv420p[out]"
     return [
-        ff, "-y", "-hide_banner", "-loglevel", "error", "-i", src, "-filter_complex", fc, "-map", "[out]",
+        ff, "-y", "-hide_banner", "-loglevel", "error", "-i", src, *inputs, "-filter_complex", fc, "-map", "[out]",
         "-an", "-c:v", "libx264", "-preset", "slow", "-crf", str(crf), "-pix_fmt", "yuv420p",
         "-movflags", "+faststart", dst,
     ]  # fmt: skip
 
 
-def gif_cmd(ff: str, src: str, dst: str, base_filter: str, *, fps: float) -> list[str]:
+def gif_cmd(ff: str, src: str, dst: str, base_filter: str, *, fps: float, caps: Captions | None = None) -> list[str]:
+    inputs, graph = _with_captions(base_filter, fps, caps)
     fc = (
-        f"{base_filter};[base]fps={_fmt(fps)},split[g1][g2];"
+        f"{graph}split[g1][g2];"
         "[g1]palettegen=stats_mode=diff:max_colors=256[pal];"
         "[g2][pal]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle[out]"
     )
@@ -546,6 +615,7 @@ def gif_cmd(ff: str, src: str, dst: str, base_filter: str, *, fps: float) -> lis
         "error",
         "-i",
         src,
+        *inputs,
         "-filter_complex",
         fc,
         "-map",
@@ -620,8 +690,11 @@ def render_output(
     marks: dict[str, float],
     source: dict[str, Any],
     runner: Runner | None = None,
+    caption_art: Any = None,
 ) -> dict[str, Any]:
-    """Render ONE normalized output. Returns {path, size_bytes, width, height, duration_s, attempts, violations}."""
+    """Render ONE normalized output. Returns {path, size_bytes, width, height, duration_s, attempts,
+    violations, warnings, captions, caption_engine}. ``caption_art`` (a :class:`captions.Art`) is
+    the seam that draws caption PNGs; by default one is made beside the output with the label engines."""
     runner = runner or _default_runner
     ff = deps.ffmpeg()
     if not ff:
@@ -635,6 +708,9 @@ def render_output(
     ext = {"mp4": "mp4", "gif": "gif", "poster": "png"}[spec["format"]]
     dst = out_dir / f"{spec['name']}.{ext}"
     attempts: list[dict[str, Any]] = []
+    timed: list[dict[str, Any]] = []
+    cap_warnings: list[str] = []
+    art: Any = None
 
     if spec["format"] == "poster":
         at = spec["at"] if spec["at"] is not None else spec["start"]
@@ -642,6 +718,28 @@ def render_output(
         attempts.append({"at": at})
     else:
         segs = segments(spec["start"], spec["end"], spec["ramps"], spec.get("eases"))
+        caps_for: Callable[..., Captions] | None = None
+        if spec.get("captions"):
+            from . import captions as capmod
+
+            cut_end = spec["end"] if spec["end"] is not None else (float(source.get("duration_s") or 0) or None)
+            if cut_end is None:
+                raise RenderError(f"output {spec['name']}: captions need the clip's end — give the output an end")
+            if segs[-1][1] is None:
+                segs = segments(spec["start"], cut_end, spec["ramps"], spec.get("eases"))
+            timed, cap_warnings = capmod.plan(spec["captions"], segs, spec["start"], cut_end, spec["name"])
+            # Wrap at the full output size first: too-long text is refused before ffmpeg runs.
+            full_w, full_h = capmod.output_size(spec, source, spec["width"])
+            for c in timed:
+                capmod.wrap(c["text"], full_w, full_h)
+            art = caption_art or capmod.Art(out_dir / f".{spec['name']}-captions")
+            cap_warnings += list(art.notes)
+
+            def caps_for(width: int | None, fps: float) -> Captions:
+                w, h = capmod.output_size(spec, source, width)
+                pngs = art.pngs(timed, w, h)
+                return capmod.overlay_inputs(timed, pngs, fps), capmod.overlay_chain(timed, "cfps", "framed")
+
         if spec["format"] == "mp4":
             capped = bool(spec.get("limit_bytes"))
             ladder = (
@@ -655,7 +753,9 @@ def render_output(
                 if degrading and attempts and attempts[-1]["size_bytes"] <= (spec.get("limit_bytes") or 0):
                     break  # it already fits the platform cap; only a tighter bare max_bytes is unmet
                 base = timeline_filter(segs, spec["crop"], width if width != src_w else None)
-                _ff(runner, mp4_cmd(ff, src, str(dst), base, crf=crf, fps=spec["fps"] or 30))
+                fps = spec["fps"] or 30
+                caps = caps_for(width if width != src_w else None, fps) if caps_for else None
+                _ff(runner, mp4_cmd(ff, src, str(dst), base, crf=crf, fps=fps, caps=caps))
                 size = dst.stat().st_size if dst.exists() else 0
                 attempts.append({"crf": crf, "width": width, "size_bytes": size})
                 if not spec["max_bytes"] or size <= spec["max_bytes"]:
@@ -671,7 +771,8 @@ def render_output(
             )
             for fps, width in ladder:
                 base = timeline_filter(segs, spec["crop"], width if width != src_w else None)
-                _ff(runner, gif_cmd(ff, src, str(dst), base, fps=fps))
+                caps = caps_for(width if width != src_w else None, fps) if caps_for else None
+                _ff(runner, gif_cmd(ff, src, str(dst), base, fps=fps, caps=caps))
                 size = dst.stat().st_size if dst.exists() else 0
                 attempts.append({"fps": fps, "width": width, "size_bytes": size})
                 if not spec["max_bytes"] or size <= spec["max_bytes"]:
@@ -682,7 +783,7 @@ def render_output(
 
     info = probe(dst, runner) if dst.exists() else {"width": 0, "height": 0, "duration_s": 0, "size_bytes": 0}
     violations: list[str] = []
-    warnings = list(spec.get("warnings") or [])
+    warnings = list(spec.get("warnings") or []) + cap_warnings
     if spec["format"] == "mp4" and attempts:
         warnings += quality_notes(spec, attempts, src_w, info["size_bytes"])
     over = bool(spec["max_bytes"] and info["size_bytes"] > spec["max_bytes"])
@@ -708,6 +809,9 @@ def render_output(
         "violations": violations,
         "warnings": warnings,
         "format": spec["format"],
+        # what was burned in: {text, start, end} (source s — pass back to re-render) + out_start/out_end
+        "captions": timed,
+        "caption_engine": art.engine if (art is not None and timed) else "",
     }
 
 

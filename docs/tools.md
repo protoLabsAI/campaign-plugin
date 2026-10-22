@@ -21,7 +21,7 @@ changing.
 | `campaign_script_get` | Read a saved shot script back as YAML, each step commented with its number; `steps="20-30"` shows only those steps (plus the settings) |
 | `campaign_shoot` | Record a take (Playwright, headless Chromium, `record_video`) and register the webm + stills. **The iteration path:** re-shoot a saved script by `script_id` with `overrides` — `{N: …}` fixes step N (a whole step replaces it, options merge into it), a top-level setting (`{"base_url": …, "color_scheme": …}`) replaces that setting — validated like any script and saved, so the YAML is never resent. Replies with a short summary (asset id, take dir, duration/size, marks, still ids; a failure's error once, without its call log); the full error, timing log and failure still stay on the asset (`campaign_asset`) |
 | `campaign_sandbox_reset` | Clear a protoAgent **sandbox** console between takes — its chat sessions, artifacts and goals (`clear=`), and optionally its theme preset (`theme=`). Targets only a console a saved script records (`script_id`, or a `base_url` matching one), with that script's auth, through the browser worker. Refuses a non-loopback console, the operator's :7870 / :7871 instances, and this agent's own console (or an unknown own console) before sending anything |
-| `campaign_render` | mp4 / gif / poster outputs via ffmpeg, under a hard limit. Replies with one line per output (asset id, file under one render dir, size, dims, duration) and one line per warning; attempts and specs stay on the asset |
+| `campaign_render` | mp4 / gif / poster outputs via ffmpeg, under a hard limit, with optional timed `captions` (see [campaign_render specs](#campaign_render-specs)). Replies with one line per output (asset id, file under one render dir, size, dims, duration), a captions line and one line per warning; attempts, specs and the captions used stay on the asset |
 | `campaign_card` | Render a branded card template to PNG |
 | `campaign_view` | LOOK at a still/card/poster, or frames of a clip (evenly spaced, `every_s` apart from `start` to `end` — paged 12 per contact sheet, the reply naming the next page's `start` — or either side of a mark/cut), as images the model sees — downscaled JPEGs, ≤ 3 per call; `crop={x,y,width,height}` in source pixels cuts out a region first so it comes back at 100 % (how a 2560- or 3840-wide master's smallest text is checked), contained to the campaign's dir. Needs a core with `graph.sdk.multimodal_tool_result` and a vision model; otherwise it says it couldn't show them |
 | `campaign_montage` | Cut an ordered `sequence` of clips + cards into one mp4 (see [Montages](montages-and-branding.md#montages)) and register it as a `montage` asset with its poster (+ GIF) |
@@ -32,6 +32,49 @@ changing.
 | `campaign_setup` | What's installed and how to fix what isn't |
 | `campaign_backup` | The protoContent backup of approved media: archived / queued / retrying; `backfill=true` queues every approved asset (see [Archive to protoContent](media-and-backup.md#archive-to-protocontent)) |
 | `campaign_prune` | Retention: what the prune would delete, with sizes, by rule (dry run by default); `dry_run=false` deletes only once the operator set `retention_mode: prune` (see [Retention](media-and-backup.md#retention)) |
+
+## campaign_render specs
+
+Each item of `outputs` is a mapping with these keys — **and only these**. A key it doesn't know
+(at the top level, in a `speed` ramp, a `crop` or a caption) is refused before anything renders,
+naming the key, the allowed set and the likely intent (`'ramps' → did you mean 'speed'?`).
+
+| Key | |
+|---|---|
+| `name`, `format` | required; `format` is `mp4`, `gif` or `poster` |
+| `title` | the asset's title (and the bookends' title card) |
+| `start`, `end` | seconds of the take or a mark name |
+| `speed` | ramps `[{from, to, factor, ease}]` — source seconds or marks |
+| `continuous` | default `true`: warn on ramps that read as jump cuts |
+| `crop` | `{x, y, width, height}` in source pixels |
+| `width`, `fps`, `crf` | output size, frame rate, quality (crf 16 default) |
+| `limit`, `max_bytes` | a hard-limit id (`campaign_limits`) and/or a byte ceiling |
+| `at` | a poster's frame |
+| `bookends` | mp4: `brand` (default) or `none` |
+| `captions` | mp4/gif: timed lower thirds — below |
+
+**`captions`** is a list of `{text, start, end}` or `{text, at}`:
+
+```json
+"captions": [
+  {"text": "Ask the agent for a feature spec", "start": 0.5, "end": "form_shown"},
+  {"text": "It builds the spec form; send it", "at": "form_shown"},
+  {"text": "A card lands on the board", "at": "card_created"}
+]
+```
+
+- `start` / `end` / `at` are **source** seconds or marks — the take's clock, the same one the
+  `speed` marks use. They're mapped through the ramps onto the output, so a caption stays on its
+  action however the ramps change. `{text, at}` ends when the next caption starts (or the clip ends).
+- One caption on screen at a time (overlapping `start`–`end` ranges are refused). Each stays up at
+  least **1.8 s of output**; a caption a ramp squeezes shorter is held longer (the next one waits)
+  and the reply says so in a warning.
+- Text wraps to at most **2 lines** at the output's width (shorter on 9:16, which also keeps to the
+  vertical safe area); longer text is refused with how many characters fit.
+- Captions are burned into the clip only: the brand bookends wrap the captioned clip, so the cards
+  never carry one. The take is never modified.
+- The asset records `meta.captions` (the list, in source seconds — pass it back as `captions` to
+  re-render) and `meta.caption_timing` (each caption's output window).
 
 ## Skills
 

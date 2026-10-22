@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Timed captions on `campaign_render`.** `captions: [{text, start, end} | {text, at}]` burns
+  lower-third captions (accent bar + brand box, heading font, 0.2 s fades) into an mp4 or gif.
+  Times are source seconds or marks — the `speed` ramps' clock — mapped through the ramps, so
+  captions stay on the action. One at a time; each is held ≥ 1.8 s of output (a squeezed one is
+  extended and the reply warns); text wraps to ≤ 2 lines at the clip's width (9:16 keeps to the
+  vertical safe area) or is refused. Bookends wrap the captioned clip, so the cards carry none;
+  the take is never modified. The asset records `meta.captions` (re-passable) and
+  `meta.caption_timing`. See [Captions](docs/montages-and-branding.md#captions).
+- **`campaign_render` refuses unknown keys (#51).** A spec key it doesn't know — top level,
+  `speed` ramp, `crop` or caption — fails before anything renders, naming the key, the allowed
+  set and a likely fix (`'ramps' → did you mean 'speed'?`). Every previously valid key still works.
+
 ## 0.8.1
 
 - **Shot scripts can target inline chat app cards.** (#54, closes #53) `frame: {card: …, title: …, nth: …}`
