@@ -84,6 +84,38 @@ The montage registers as a `montage` asset (the gallery plays it and filters by 
 `meta.sequence`, the cut sheet (`meta.timeline`), the encode attempts and the engines used;
 its poster and GIF are child assets.
 
+## Captions
+
+A longer clip that isn't self-explanatory carries captions from start to finish:
+`campaign_render`'s `captions` burns timed lower thirds into the clip, in the same look as a
+montage `label` — an accent bar and the text on a translucent brand-background box, in the brand
+heading font (ffmpeg `drawtext`; the headless browser's HTML overlay when this ffmpeg has no
+`drawtext`) — fading in and out over 0.2 s.
+
+```json
+campaign_render(asset_id=41, outputs=[{
+  "name": "board-flow", "format": "mp4", "title": "Spec to Done",
+  "speed": [{"from": "typed", "to": "form_shown", "factor": 3, "ease": true},
+            {"from": "card_created", "to": "board_open", "factor": 2, "ease": true}],
+  "captions": [
+    {"text": "Ask the agent for a feature spec", "start": 0.5, "end": "typed"},
+    {"text": "It builds a spec form right in the chat", "at": "form_shown"},
+    {"text": "Send it, and a card is created", "at": "sent"},
+    {"text": "The board opens on the new card", "at": "board_open"},
+    {"text": "…and it moves to Done", "start": "moved", "end": "end"}
+  ]
+}])
+```
+
+- **Times are the take's** (seconds or marks — the clock the `speed` ramps use), mapped through the
+  ramps, so re-tuning a ramp never knocks a caption off its action.
+- **One at a time, ≥ 1.8 s each** of output time; a squeezed caption is held (with a warning), never
+  silently clipped.
+- **≤ 2 lines** at the clip's width — 9:16 keeps above the platform's bottom strip and left of its
+  action rail; longer text is refused before anything renders.
+- **Only the content**: the bookends wrap the captioned clip, so the title and end cards stay clean.
+- What was burned in is on the asset (`meta.captions`, re-passable as-is; `meta.caption_timing`).
+
 ## protoLabs bookends v1 — the default intro + outro
 
 Every clip Campaign produces is bookended by default, the way Josh approved it (vfr-edge-fade,

@@ -20,6 +20,7 @@ from langchain_core.tools import tool
 
 from . import cards, deps, limits, look, montage, paths, produce, render, sandbox, shoot, shotscript, store
 from . import intro as intromod
+from . import captions as captionsmod
 from . import outro as outromod
 
 try:  # the host's graph state, injected into a tool body (the chat session id lives there)
@@ -1216,7 +1217,11 @@ def build_tools(registry):
         px), width, fps, and limit (a hard-limit id such as github_attachment_video_free) and/or
         max_bytes, and bookends (mp4 only: brand — the default, protoLabs bookends v1: splash bumper →
         fade → title card → edge sweep → the clip → edge sweep → bumper → fade → Star CTA, titled by
-        the output's title — or none for a bare clip). mp4 is H.264 (preset slow)/yuv420p/faststart at crf 16 —
+        the output's title — or none for a bare clip), and captions [{text, start, end} or {text, at}]:
+        timed lower thirds burned into the clip (mp4/gif) — times are SOURCE seconds or marks (the
+        speed ramps' clock), mapped through the ramps; each stays up ≥ 1.8 s of output (extended
+        with a warning), wraps to ≤ 2 lines, never on the bookend cards. An unknown key anywhere in
+        a spec is refused with the allowed keys (nothing renders). mp4 is H.264 (preset slow)/yuv420p/faststart at crf 16 —
         deliverable quality — unless you pass crf. A platform limit that caps bytes steps an mp4's CRF then
         width until it fits and warns when that went past crf 20; a bare max_bytes only goes to crf 20 and,
         if still over, keeps the quality and warns instead. gif steps fps then width until it fits. Reports final size, dimensions and
@@ -1278,7 +1283,13 @@ def build_tools(registry):
                 duration_s=r["duration_s"],
                 limit_id=spec["limit"],
                 parent_id=take["id"],
-                meta={"spec": raw, "attempts": r["attempts"], "violations": r["violations"], "warnings": r["warnings"]},
+                meta={
+                    "spec": raw,
+                    "attempts": r["attempts"],
+                    "violations": r["violations"],
+                    "warnings": r["warnings"],
+                    **_caption_meta(r),
+                },  # fmt: skip
                 notes=notes,
             )
             made.append(a["id"])
@@ -1295,6 +1306,8 @@ def build_tools(registry):
                 f"- #{a['id']} {_rel(r['path'], out_dir)} — {limits.human_bytes(r['size_bytes'])}, "
                 f"{r['width']}×{r['height']}" + (f", {r['duration_s']:.1f}s" if r["duration_s"] else "")
             )
+            if r.get("captions"):
+                lines.append("    " + captionsmod.summary(r["captions"], r.get("caption_engine") or ""))
             lines += [f"    ⚠ VIOLATES: {_clip(v, WARNING_PREVIEW)}" for v in r["violations"]]
             lines += [f"    ⚠ {_clip(w, WARNING_PREVIEW)}" for w in r["warnings"]]
         if made and take["status"] in ("planned", "scripted", "captured"):
@@ -1852,6 +1865,19 @@ def _multimodal_fn():
         return None
     fn = getattr(sdk, "multimodal_tool_result", None)
     return fn if callable(fn) else None
+
+
+def _caption_meta(r: dict[str, Any]) -> dict[str, Any]:
+    """What a render burned in, on its asset: ``captions`` re-passable as-is (source seconds),
+    ``caption_timing`` the output windows actually used."""
+    timed = r.get("captions") or []
+    if not timed:
+        return {}
+    return {
+        "captions": [{"text": c["text"], "start": c["start"], "end": c["end"]} for c in timed],
+        "caption_timing": [{"text": c["text"], "out_start": c["out_start"], "out_end": c["out_end"]} for c in timed],
+        "caption_engine": r.get("caption_engine") or "",
+    }
 
 
 def _bookend_render(
