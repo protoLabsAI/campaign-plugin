@@ -35,6 +35,8 @@ def test_unknown_keys_inside_speed_crop_and_captions_are_refused():
         render.RenderError, match=r"speed ramp: unknown key 'speed_factor'.*allowed: from, to, factor, ease.*'factor'"
     ):
         _spec(speed=[{"from": 1, "to": 3, "speed_factor": 2}])
+    with pytest.raises(render.RenderError, match=r"speed factor 0.0 is outside"):
+        _spec(speed=[{"from": 1, "to": 3, "factor": 0}])  # refused, not silently read as 1×
     with pytest.raises(render.RenderError, match=r"crop: unknown key 'w'.*did you mean 'width'"):
         _spec(crop={"x": 0, "y": 0, "w": 10, "width": 10, "height": 10})
     with pytest.raises(

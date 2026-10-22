@@ -302,7 +302,7 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
         a = resolve_time(r.get("from"), marks, f"{name}.speed.from")
         b = resolve_time(r.get("to"), marks, f"{name}.speed.to")
         try:
-            f = float(r.get("factor") or 1)
+            f = 1.0 if r.get("factor") in (None, "") else float(r["factor"])  # 0 is refused below, not read as 1
         except (TypeError, ValueError):
             raise RenderError(f"output {name}: speed factor must be a number") from None
         if a is None or b is None or b <= a:
