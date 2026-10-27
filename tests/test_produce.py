@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from campaign import montage, produce, store
@@ -225,6 +228,64 @@ def test_same_request_is_the_same_job_and_force_re_records(world):
     assert again["id"] == first["id"] and again["reused"] and world.shots == 1
     _start(world, force=True)
     assert world.shots == 2
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_concurrent_starts_spawn_one_worker(world, monkeypatch, force):
+    preflights = threading.Barrier(2)
+    release = threading.Event()
+    workers = []
+    save_lock = threading.Lock()
+    real_save = produce.save
+
+    def save(job):
+        # Isolate duplicate spawning from the separate shared-temp-file write race.
+        with save_lock:
+            return real_save(job)
+
+    monkeypatch.setattr(produce, "_THREADS", {})
+
+    def preflight(*args, **kwargs):
+        preflights.wait(timeout=5)
+        return []
+
+    def worker_thread(**kwargs):
+        worker = threading.Thread(**kwargs)
+        workers.append(worker)
+        return worker
+
+    def run(job, hooks):
+        release.wait(timeout=10)
+
+    def start():
+        try:
+            return _start(world, background=True, force=force)
+        except produce.ProduceError as exc:
+            return exc
+
+    monkeypatch.setattr(produce, "save", save)
+    monkeypatch.setattr(produce, "threading", SimpleNamespace(Thread=worker_thread))
+    monkeypatch.setattr(produce, "preflight", preflight)
+    monkeypatch.setattr(produce, "run", run)
+    try:
+        # Starting must also finish while the pipeline's long-lived lock is held.
+        with ThreadPoolExecutor(max_workers=2) as callers:
+            with produce._LOCK:
+                futures = [callers.submit(start) for _ in range(2)]
+                results = [future.result(timeout=5) for future in futures]
+        assert len(workers) == 1
+        assert len(produce._THREADS) == 1
+        fresh = [r for r in results if isinstance(r, dict) and not r.get("reused")]
+        assert len(fresh) == 1
+        other = next(r for r in results if r is not fresh[0])
+        if force:
+            assert isinstance(other, produce.ProduceError) and "is running" in str(other)
+        else:
+            assert other["reused"] and other["id"] == fresh[0]["id"]
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(timeout=5)
 
 
 def test_a_failed_job_resumes_reusing_its_good_take(world):

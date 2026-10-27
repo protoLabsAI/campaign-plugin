@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Concurrent video requests reuse one worker (#50).** Identical background requests now
+  check and register the job atomically, preventing duplicate recordings. Forced requests
+  still refuse a running job; preflight and foreground runs do not hold the start lock.
+
 ## 0.9.0
 
 - **Timed captions on `campaign_render`.** `captions: [{text, start, end} | {text, at}]` burns
