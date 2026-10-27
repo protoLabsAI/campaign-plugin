@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -66,6 +67,7 @@ CROP = (640, 360)  # the 100 % text crop, device px
 DEFAULT_CAPTION_S = 4.0
 
 _LOCK = threading.Lock()  # one job at a time records + renders (CPU and the screen budget)
+_START_LOCK = threading.Lock()  # atomic reuse/check/register, separate from the pipeline lock
 _THREADS: dict[str, threading.Thread] = {}
 
 
@@ -473,49 +475,60 @@ def start(
     }
     key = job_key(inputs, data)
     job_id = "vid-" + key[:12]
-    job = load(job_id)
-    if job and not force:
-        if job["status"] in ("done", "needs_review") or (job["status"] == "running" and _alive(job_id)):
-            _log(job, "re-requested with the same inputs — reused this job, nothing re-recorded")
-            save(job)
-            return {**job, "reused": True}
-    if job and _alive(job_id):
-        raise ProduceError(f"job {job_id} is running — wait for it (campaign_video_status) before forcing a re-run")
     hooks = hooks or Hooks()
-    notes = notes + preflight(norm, hooks, allow_other_console=allow_other_console)
-    prior_take = (job or {}).get("take") if not force else None
-    job = {
-        "id": job_id,
-        "key": key,
-        "status": "running",
-        "stage": "queued",
-        "progress": 0.0,
-        "created": (job or {}).get("created") or _now(),
-        "inputs": inputs,
-        "script": data,
-        "predicted_s": predicted_s(raw_script),
-        "notes": notes,
-        "session_id": session_id,
-        "deliver_dir": deliver_dir,
-        "take": prior_take,
-        "attempt": 0,
-        "gates": [],
-        "reasons": [],
-        "outputs": {},
-        "delivery": {},
-        "log": [],
-    }
-    _log(job, f"queued — {title!r} at {quality}" + (f"; {'; '.join(notes)}" if notes else ""))
-    save(job)
-    if not background:
-        run(job, hooks)
-        return load(job_id) or job
-    for jid in [k for k, th in _THREADS.items() if not th.is_alive()]:
-        _THREADS.pop(jid, None)
-    t = threading.Thread(target=run, args=(job, hooks), name=f"campaign-{job_id}", daemon=True)
-    _THREADS[job_id] = t
-    t.start()
-    return job
+    checked = False
+    while True:
+        with _START_LOCK if background else nullcontext():
+            job = load(job_id)
+            if job and not force:
+                if job["status"] in ("done", "needs_review") or (job["status"] == "running" and _alive(job_id)):
+                    _log(job, "re-requested with the same inputs — reused this job, nothing re-recorded")
+                    save(job)
+                    return {**job, "reused": True}
+            if job and _alive(job_id):
+                raise ProduceError(
+                    f"job {job_id} is running — wait for it (campaign_video_status) before forcing a re-run"
+                )
+            if checked or not background:
+                if not checked:
+                    notes = notes + preflight(norm, hooks, allow_other_console=allow_other_console)
+                prior_take = (job or {}).get("take") if not force else None
+                job = {
+                    "id": job_id,
+                    "key": key,
+                    "status": "running",
+                    "stage": "queued",
+                    "progress": 0.0,
+                    "created": (job or {}).get("created") or _now(),
+                    "inputs": inputs,
+                    "script": data,
+                    "predicted_s": predicted_s(raw_script),
+                    "notes": notes,
+                    "session_id": session_id,
+                    "deliver_dir": deliver_dir,
+                    "take": prior_take,
+                    "attempt": 0,
+                    "gates": [],
+                    "reasons": [],
+                    "outputs": {},
+                    "delivery": {},
+                    "log": [],
+                }
+                _log(job, f"queued — {title!r} at {quality}" + (f"; {'; '.join(notes)}" if notes else ""))
+                save(job)
+                if not background:
+                    break
+                for jid in [k for k, th in _THREADS.items() if not th.is_alive()]:
+                    _THREADS.pop(jid, None)
+                t = threading.Thread(target=run, args=(job, hooks), name=f"campaign-{job_id}", daemon=True)
+                _THREADS[job_id] = t
+                t.start()
+                return job
+        # Preflight does I/O. Reload and re-check under the lock before creating the job.
+        notes = notes + preflight(norm, hooks, allow_other_console=allow_other_console)
+        checked = True
+    run(job, hooks)
+    return load(job_id) or job
 
 
 def _preset_arg(v: Any, what: str) -> str:
