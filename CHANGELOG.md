@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.1
+
 - **Long device-capture takes retain their ending.** Screencast frames are kept at the
   output ticks, preserving the assembled video while avoiding redundant repaint frames.
   The frame budget defaults to 12 GB, capped at half the free disk space at start, with a
