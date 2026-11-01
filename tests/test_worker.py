@@ -568,3 +568,112 @@ def test_terminal_prefixes_flag_a_line_that_may_still_become_a_match():
         assert held(tail), tail
     for tail in ("$ ", "done.", "cd src", "~/dev $ "):
         assert not held(tail), tail
+
+
+@pytest.mark.parametrize("fps", [10, 30])
+def test_screencast_keeps_exactly_the_frames_visible_at_output_ticks(tmp_path, fps):
+    import base64
+    import math
+
+    from campaign import capture
+
+    class Session:
+        def __init__(self):
+            self.acks = []
+
+        def send(self, method, params=None):
+            if method == "Page.screencastFrameAck":
+                self.acks.append(params["sessionId"])
+
+    rec = pw_worker.ScreencastRecorder(None, None, tmp_path, {"width": 4, "height": 4}, 92, fps=fps)
+    rec.session = Session()
+    rec.wall0 = 100
+    # Dense repaint bursts, a long idle, equal stamps, exact ticks and near-tick stamps.
+    times = [0.2 + i / 60 for i in range(180)] + [4 + i / 60 for i in range(243)]
+    times += [0.55, 0.55, 0.54996, 0.55004]
+    times.sort()
+    all_frames = []
+    for i, t in enumerate(times):
+        data = f"frame-{i}".encode()
+        all_frames.append((data, round(t, 4)))
+        rec._on_frame({"sessionId": i, "metadata": {"timestamp": 100 + t}, "data": base64.b64encode(data).decode()})
+    assert rec.pending is not None
+    final_data = rec.pending[0]
+    assert final_data not in [p.read_bytes() for p in tmp_path.glob("*.jpg")]
+    manifest = rec.stop(8.04)
+    written = [(tmp_path / name).read_bytes() for name, _ in manifest["frames"]]
+    actual = capture.cfr_schedule([t for _, t in manifest["frames"]], 8.04, fps)
+    expected = capture.cfr_schedule([t for _, t in all_frames], 8.04, fps)
+    assert [written[i] for i in actual] == [all_frames[i][0] for i in expected]
+    assert len(written) <= math.ceil(8.04 * fps) + 2
+    assert len(all_frames) > len(written) * 1.8
+    assert all_frames[0][0] in written
+    assert next(data for data, t in all_frames if t == round(0.2 + 179 / 60, 4)) in written
+    assert final_data == written[-1]
+    assert rec.session.acks == list(range(len(times)))
+    assert manifest["errors"] == manifest["dropped"] == 0
+
+
+@pytest.mark.parametrize("fps", [None, 10, 30])
+@pytest.mark.parametrize("limit,free,expected", [(None, 40, 12), (None, 10, 5), (2.5, 40, 2.5), (20, 10, 5)])
+def test_capture_budget_and_fps_reach_recorder_and_assembler(tmp_path, monkeypatch, fps, limit, free, expected):
+    from types import SimpleNamespace
+
+    from campaign import capture
+
+    paths = []
+
+    def disk_usage(path):
+        paths.append(path)
+        assert path.is_dir()
+        return SimpleNamespace(free=int(free * 10**9))
+
+    monkeypatch.setattr(pw_worker.shutil, "disk_usage", disk_usage)
+    seen = []
+    original = pw_worker.ScreencastRecorder.start
+
+    def start(rec, wall0):
+        original(rec, wall0)
+        seen.append(rec)
+
+    monkeypatch.setattr(pw_worker.ScreencastRecorder, "start", start)
+    cap = {"scale": "device"}
+    if fps is not None:
+        cap["fps"] = fps
+    if limit is not None:
+        cap["max_frame_gb"] = limit
+    script = _script(capture=cap, device_scale_factor=2)
+    # Exercise the worker and assembler defaults even when no schema defaults were supplied.
+    if fps is None:
+        script["capture"].pop("fps")
+    report = pw_worker.run_job(shoot.build_job(script, tmp_path), FakePlaywright())
+    assert report["ok"], report
+    assert seen[0].max_bytes == expected * 10**9
+    assert seen[0].fps == (fps or 30)
+    assert paths == [tmp_path / ".frames"]
+
+    def assemble(manifest, dst, **kwargs):
+        assert kwargs["fps"] == seen[0].fps
+        return {"video": str(dst)}
+
+    monkeypatch.setattr(capture, "assemble", assemble)
+    assert shoot._assemble(script, report["result"], "", None) == ""
+
+
+def test_drop_notice_reports_disk_limited_budget(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(pw_worker.shutil, "disk_usage", lambda p: SimpleNamespace(free=10))
+    report = pw_worker.run_job(
+        shoot.build_job(_script(capture="device", device_scale_factor=2), tmp_path), FakePlaywright()
+    )
+    assert report["ok"], report
+    assert "2 frames past the 5e-09 GB frame budget" in report["result"]["capture_note"]
+
+
+@pytest.mark.parametrize("budget", [0, -1, True, "12", float("inf"), float("nan")])
+def test_capture_rejects_invalid_frame_budgets(budget):
+    from campaign.shotscript import ScriptError
+
+    with pytest.raises(ScriptError, match="max_frame_gb"):
+        _script(capture={"scale": "device", "max_frame_gb": budget}, device_scale_factor=2)

@@ -187,7 +187,7 @@ MAX_STORAGE_KEY_LEN = 512
 MAX_INIT_SCRIPT_BYTES = 64 * 1024
 # capture: how the VIDEO is recorded (see the module docstring, "Video capture").
 CAPTURE_SCALES = ("css", "device")
-CAPTURE_KEYS = ("scale", "fps", "quality", "crf")
+CAPTURE_KEYS = ("scale", "fps", "quality", "crf", "max_frame_gb")
 CAPTURE_DEVICE_DEFAULTS = {"fps": 30, "quality": 92, "crf": 16}
 # A device-pixel take is H.264 (yuv420p); level 5.1/5.2 tops out at 36864 macroblocks a frame
 # (~9.4 Mpx) and every side ≤ 4096 keeps it inside what browsers and the montage canvas handle.
@@ -457,7 +457,7 @@ def _capture(value: Any, out: dict[str, Any], problems: list[str]) -> dict[str, 
         problems.append(f"capture.scale must be one of {', '.join(CAPTURE_SCALES)}, got {value.get('scale')!r}")
         return {"scale": "css"}
     if scale == "css":
-        extra = [k for k in ("fps", "quality", "crf") if k in value]
+        extra = [k for k in ("fps", "quality", "crf", "max_frame_gb") if k in value]
         if extra:
             problems.append(
                 f"capture: {', '.join(extra)} only apply to `scale: device` — Playwright's own recording "
@@ -465,6 +465,12 @@ def _capture(value: Any, out: dict[str, Any], problems: list[str]) -> dict[str, 
             )
         return {"scale": "css"}
     cap: dict[str, Any] = {"scale": "device"}
+    if "max_frame_gb" in value:
+        budget = value["max_frame_gb"]
+        if isinstance(budget, bool) or not isinstance(budget, (int, float)) or not 0 < budget < float("inf"):
+            problems.append("capture.max_frame_gb must be a positive finite number")
+        else:
+            cap["max_frame_gb"] = budget
     for key, lo, hi in (("fps", 10, 60), ("quality", 50, 100), ("crf", 10, 28)):
         v = _int(value.get(key, CAPTURE_DEVICE_DEFAULTS[key]), f"capture.{key}", problems, lo, hi)
         cap[key] = CAPTURE_DEVICE_DEFAULTS[key] if v is None else v
