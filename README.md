@@ -61,6 +61,12 @@ Planning works without any of it; the media tools say exactly what's missing
 
 More in [Using it](docs/usage.md).
 
+Device-pixel capture (`capture: {scale: device, fps: 30}`) keeps the frames visible at output
+ticks, plus the first and last frame, so repaint bursts do not fill the frame budget.
+The budget is the smaller of 12 GB (override with `capture.max_frame_gb`) and 50% of free
+space on the frames volume at recording start. A take that exceeds it reports the actual
+budget and holds its last kept frame to the end.
+
 ## Documentation
 
 | Doc | What's in it |

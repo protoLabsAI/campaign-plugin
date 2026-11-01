@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Long device-capture takes retain their ending.** Screencast frames are kept at the
+  output ticks, preserving the assembled video while avoiding redundant repaint frames.
+  The frame budget defaults to 12 GB, capped at half the free disk space at start, with a
+  `capture.max_frame_gb` override; dropped-frame notices report the actual budget.
+
 - **Concurrent video requests reuse one worker (#50).** Identical background requests now
   check and register the job atomically, preventing duplicate recordings. Forced requests
   still refuse a running job; preflight and foreground runs do not hold the start lock.

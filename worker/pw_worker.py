@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import math
 import os
 import re
 import shutil
@@ -470,19 +471,20 @@ def video_size(script: dict[str, Any]) -> dict[str, int]:
     return {"width": int(vp["width"]) // 2 * 2, "height": int(vp["height"]) // 2 * 2}
 
 
-# A device-pixel take's frames wait on disk until the host assembles them (JPEG, ~0.2–0.4 MB at
-# 2560×1600 → ~0.3–0.6 GB a minute of constant motion). Past this budget new frames are dropped
-# (the last one is held) and the take says so — a runaway 15-minute shoot can't fill the disk.
-MAX_FRAME_BYTES = 3_000_000_000
+# Device-pixel JPEGs wait on disk until assembly (~1 MB each for a detailed 2K page).
+# Keep output-tick frames with a default 12 GB ceiling (capture.max_frame_gb overrides it),
+# capped at half the frames volume's free space at start. Past it, hold the last frame.
+MAX_FRAME_BYTES = 12_000_000_000
 
 
 class ScreencastRecorder:
     """``capture: device`` — DEVICE-pixel frames over CDP ``Page.startScreencast``.
 
     Chromium sends a frame only when the page's pixels change (on "damage"), each stamped with
-    the moment it was composited (``metadata.timestamp``, epoch seconds). Every frame is written
-    as a JPEG with its time on the take's clock (seconds since page creation — the clock marks
-    use) and acked (Chromium sends no more until it is). Idle stretches simply have no frames:
+    the moment it was composited (``metadata.timestamp``, epoch seconds). Only frames visible
+    at output ticks (plus the first and last) are written as JPEGs with their time on the
+    take's clock (seconds since page creation — the clock marks use). Every frame is acked
+    (Chromium sends no more until it is). Idle stretches simply have no frames:
     the host's assembly (``capture.cfr_schedule``) holds the last frame across them, from t=0
     (the first frame is held back to the start) to ``end_s`` (the last is held to the end).
 
@@ -491,10 +493,12 @@ class ScreencastRecorder:
     timestamps come from Chromium, so a late dispatch never shifts a frame in time."""
 
     def __init__(self, context, page, frames_dir: Path, size: dict[str, int], quality: int,
-                 max_bytes: int = MAX_FRAME_BYTES):  # fmt: skip
+                 max_bytes: int = MAX_FRAME_BYTES, *, fps: int = 30):  # fmt: skip
         self.context, self.page = context, page
         self.dir = Path(frames_dir)
         self.size, self.quality, self.max_bytes = size, int(quality), int(max_bytes)
+        self.fps = int(fps)
+        self.pending: tuple[bytes, float] | None = None
         self.frames: list[list[Any]] = []  # [file name, t]
         self.bytes = 0
         self.dropped = 0
@@ -505,6 +509,7 @@ class ScreencastRecorder:
     def start(self, wall0: float) -> None:
         self.wall0 = wall0
         self.dir.mkdir(parents=True, exist_ok=True)
+        self.max_bytes = min(self.max_bytes, shutil.disk_usage(self.dir).free // 2)
         self.session = self.context.new_cdp_session(self.page)
         self.session.on("Page.screencastFrame", self._on_frame)
         self.session.send(
@@ -526,13 +531,24 @@ class ScreencastRecorder:
             ts = meta.get("timestamp")
             t = (float(ts) if ts else time.time()) - self.wall0
             data = base64.b64decode(ev.get("data") or "")
-            if self.bytes + len(data) > self.max_bytes:
-                self.dropped += 1
-            elif data:
-                name = f"f{len(self.frames):06d}.jpg"
-                (self.dir / name).write_bytes(data)
-                self.bytes += len(data)
-                self.frames.append([name, round(max(0.0, t), 4)])
+            if data:
+                # Compare the rounded times that cfr_schedule reads from the manifest.
+                t = round(max(0.0, t), 4)
+                if self.pending is not None:
+                    pending_data, pending_t = self.pending
+                    self.pending = None
+                    # Use the scheduler's exact tick arithmetic at floating-point boundaries.
+                    k = max(0, math.floor(pending_t * self.fps - 0.5))
+                    while k / self.fps + 0.5 / self.fps < pending_t:
+                        k += 1
+                    if k / self.fps + 0.5 / self.fps < t:
+                        self._write_frame(pending_data, pending_t)
+                if self.bytes + len(data) > self.max_bytes:
+                    self.dropped += 1
+                elif not self.frames:
+                    self._write_frame(data, t)  # assembly holds the first frame back to t=0
+                else:
+                    self.pending = (data, t)
         except Exception:  # noqa: BLE001 — one bad frame must not stop the take
             self.errors += 1
         finally:
@@ -541,6 +557,15 @@ class ScreencastRecorder:
             except Exception:  # noqa: BLE001 — the page may be closing
                 pass
 
+    def _write_frame(self, data: bytes, t: float) -> None:
+        if self.bytes + len(data) > self.max_bytes:
+            self.dropped += 1
+            return
+        name = f"f{len(self.frames):06d}.jpg"
+        (self.dir / name).write_bytes(data)
+        self.bytes += len(data)
+        self.frames.append([name, t])
+
     def stop(self, end_s: float) -> dict[str, Any]:
         """Stop the screencast and write ``frames.json`` (the host's assembly input)."""
         try:
@@ -548,6 +573,13 @@ class ScreencastRecorder:
                 self.session.send("Page.stopScreencast")
         except Exception:  # noqa: BLE001 — a crashed page still leaves the frames it sent
             pass
+        if self.pending is not None:
+            data, t = self.pending
+            self.pending = None
+            try:
+                self._write_frame(data, t)
+            except Exception:  # noqa: BLE001 — retain the rest of a failed take
+                self.errors += 1
         manifest = {
             "dir": str(self.dir),
             "frames": self.frames,
@@ -1149,7 +1181,15 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
                 page = context.new_page()
                 if device:
                     recorder = ScreencastRecorder(
-                        context, page, out_dir / ".frames", video_size(script), capture.get("quality", 92)
+                        context,
+                        page,
+                        out_dir / ".frames",
+                        video_size(script),
+                        capture.get("quality", 92),
+                        max_bytes=int(capture["max_frame_gb"] * 10**9)
+                        if "max_frame_gb" in capture
+                        else MAX_FRAME_BYTES,
+                        fps=int(capture.get("fps", 30)),
                     )
                 t0 = time.monotonic()
                 if recorder is not None:
@@ -1196,7 +1236,7 @@ def run_shoot(job: dict[str, Any], playwright_factory: Callable | None = None) -
                         frames_manifest = str(Path(man["dir"]) / "frames.json")
                         if man["dropped"]:
                             capture_note = (
-                                f"{man['dropped']} frames past the {MAX_FRAME_BYTES // 10**9} GB frame budget were "
+                                f"{man['dropped']} frames past the {recorder.max_bytes / 10**9:g} GB frame budget were "
                                 "dropped — the last kept frame is held to the end; shoot a shorter take"
                             )
                     try:
