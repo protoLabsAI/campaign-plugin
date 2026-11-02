@@ -40,6 +40,7 @@ playwright. CI runs both: the unit job, and an integration job that installs Chr
 | `archive_api.py` | The archive's gated routes, at their own prefix |
 | `view.py` | The gallery page (one HTML string) |
 | `store.py` | SQLite: campaigns, lanes, assets, milestones, decisions, shot scripts |
+| `pacing.py` | `campaign_pacing`: frame-difference and caption checks against the craft defaults |
 | `paths.py` | The data dir and media root |
 | `shotscript.py` | Shot-script parsing and validation |
 | `shoot.py` | A validated script → a recorded take, via the worker |
