@@ -43,6 +43,7 @@ TOOLS = {
     "campaign_render",
     "campaign_card",
     "campaign_view",
+    "campaign_pacing",
     "campaign_montage",
     "campaign_storyboard",
     "campaign_produce_video",
@@ -405,6 +406,7 @@ def test_the_expected_skills_ship():
         "asset-review",
         "montage-editing",
         "produce-walkthrough-video",
+        "viral-clip-craft",
     }
 
 

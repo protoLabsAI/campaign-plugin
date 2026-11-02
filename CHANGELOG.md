@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.10.0
+
+- **`zooms` on `campaign_render`.** `zooms: [{start, end?, x, y, factor, ease?}]` adds eased
+  punch-ins to the footage, timed on the source clock or marks and mapped through speed ramps.
+  Captions stay fixed while the picture moves. With no `end`, or one at the clip's end, the zoom
+  stays in.
+- **`hold` on `campaign_render`.** Freezes the final frame so a reply can be read. A caption that
+  runs to the clip's end stays up through it.
+- **`bookends: short`** on `campaign_render` and `campaign_montage`: no intro, a 300 ms fade to the
+  brand CTA card, held 2 s. `brand` remains the default.
+- **`campaign_pacing`.** Measures first action, longest quiet span, change cadence, caption
+  reading speed, bookend share and length from the file, with pass or warn on each. Thresholds are
+  starting defaults. Every mp4 render reports a one-line summary.
+- **Caption `position: top`** moves a caption off something it would cover.
+- **`campaign_script_save` warns on `press` steps**, since a viewer can't see a keypress. Enter
+  right after typing is exempt, and `allow_keyboard: true` turns it off.
+- **The producer gets `campaign_asset_add` and `campaign_pacing`**, so it can render a file it's
+  handed.
+- **New skill: `viral-clip-craft`**, with the evidence behind each rule marked honestly.
+
 ## 0.9.2
 
 - **`drag` lands on native HTML5 drag-and-drop.** The pointer settles on the target so

@@ -12,6 +12,8 @@ description: >-
 tools: [campaign_produce_video, campaign_video_status, campaign_view, campaign_assets, atlas_validate, atlas_record_script, save_file_artifact]
 ---
 
+For a clip meant for a feed rather than a walkthrough, use `viral-clip-craft`.
+
 # One request → a finished walkthrough video
 
 The job is a **finished file** in the requester's hands, not a set of instructions. You plan,

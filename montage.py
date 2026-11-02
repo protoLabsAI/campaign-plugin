@@ -133,7 +133,8 @@ OUTPUT_DEFAULTS: dict[str, Any] = {
     "card_engine": "auto",  # auto | html | ffmpeg
     "label_engine": "auto",  # auto | drawtext | html | none
     # protoLabs bookends v1 (the brand's default intro + outro) around the cut: auto = whenever the
-    # brand has bookends; false for README loop tiles / GIF-style loops; true = required.
+    # brand has bookends; false for README loop tiles / GIF-style loops; true = required;
+    # short = no intro, a 300 ms fade to the brand CTA card held 2 s (social cuts).
     "bookends": "auto",
 }
 CARD_ENGINES = ("auto", "html", "ffmpeg")
@@ -363,6 +364,9 @@ def normalize_output(output: Any) -> dict[str, Any]:
 
 
 BOOKENDS_RECIPE = "protoLabs bookends v1"
+SHORT_BOOKENDS_RECIPE = "short bookends (no intro, fade to the CTA card)"
+SHORT_FADE_S = 0.3
+SHORT_CTA_S = 2.0
 
 
 def _bookends_opt(value: Any, problems: list[str]) -> str:
@@ -372,7 +376,9 @@ def _bookends_opt(value: Any, problems: list[str]) -> str:
         return "brand"
     if value in (False, "none", "false", "off"):
         return "none"
-    problems.append(f"output.bookends must be auto, true/brand or false/none, got {value!r}")
+    if value == "short":
+        return "short"
+    problems.append(f"output.bookends must be auto, true/brand, short or false/none, got {value!r}")
     return "auto"
 
 
@@ -383,6 +389,8 @@ def with_bookends(sequence: Any, opts: dict[str, Any]) -> tuple[Any, list[str]]:
     outro, or (``auto``) the brand has no bookends. Returns (sequence, notes)."""
     if opts.get("bookends") == "none" or not isinstance(sequence, list) or not sequence:
         return sequence, []
+    if opts.get("bookends") == "short":
+        return _with_short_bookends(sequence)
     have_intro, have_outro = bool(intromod.preset()), bool(outromod.preset())
     if opts.get("bookends") == "brand" and not (have_intro and have_outro):
         raise MontageError(
@@ -407,6 +415,29 @@ def with_bookends(sequence: Any, opts: dict[str, Any]) -> tuple[Any, list[str]]:
         else:
             notes.append(f"{BOOKENDS_RECIPE}: no outro — the cut ends on a card, not a clip")
     return seq, notes
+
+
+def short_outro() -> dict[str, Any]:
+    """The brand's outro cut down to its CTA card: no bumper, no beat, a quick fade, 2 s on the card."""
+    cta = (outromod.preset() or {}).get("cta")
+    if not cta:
+        raise MontageError(
+            "output.bookends: short — but the brand outro has no CTA card; point Brand kit file at "
+            "brands/protolabs/brand-kit.yaml, set the outro setting's cta, or bookends: false"
+        )
+    return {
+        "bumper": None, "caption_hold_s": 0, "min_caption_s": 0, "caption_fade_s": 0, "beat_s": 0,
+        "transition": {"style": "fade", "duration": SHORT_FADE_S}, "cta": {**cta, "duration": SHORT_CTA_S},
+    }  # fmt: skip
+
+
+def _with_short_bookends(sequence: list[Any]) -> tuple[list[Any], list[str]]:
+    last = sequence[-1]
+    if isinstance(last, dict) and "outro" in last:
+        return sequence, []
+    if not (isinstance(last, dict) and "clip" in last):
+        return sequence, [f"{SHORT_BOOKENDS_RECIPE}: no outro — the cut ends on a card, not a clip"]
+    return [*sequence, {"outro": short_outro()}], [f"{SHORT_BOOKENDS_RECIPE} added"]
 
 
 def parse_sequence(sequence: Any) -> list[dict[str, Any]]:

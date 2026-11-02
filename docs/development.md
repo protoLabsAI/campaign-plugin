@@ -40,6 +40,7 @@ playwright. CI runs both: the unit job, and an integration job that installs Chr
 | `archive_api.py` | The archive's gated routes, at their own prefix |
 | `view.py` | The gallery page (one HTML string) |
 | `store.py` | SQLite: campaigns, lanes, assets, milestones, decisions, shot scripts |
+| `pacing.py` | `campaign_pacing`: frame-difference and caption checks against the craft defaults |
 | `paths.py` | The data dir and media root |
 | `shotscript.py` | Shot-script parsing and validation |
 | `shoot.py` | A validated script → a recorded take, via the worker |
@@ -70,7 +71,7 @@ playwright. CI runs both: the unit job, and an integration job that installs Chr
 | `subagents.py` | The `campaign_producer` subagent |
 | `sandbox.py` | `campaign_sandbox_reset`: resolve + guard a sandbox console, then clear it via the worker |
 | `threads.py` | Run a blocking call on a fresh worker thread |
-| `skills/` | The five skills |
+| `skills/` | The six skills |
 | `docs/assets/` | Screenshots used by the README and docs (WebP) |
 | `tests/` | The host-free suite (`conftest.py` bootstraps the plugin as a package) |
 

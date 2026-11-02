@@ -136,8 +136,11 @@ generated with the DS snapshot; the bumper is `brands/protolabs/protoagent-splas
   apply), the outro follows the last clip. A sequence that already starts with `{intro: …}` /
   ends with `{outro: …}` is left alone. **`bookends: false`** for README loop tiles, short
   GIF-style loops and other cuts that must not have them; `true` makes them required.
-- **campaign_render** — each mp4 output takes `bookends: brand` (the default for a full clip) or
-  `none`; the plain render is wrapped in the bookends at its own size (title = the output's
+- **Short bookends** — `bookends: short` on `campaign_render` or `output.bookends: short` on a
+  montage drops the intro and the bumper: a 300 ms fade from the clip to the brand CTA card, held
+  2 s. Use it for social cuts, where the full bookends would outweigh the clip.
+- **campaign_render** — each mp4 output takes `bookends: brand` (the default for a full clip),
+  `short` or `none`; the plain render is wrapped in the bookends at its own size (title = the output's
   `title`, else the asset's) at the render's own `crf` (16 unless the output names one), and
   the asset points at the bookended file. GIFs and posters never
   get them.

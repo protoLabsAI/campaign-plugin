@@ -10,6 +10,8 @@ description: >-
 tools: [campaign_script_save, campaign_script_get, campaign_shoot, campaign_sandbox_reset, campaign_view, campaign_get, browser_open, browser_snapshot, browser_screenshot]
 ---
 
+Clip meant for a feed? Read `viral-clip-craft` first: no hotkeys, a visible pointer cause for every change, and capture at 1280×800 device scale 2 for larger, sharper UI text.
+
 # Shot scripts
 
 A take is only as repeatable as its script. The same script must produce the same clip next

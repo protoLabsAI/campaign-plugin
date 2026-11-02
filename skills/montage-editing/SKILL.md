@@ -11,6 +11,8 @@ description: >-
 tools: [campaign_montage, campaign_storyboard, campaign_view, campaign_assets, campaign_shoot, campaign_render, campaign_card, campaign_asset_update, campaign_limits, campaign_get]
 ---
 
+For pacing, hooks and short bookends on any feed clip, read `viral-clip-craft`. `output.bookends: short` drops the intro and ends on a 2 s CTA.
+
 # Cutting a launch montage
 
 A montage sells *range*: in 30–60 seconds the viewer sees the app do six different things, each

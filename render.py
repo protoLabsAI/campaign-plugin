@@ -64,6 +64,7 @@ The ffmpeg runner is injectable so the suite tests command building with no ffmp
 from __future__ import annotations
 
 import difflib
+import math
 import json
 import re
 import subprocess
@@ -98,9 +99,16 @@ class RenderError(RuntimeError):
 
 OUTPUT_KEYS = (
     "name", "format", "title", "start", "end", "speed", "continuous", "crop", "width", "fps", "crf",
-    "limit", "max_bytes", "at", "bookends", "captions",
+    "limit", "max_bytes", "at", "bookends", "captions", "zooms", "hold",
 )  # fmt: skip
 SPEED_KEYS = ("from", "to", "factor", "ease")
+ZOOM_KEYS = ("start", "end", "x", "y", "factor", "ease")
+MAX_ZOOMS = 24
+ZOOM_FACTORS = (1.05, 4.0)
+SOFT_ZOOM_FACTOR = 2.5  # past this a 2K capture's text starts to soften
+DEFAULT_ZOOM_EASE_S = 0.45
+MAX_ZOOM_EASE_S = 2.0
+MAX_HOLD_S = 30.0
 CROP_KEYS = ("x", "y", "width", "height")
 # Names an agent reaches for that mean a real key.
 KEY_ALIASES = {
@@ -108,6 +116,8 @@ KEY_ALIASES = {
     "caption": "captions", "subtitles": "captions", "subs": "captions", "lower_thirds": "captions",
     "label": "captions", "labels": "captions", "in": "start", "out": "end", "from": "start", "to": "end",
     "speed_factor": "factor", "rate": "factor", "easing": "ease", "w": "width", "h": "height", "time": "at",
+    "zoom": "zooms", "punch_in": "zooms", "punch_ins": "zooms", "freeze": "hold", "hold_s": "hold",
+    "scale": "factor", "level": "factor", "cx": "x", "cy": "y",
 }  # fmt: skip
 
 
@@ -273,6 +283,130 @@ def _ease_seconds(value: Any, name: str) -> float:
     return e
 
 
+def _normalize_hold(value: Any, fmt: str, name: str) -> float:
+    if value in (None, "", 0):
+        return 0.0
+    try:
+        hold = float(value)
+    except (TypeError, ValueError):
+        raise RenderError(f"output {name}: hold must be seconds") from None
+    if not 0 <= hold <= MAX_HOLD_S:  # also rejects NaN
+        raise RenderError(f"output {name}: hold {value} is outside 0..{MAX_HOLD_S:g}s")
+    if fmt == "poster":
+        raise RenderError(f"output {name}: hold freezes a clip's last frame — a poster is one frame")
+    return hold
+
+
+def _normalize_zooms(
+    value: Any, marks: dict[str, float], fmt: str, name: str, start: float, end: float | None
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """The spec's ``zooms`` → ``[{start, end|None, x, y, factor, ease}]`` on the SOURCE clock, sorted.
+    ``end`` None means "until the clip ends": no zoom-out, it stays pushed in through any ``hold``."""
+    if value in (None, "", []):
+        return [], []
+    if not isinstance(value, list):
+        raise RenderError(f"output {name}: zooms must be a list of {{start, end, x, y, factor, ease}}")
+    if fmt == "poster":
+        raise RenderError(f"output {name}: zooms move over time — a poster is one frame; crop it instead")
+    if len(value) > MAX_ZOOMS:
+        raise RenderError(f"output {name}: {len(value)} zooms is too many — at most {MAX_ZOOMS}")
+    out, warnings = [], []
+    for i, z in enumerate(value, 1):
+        what = f"output {name}: zooms[{i}]"
+        if not isinstance(z, dict):
+            raise RenderError(f"{what} must be a mapping {{start, end, x, y, factor, ease}}")
+        refuse_unknown(z, ZOOM_KEYS, what)
+        a = resolve_time(z.get("start"), marks, f"{name}.zooms[{i}].start")
+        b = resolve_time(z.get("end"), marks, f"{name}.zooms[{i}].end")
+        if a is None:
+            raise RenderError(f"{what}: needs start — seconds of the take or a mark name")
+        if b is not None and b <= a:
+            raise RenderError(f"{what}: end ({b:.2f}s) must be after start ({a:.2f}s)")
+        if a < start - 1e-6 or (end is not None and a >= end):
+            raise RenderError(f"{what}: start {a:.2f}s is outside the cut")
+        try:
+            x, y, factor = float(z["x"]), float(z["y"]), float(z["factor"])
+        except (KeyError, TypeError, ValueError):
+            raise RenderError(f"{what}: needs numeric x, y (the centre, source px) and factor") from None
+        if not ZOOM_FACTORS[0] <= factor <= ZOOM_FACTORS[1]:  # also rejects NaN
+            raise RenderError(f"{what}: factor {factor:g} is outside {ZOOM_FACTORS[0]:g}..{ZOOM_FACTORS[1]:g}")
+        if not (math.isfinite(x) and math.isfinite(y)):
+            raise RenderError(f"{what}: x and y must be finite")
+        try:
+            ease = DEFAULT_ZOOM_EASE_S if z.get("ease") in (None, "") else float(z["ease"])
+        except (TypeError, ValueError):
+            raise RenderError(f"{what}: ease must be seconds") from None
+        if not 0 <= ease <= MAX_ZOOM_EASE_S:
+            raise RenderError(f"{what}: ease {ease:g} is outside 0..{MAX_ZOOM_EASE_S:g}s")
+        if end is not None and b is not None and b >= end - 1e-6:
+            b = None  # reaches the clip's end: stay pushed in rather than pulling out on the last frame
+        if factor > SOFT_ZOOM_FACTOR:
+            warnings.append(f"zooms[{i}] at {factor:g}× will soften text — record a smaller viewport instead")
+        out.append({"start": a, "end": b, "x": x, "y": y, "factor": factor, "ease": ease, "n": i})
+    out.sort(key=lambda z: z["start"])
+    for p, q in zip(out, out[1:]):
+        if p["end"] is None or p["end"] > q["start"] + 1e-6:
+            raise RenderError(
+                f"output {name}: zooms[{p['n']}] overlaps zooms[{q['n']}] (from {q['start']:.2f}s) — "
+                "one zoom at a time, each ending before the next starts"
+            )
+    return out, warnings
+
+
+def zoom_windows(zooms: list[dict[str, Any]], segs: list[Segment], open_end: float) -> list[dict[str, Any]]:
+    """Zooms on the OUTPUT clock: the source times mapped through the speed ramps, each ease
+    fitted inside its window. ``open_end`` is where a zoom with no end stops (past the last frame)."""
+    out = []
+    for z in zooms:
+        a = timeline_time(segs, z["start"])
+        b = open_end if z["end"] is None else timeline_time(segs, z["end"])
+        ease = min(z["ease"], (b - a) / 2)
+        out.append({**z, "out_start": round(a, 3), "out_end": round(b, 3), "out_ease": round(ease, 3)})
+    return out
+
+
+def _smoothstep(u: str) -> str:
+    c = f"clip({u},0,1)"
+    return f"(3*pow({c},2)-2*pow({c},3))"
+
+
+def zoom_filter(
+    zooms: list[dict[str, Any]],
+    frame: tuple[int, int],
+    fps: float,
+    *,
+    scale: float = 1.0,
+    offset: tuple[int, int] = (0, 0),
+) -> str:
+    """The animated punch-ins: ``zoompan`` over a 2× upscale, driven by the output frame number.
+
+    Output-clock windows from :func:`zoom_windows`; x/y are SOURCE px, so ``offset`` (a crop's
+    corner) and ``scale`` (frame px per source px) place them on this frame. ``zoompan`` is used
+    because ``scale=eval=frame`` + ``crop`` with ``t`` leaves the crop pinned to the corner. The
+    2× upscale keeps the sub-pixel pan from jittering; x and y are clamped inside the frame."""
+    w, h = frame
+    t = f"(on/{_fmt(fps)})"
+    z_expr, x_expr, y_expr = "1", f"{w / 2:g}", f"{h / 2:g}"
+    for z in zooms:
+        ease = max(z["out_ease"], 1e-3)
+        rise = _smoothstep(f"({t}-{_x(z['out_start'])})/{_x(ease)}")
+        fall = _smoothstep(f"({t}-{_x(z['out_end'] - ease)})/{_x(ease)}")
+        env = f"({rise}*(1-{fall}))"
+        cx, cy = (z["x"] - offset[0]) * scale, (z["y"] - offset[1]) * scale
+        z_expr = f"({z_expr}+{_x(z['factor'] - 1)}*{env})"
+        x_expr = f"({x_expr}+({_x(cx - w / 2)})*{env})"
+        y_expr = f"({y_expr}+({_x(cy - h / 2)})*{env})"
+    return (
+        f"scale={w * 2}:{h * 2}:flags=lanczos,"
+        f"zoompan=z='{z_expr}':x='clip({x_expr}*2-iw/zoom/2,0,iw-iw/zoom)':y='clip({y_expr}*2-ih/zoom/2,0,ih-ih/zoom)':"
+        f"d=1:s={w}x{h}:fps={_fmt(fps)}"
+    )
+
+
+def hold_filter(hold: float) -> str:
+    return f"tpad=stop_mode=clone:stop_duration={_fmt(hold)}"
+
+
 def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: float) -> dict[str, Any]:
     if not isinstance(spec, dict):
         raise RenderError(f"each output must be a mapping, got {spec!r}")
@@ -360,6 +494,8 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
     from . import captions as capmod
 
     caps = capmod.normalize(spec.get("captions"), marks, name)
+    zooms, zoom_warnings = _normalize_zooms(spec.get("zooms"), marks, fmt, name, start, end)
+    warnings += zoom_warnings
     if caps and fmt == "poster":
         raise RenderError(f"output {name}: captions are timed — they burn into an mp4 or a gif, not a poster")
     limit_id = str(spec.get("limit") or "")
@@ -394,6 +530,9 @@ def normalize_output(spec: dict[str, Any], marks: dict[str, float], duration: fl
         "bookends": _bookends(spec.get("bookends"), fmt, name),
         # [{text, start, end|None, n}] in SOURCE seconds (captions.py maps them onto the output)
         "captions": caps,
+        # [{start, end|None, x, y, factor, ease}] SOURCE clock + px; hold = freeze the last frame (s)
+        "zooms": zooms,
+        "hold": _normalize_hold(spec.get("hold"), fmt, name),
     }
 
 
@@ -406,7 +545,9 @@ def _bookends(value: Any, fmt: str, name: str) -> str:
         return "brand"
     if value in ("none", False):
         return "none"
-    raise RenderError(f"output {name}: bookends must be brand or none, got {value!r}")
+    if value == "short":
+        return "short"
+    raise RenderError(f"output {name}: bookends must be brand, short or none, got {value!r}")
 
 
 Segment = tuple  # (a, b, speed) or, for an eased ramp, (a, b, speed, ease)
@@ -579,19 +720,29 @@ def timeline_filter(segs: list[Segment], crop: dict | None, width: int | None) -
 Captions = tuple  # (extra input args, the overlay chain from [cfps] to [framed])
 
 
-def _with_captions(base_filter: str, fps: float, caps: Captions | None) -> tuple[list[str], str]:
-    """(extra input args, the graph head): the timeline at ``fps``, then any caption overlays.
-    The next filter is appended straight onto the head (without captions the graph is unchanged)."""
+def _with_captions(base_filter: str, fps: float, caps: Captions | None, motion: str = "") -> tuple[list[str], str]:
+    """(extra input args, the graph head): the timeline at ``fps``, any ``motion`` (a final-frame
+    hold, zooms), then any caption overlays, so captions stay fixed while the picture moves.
+    The next filter is appended straight onto the head (without either the graph is unchanged)."""
+    timed = f"[base]fps={_fmt(fps)}" + (f",{motion}" if motion else "")
     if not caps:
-        return [], f"{base_filter};[base]fps={_fmt(fps)},"
+        return [], f"{base_filter};{timed},"
     inputs, chain = caps
-    return list(inputs), f"{base_filter};[base]fps={_fmt(fps)}[cfps];{chain};[framed]"
+    return list(inputs), f"{base_filter};{timed}[cfps];{chain};[framed]"
 
 
 def mp4_cmd(
-    ff: str, src: str, dst: str, base_filter: str, *, crf: int, fps: float, caps: Captions | None = None
+    ff: str,
+    src: str,
+    dst: str,
+    base_filter: str,
+    *,
+    crf: int,
+    fps: float,
+    caps: Captions | None = None,
+    motion: str = "",
 ) -> list[str]:
-    inputs, graph = _with_captions(base_filter, fps, caps)
+    inputs, graph = _with_captions(base_filter, fps, caps, motion)
     fc = f"{graph}format=yuv420p[out]"
     return [
         ff, "-y", "-hide_banner", "-loglevel", "error", "-i", src, *inputs, "-filter_complex", fc, "-map", "[out]",
@@ -600,8 +751,10 @@ def mp4_cmd(
     ]  # fmt: skip
 
 
-def gif_cmd(ff: str, src: str, dst: str, base_filter: str, *, fps: float, caps: Captions | None = None) -> list[str]:
-    inputs, graph = _with_captions(base_filter, fps, caps)
+def gif_cmd(
+    ff: str, src: str, dst: str, base_filter: str, *, fps: float, caps: Captions | None = None, motion: str = ""
+) -> list[str]:
+    inputs, graph = _with_captions(base_filter, fps, caps, motion)
     fc = (
         f"{graph}split[g1][g2];"
         "[g1]palettegen=stats_mode=diff:max_colors=256[pal];"
@@ -719,15 +872,47 @@ def render_output(
     else:
         segs = segments(spec["start"], spec["end"], spec["ramps"], spec.get("eases"))
         caps_for: Callable[..., Captions] | None = None
+        zooms, hold = spec.get("zooms") or [], float(spec.get("hold") or 0.0)
+        windows: list[dict[str, Any]] = []
+        cut_end = spec["end"] if spec["end"] is not None else (float(source.get("duration_s") or 0) or None)
+        if zooms or spec.get("captions"):
+            if cut_end is None:
+                raise RenderError(
+                    f"output {spec['name']}: captions and zooms need the clip's end — give the output an end"
+                )
+            if segs[-1][1] is None:
+                segs = segments(spec["start"], cut_end, spec["ramps"], spec.get("eases"))
+        if zooms:
+            frame_w = int((spec["crop"] or {}).get("width") or source.get("width") or 0)
+            frame_h = int((spec["crop"] or {}).get("height") or source.get("height") or 0)
+            if not (frame_w and frame_h):
+                raise RenderError(f"output {spec['name']}: zooms need the take's frame size, and ffprobe found none")
+            left, top = (spec["crop"] or {}).get("x", 0), (spec["crop"] or {}).get("y", 0)
+            for z in zooms:
+                if not (left <= z["x"] <= left + frame_w and top <= z["y"] <= top + frame_h):
+                    raise RenderError(
+                        f"output {spec['name']}: zooms[{z['n']}] centre ({z['x']:g}, {z['y']:g}) is outside the "
+                        f"{frame_w}×{frame_h} frame"
+                    )
+            windows = zoom_windows(zooms, segs, timeline_time(segs, cut_end) + hold + 1.0)
+
+        def motion_for(width: int | None, fps: float) -> str:
+            parts = [hold_filter(hold)] if hold else []
+            if windows:
+                from . import captions as capmod
+
+                w, h = capmod.output_size(spec, source, width)
+                frame_w0 = int((spec["crop"] or {}).get("width") or source.get("width") or 0)
+                crop = spec["crop"] or {}
+                parts.append(
+                    zoom_filter(windows, (w, h), fps, scale=w / frame_w0, offset=(crop.get("x", 0), crop.get("y", 0)))
+                )
+            return ",".join(parts)
+
         if spec.get("captions"):
             from . import captions as capmod
 
-            cut_end = spec["end"] if spec["end"] is not None else (float(source.get("duration_s") or 0) or None)
-            if cut_end is None:
-                raise RenderError(f"output {spec['name']}: captions need the clip's end — give the output an end")
-            if segs[-1][1] is None:
-                segs = segments(spec["start"], cut_end, spec["ramps"], spec.get("eases"))
-            timed, cap_warnings = capmod.plan(spec["captions"], segs, spec["start"], cut_end, spec["name"])
+            timed, cap_warnings = capmod.plan(spec["captions"], segs, spec["start"], cut_end, spec["name"], hold=hold)
             # Wrap at the full output size first: too-long text is refused before ffmpeg runs.
             full_w, full_h = capmod.output_size(spec, source, spec["width"])
             for c in timed:
@@ -755,7 +940,8 @@ def render_output(
                 base = timeline_filter(segs, spec["crop"], width if width != src_w else None)
                 fps = spec["fps"] or 30
                 caps = caps_for(width if width != src_w else None, fps) if caps_for else None
-                _ff(runner, mp4_cmd(ff, src, str(dst), base, crf=crf, fps=fps, caps=caps))
+                motion = motion_for(width if width != src_w else None, fps)
+                _ff(runner, mp4_cmd(ff, src, str(dst), base, crf=crf, fps=fps, caps=caps, motion=motion))
                 size = dst.stat().st_size if dst.exists() else 0
                 attempts.append({"crf": crf, "width": width, "size_bytes": size})
                 if not spec["max_bytes"] or size <= spec["max_bytes"]:
@@ -772,7 +958,8 @@ def render_output(
             for fps, width in ladder:
                 base = timeline_filter(segs, spec["crop"], width if width != src_w else None)
                 caps = caps_for(width if width != src_w else None, fps) if caps_for else None
-                _ff(runner, gif_cmd(ff, src, str(dst), base, fps=fps, caps=caps))
+                motion = motion_for(width if width != src_w else None, fps)
+                _ff(runner, gif_cmd(ff, src, str(dst), base, fps=fps, caps=caps, motion=motion))
                 size = dst.stat().st_size if dst.exists() else 0
                 attempts.append({"fps": fps, "width": width, "size_bytes": size})
                 if not spec["max_bytes"] or size <= spec["max_bytes"]:
