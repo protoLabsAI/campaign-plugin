@@ -18,7 +18,7 @@ from typing import Annotated, Any
 
 from langchain_core.tools import tool
 
-from . import cards, deps, limits, look, montage, paths, produce, render, sandbox, shoot, shotscript, store
+from . import cards, deps, limits, look, montage, pacing, paths, produce, render, sandbox, shoot, shotscript, store
 from . import intro as intromod
 from . import captions as captionsmod
 from . import outro as outromod
@@ -982,7 +982,7 @@ def build_tools(registry):
             f"Saved shot script #{row['id']} {norm['name']!r} ({len(norm['steps'])} steps"
             + (", replacing the earlier version" if prior is not None else "")
             + f"). Record it with campaign_shoot(campaign_id={campaign_id}, script_id={row['id']}); "
-            "iterate with overrides=… on that id."
+            "iterate with overrides=… on that id." + "".join(f"\n⚠ {w}" for w in shotscript.keyboard_warnings(norm))
         )
 
     @tool
@@ -1215,12 +1215,18 @@ def build_tools(registry):
         above 4x is flagged as a jump cut unless continuous: false, an un-eased one of 2x+ as
         abrupt), optional crop {x,y,width,height} (source
         px), width, fps, and limit (a hard-limit id such as github_attachment_video_free) and/or
-        max_bytes, and bookends (mp4 only: brand — the default, protoLabs bookends v1: splash bumper →
+        max_bytes, zooms [{start, end?, x, y, factor, ease?}] (eased punch-ins: times on the source
+        clock or marks, x/y the centre in source px, factor 1.05-4, ease 0.45 s, no end = stay in to
+        the clip's end; one at a time; captions stay fixed), hold (seconds to freeze the last frame so
+        a reply can be read; a caption running to the end stays up through it),
+        and bookends (mp4 only: brand — the default, protoLabs bookends v1: splash bumper →
         fade → title card → edge sweep → the clip → edge sweep → bumper → fade → Star CTA, titled by
-        the output's title — or none for a bare clip), and captions [{text, start, end} or {text, at}]:
+        the output's title — short for social cuts: no intro, a 300 ms fade to the Star CTA held 2 s
+        — or none for a bare clip), and captions [{text, start, end, position?} or {text, at}]:
         timed lower thirds burned into the clip (mp4/gif) — times are SOURCE seconds or marks (the
         speed ramps' clock), mapped through the ramps; each stays up ≥ 1.8 s of output (extended
-        with a warning), wraps to ≤ 2 lines, never on the bookend cards. An unknown key anywhere in
+        with a warning), wraps to ≤ 2 lines, never on the bookend cards; position top moves one
+        off something it would cover (default bottom). An unknown key anywhere in
         a spec is refused with the allowed keys (nothing renders). mp4 is H.264 (preset slow)/yuv420p/faststart at crf 16 —
         deliverable quality — unless you pass crf. A platform limit that caps bytes steps an mp4's CRF then
         width until it fits and warns when that went past crf 20; a bare max_bytes only goes to crf 20 and,
@@ -1294,7 +1300,7 @@ def build_tools(registry):
             )
             made.append(a["id"])
             size_notes: list[str] = []
-            booked = _bookend_render(c, a, spec, r, out_dir, size_notes) if spec["bookends"] == "brand" else ""
+            booked = _bookend_render(c, a, spec, r, out_dir, size_notes) if spec["bookends"] != "none" else ""
             if booked.startswith("/"):
                 a = store.get_asset(a["id"])
                 r = {**r, "path": a["path"], "size_bytes": a["size_bytes"], "width": a["width"],
@@ -1310,6 +1316,8 @@ def build_tools(registry):
                 lines.append("    " + captionsmod.summary(r["captions"], r.get("caption_engine") or ""))
             lines += [f"    ⚠ VIOLATES: {_clip(v, WARNING_PREVIEW)}" for v in r["violations"]]
             lines += [f"    ⚠ {_clip(w, WARNING_PREVIEW)}" for w in r["warnings"]]
+            if spec["format"] == "mp4":
+                lines.append("    " + pacing.summary_line(store.get_asset(a["id"]) or a))
         if made and take["status"] in ("planned", "scripted", "captured"):
             store.update_asset(take["id"], status="rendered")
         _emit("render_finished", {"campaign_id": c["id"], "source_asset_id": take["id"], "assets": made})
@@ -1328,6 +1336,26 @@ def build_tools(registry):
                 else ""
             )
         )
+
+    @tool
+    def campaign_pacing(asset_id: int, campaign_id: int = 0) -> str:
+        """Measure a clip's pacing from the file itself: time to the first visible action, the longest
+        span with no visible change, the change cadence, each caption's reading speed and time on
+        screen, the bookends' share of the runtime and the total length, each with pass or warn. The
+        thresholds are starting defaults, not facts: a warn is something to look at, and a deliberate
+        reading hold is a fine reason to keep one. Follow the viral-clip-craft skill. Run it on every
+        cut before ready_for_review; it doesn't replace watching the clip."""
+        a = store.get_asset(asset_id)
+        if a is None:
+            return f"No asset with id {asset_id}."
+        if campaign_id and a["campaign_id"] != int(campaign_id):
+            msg = look.not_in_campaign(asset_id, campaign_id, a)
+            return msg[0].upper() + msg[1:]
+        if a["kind"] not in ("clip", "montage") or not a.get("path") or not Path(a["path"]).is_file():
+            return f"Asset #{asset_id} has no video file to measure."
+        if (reason := deps.need_ffmpeg()) is not None:
+            return reason
+        return f"Asset #{asset_id} pacing:\n" + pacing.report_text(pacing.measure_asset(a))
 
     # ── cards ────────────────────────────────────────────────────────────────
     @tool
@@ -1440,7 +1468,8 @@ def build_tools(registry):
         preset landscape 1920x1080 (canonical — 1920x1080 clips pass through untouched) |
         vertical 1080x1920 | square 1080x1080, fit auto|letterbox|crop, fps, transition,
         transition_duration (0.45), bookends (auto — the default: protoLabs bookends v1 wrap the cut, title
-        = output.title; false for README loop tiles / GIF-style loops), limit (a hard-limit id — duration and size are enforced),
+        = output.title; short for social cuts: no intro, a fade to the CTA held 2 s; false for README
+        loop tiles / GIF-style loops), limit (a hard-limit id — duration and size are enforced),
         max_bytes, gif, poster_at. Unknown keys and missing/foreign/rejected/superseded clips are refused;
         clips not yet approved are allowed but the montage is marked DRAFT INPUTS. Run
         campaign_storyboard first to review the cut. Follow the montage-editing skill."""
@@ -1801,6 +1830,7 @@ def build_tools(registry):
         campaign_render,
         campaign_card,
         campaign_view,
+        campaign_pacing,
         campaign_montage,
         campaign_storyboard,
         campaign_produce_video,
@@ -1867,6 +1897,10 @@ def _multimodal_fn():
     return fn if callable(fn) else None
 
 
+def _caption_position(c: dict[str, Any]) -> dict[str, str]:
+    return {"position": c["position"]} if c.get("position") not in (None, "bottom") else {}
+
+
 def _caption_meta(r: dict[str, Any]) -> dict[str, Any]:
     """What a render burned in, on its asset: ``captions`` re-passable as-is (source seconds),
     ``caption_timing`` the output windows actually used."""
@@ -1874,7 +1908,7 @@ def _caption_meta(r: dict[str, Any]) -> dict[str, Any]:
     if not timed:
         return {}
     return {
-        "captions": [{"text": c["text"], "start": c["start"], "end": c["end"]} for c in timed],
+        "captions": [{"text": c["text"], "start": c["start"], "end": c["end"], **_caption_position(c)} for c in timed],
         "caption_timing": [{"text": c["text"], "out_start": c["out_start"], "out_end": c["out_end"]} for c in timed],
         "caption_engine": r.get("caption_engine") or "",
     }
@@ -1893,12 +1927,13 @@ def _bookend_render(
     16, unless the spec chose one) — and point the asset at it. Returns the new path, '' when the
     brand has no bookends, or why it couldn't (the plain render is kept). What a size ceiling cost
     the bookended file is appended to ``size_notes``."""
-    if not (intromod.preset() and outromod.preset()):
+    short = spec["bookends"] == "short"
+    if not (outromod.preset() if short else intromod.preset() and outromod.preset()):
         return ""
     title = spec["title"] or a["title"]
     opts = {"name": f"{spec['name']}-bookends", "title": title, "size": f"{r['width'] // 2 * 2}x{r['height'] // 2 * 2}",
             "fps": spec["fps"] or 30, "poster": False, "limit": spec["limit"] or "", "max_bytes": spec["max_bytes"],
-            "crf": spec["crf"]}  # fmt: skip
+            "crf": spec["crf"], **({"bookends": "short"} if short else {})}  # fmt: skip
     try:
         m = montage.render_montage(c["id"], [{"clip": a["id"]}], opts, out_dir / "bookends")
     except (montage.MontageError, render.RenderError) as e:
@@ -1906,7 +1941,8 @@ def _bookend_render(
     if size_notes is not None:
         size_notes += [w for w in m.get("warnings") or [] if w.startswith(("quality traded", "kept deliverable"))]
     store.update_asset(a["id"], path=m["path"], size_bytes=m["size_bytes"], width=m["width"], height=m["height"],
-                       duration_s=m["duration_s"], meta={**(a.get("meta") or {}), "bookends": montage.BOOKENDS_RECIPE,
+                       duration_s=m["duration_s"], meta={**(a.get("meta") or {}),
+                       "bookends": montage.SHORT_BOOKENDS_RECIPE if short else montage.BOOKENDS_RECIPE,
                        "unbookended": r["path"]})  # fmt: skip
     return m["path"]
 

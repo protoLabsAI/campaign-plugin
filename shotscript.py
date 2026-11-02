@@ -119,6 +119,7 @@ import re
 from typing import Any
 
 TOP_KEYS = {
+    "allow_keyboard",
     "name",
     "description",
     "base_url",
@@ -1038,8 +1039,31 @@ def validate(text_or_obj: Any) -> dict[str, Any]:
             f"holds/waits add up to {hold_total / 1000:.0f}s, over total_timeout_s={out['total_timeout_s']}"
         )
     out["steps"] = norm
+    allow_keyboard = data.get("allow_keyboard", False)
+    if not isinstance(allow_keyboard, bool):
+        problems.append("allow_keyboard must be true or false")
+    out["allow_keyboard"] = allow_keyboard is True
     if problems:
         raise ScriptError(problems)
+    return out
+
+
+def keyboard_warnings(script: dict[str, Any]) -> list[str]:
+    """A keypress has no on-screen cause, so the viewer sees things change for no reason. Enter
+    right after typing is exempt: the typed text is the visible cause. ``allow_keyboard: true``
+    says the keyboard IS the subject of the clip."""
+    if script.get("allow_keyboard"):
+        return []
+    out, steps = [], script.get("steps") or []
+    for prev, step in zip([None, *steps], steps):
+        if step["op"] != "press":
+            continue
+        if str(step.get("key")).lower() == "enter" and prev and prev["op"] in ("type", "fill"):
+            continue
+        out.append(
+            f"step {step['index']} presses {step.get('key')!r}: a viewer can't see a keypress, so the result looks "
+            "like a glitch. Point and click a visible control, or set allow_keyboard: true if keys are the subject."
+        )
     return out
 
 

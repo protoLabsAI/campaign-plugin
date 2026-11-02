@@ -24,6 +24,7 @@ changing.
 | `campaign_render` | mp4 / gif / poster outputs via ffmpeg, under a hard limit, with optional timed `captions` (see [campaign_render specs](#campaign_render-specs)). Replies with one line per output (asset id, file under one render dir, size, dims, duration), a captions line and one line per warning; attempts, specs and the captions used stay on the asset |
 | `campaign_card` | Render a branded card template to PNG |
 | `campaign_view` | LOOK at a still/card/poster, or frames of a clip (evenly spaced, `every_s` apart from `start` to `end` — paged 12 per contact sheet, the reply naming the next page's `start` — or either side of a mark/cut), as images the model sees — downscaled JPEGs, ≤ 3 per call; `crop={x,y,width,height}` in source pixels cuts out a region first so it comes back at 100 % (how a 2560- or 3840-wide master's smallest text is checked), contained to the campaign's dir. Needs a core with `graph.sdk.multimodal_tool_result` and a vision model; otherwise it says it couldn't show them |
+| `campaign_pacing` | Measure a clip from its file: first action, longest quiet span, change cadence, caption reading speed, bookend share, length, each pass or warn against starting defaults |
 | `campaign_montage` | Cut an ordered `sequence` of clips + cards into one mp4 (see [Montages](montages-and-branding.md#montages)) and register it as a `montage` asset with its poster (+ GIF) |
 | `campaign_storyboard` | The montage's contact sheet — one frame per item, a swatch per transition — returned as an image, plus the cut sheet |
 | `campaign_produce_video` | One shot script → a finished, self-reviewed video as a background job: record (2K device capture) → [brand intro] + walkthrough + [brand outro] → gates → deliver (see [Videos from a request](videos-from-a-request.md)) |
@@ -73,13 +74,22 @@ naming the key, the allowed set and the likely intent (`'ramps' → did you mean
   vertical safe area); longer text is refused with how many characters fit.
 - Captions are burned into the clip only: the brand bookends wrap the captioned clip, so the cards
   never carry one. The take is never modified.
+- `position: top` on a caption moves it to the top margin; the default is `bottom`.
 - The asset records `meta.captions` (the list, in source seconds — pass it back as `captions` to
   re-render) and `meta.caption_timing` (each caption's output window).
+
+### Zooms and hold
+
+`zooms: [{start, end?, x, y, factor, ease?}]` pushes in smoothly on the footage. `start` and `end`
+are source seconds or marks, mapped through speed ramps; `x` and `y` are the centre in source
+pixels; `factor` is 1.05–4; `ease` defaults to 0.45 s. With no `end`, or an end at the clip's end,
+the zoom stays in. Zooms can't overlap and captions stay fixed. `hold: N` freezes the last frame
+for N seconds (up to 30), and a zoom or caption reaching the clip's end carries through it.
 
 ## Skills
 
 `campaign-planning`, `shot-scripting`, `asset-review`, `montage-editing`,
-`produce-walkthrough-video` (in `skills/`, auto-discovered by the host).
+`produce-walkthrough-video`, `viral-clip-craft` (in `skills/`, auto-discovered by the host).
 
 ## The producer subagent
 
@@ -91,7 +101,7 @@ is the `producer_model` setting (blank = the host's aux-model routing). Its allo
 - this plugin's production tools only: `campaign_get`, `campaign_assets`,
   `campaign_asset`, `campaign_asset_update`, `campaign_status`, `campaign_limits`, `campaign_setup`,
   `campaign_script_save`, `campaign_script_get`, `campaign_shoot`, `campaign_sandbox_reset`, `campaign_render`,
-  `campaign_card`, `campaign_view`, `campaign_montage`, `campaign_storyboard`. Not the plan
+  `campaign_card`, `campaign_view`, `campaign_pacing`, `campaign_montage`, `campaign_storyboard`, `campaign_asset_add`. Not the plan
   editors, collections, the archive, retention or `campaign_produce_video`.
 - core `agent_browser`'s `browser_open`, `browser_snapshot`, `browser_screenshot`,
   `browser_get_text`, to explore a target before scripting it;

@@ -35,7 +35,8 @@ from typing import Any, Callable
 
 from . import deps, render
 
-CAPTION_KEYS = ("text", "start", "end", "at")
+CAPTION_KEYS = ("text", "start", "end", "at", "position")
+POSITIONS = ("bottom", "top")
 MAX_CAPTIONS = 60
 MAX_TEXT = 200
 MAX_LINES = 2
@@ -83,7 +84,18 @@ def normalize(value: Any, marks: dict[str, float], name: str) -> list[dict[str, 
         end = render.resolve_time(c.get("end"), marks, f"{name}.captions[{i}].end")
         if end is not None and end <= start:
             raise CaptionError(f"{what}: end ({end:.2f}s) must be after start ({start:.2f}s)")
-        out.append({"text": text, "start": start, "end": end, "n": i})
+        position = str(c.get("position") or "bottom").lower()
+        if position not in POSITIONS:
+            raise CaptionError(f"{what}: position must be {' or '.join(POSITIONS)}, got {c.get('position')!r}")
+        out.append(
+            {
+                "text": text,
+                "start": start,
+                "end": end,
+                "n": i,
+                **({"position": position} if position != "bottom" else {}),
+            }
+        )
     out.sort(key=lambda c: c["start"])
     for a, b in zip(out, out[1:]):
         if a["start"] == b["start"]:
@@ -98,13 +110,20 @@ def normalize(value: Any, marks: dict[str, float], name: str) -> list[dict[str, 
 
 # ── timing ───────────────────────────────────────────────────────────────────
 def plan(
-    captions: list[dict[str, Any]], segs: list, cut_start: float, cut_end: float, name: str = "output"
+    captions: list[dict[str, Any]],
+    segs: list,
+    cut_start: float,
+    cut_end: float,
+    name: str = "output",
+    *,
+    hold: float = 0.0,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Map captions onto the output clock and enforce the hold. Returns (timed, warnings).
 
     Each timed caption: ``{text, start, end}`` (source seconds — what to pass back to re-render)
-    and ``{out_start, out_end}`` (output seconds of the clip, before any bookends)."""
-    total = render.timeline_time(segs, cut_end)
+    and ``{out_start, out_end}`` (output seconds of the clip, before any bookends). ``hold`` is
+    the frozen tail: a caption that runs to the clip's end stays up through it."""
+    total = render.timeline_time(segs, cut_end) + hold
     timed: list[dict[str, Any]] = []
     warnings: list[str] = []
     prev_end = 0.0
@@ -118,6 +137,8 @@ def plan(
         nxt = captions[i + 1]["start"] if i + 1 < len(captions) else cut_end
         src_e = min(c["end"] if c["end"] is not None else nxt, cut_end)
         o_s, o_e = render.timeline_time(segs, src_s), render.timeline_time(segs, src_e)
+        if src_e >= cut_end - 1e-6:
+            o_e = total
         natural = o_e - o_s
         if o_s < prev_end - 1e-6:
             warnings.append(
@@ -155,6 +176,7 @@ def plan(
         timed.append({
             "text": c["text"], "start": round(src_s, 3), "end": round(src_e, 3),
             "out_start": round(o_s, 3), "out_end": round(o_e, 3),
+            **({"position": c["position"]} if c.get("position") else {}),
         })  # fmt: skip
         prev_end = o_e
     return timed, warnings
@@ -165,16 +187,20 @@ def _short(text: str, n: int = 32) -> str:
 
 
 # ── layout ───────────────────────────────────────────────────────────────────
-def geometry(w: int, h: int, lines: int = 1) -> dict[str, int]:
-    """Where a caption sits: the montage lower third, grown upward for a second line. A
-    vertical frame keeps above the platform's bottom strip and left of its action rail."""
+def geometry(w: int, h: int, lines: int = 1, position: str = "bottom") -> dict[str, int]:
+    """Where a caption sits: the montage lower third, grown upward for a second line — or, at
+    ``position: top``, the same margin from the top, grown downward. A vertical frame keeps
+    above the platform's bottom strip and left of its action rail."""
     from . import montage
 
     g = dict(montage.label_geometry(w, h))
     gap = round(g["size"] * LINE_GAP)
     block = lines * g["size"] + (lines - 1) * gap
     g["gap"] = gap
-    g["y"] = g["y"] - (block - g["size"])
+    if position == "top":
+        g["y"] = max(g["pad"], h - g["y"] - g["size"])
+    else:
+        g["y"] = g["y"] - (block - g["size"])
     g["block"] = block
     right = round(w * 0.16) if h > w else max(12, round(min(w, h) * 0.06))
     g["max_w"] = max(40, w - g["x"] - right - g["pad"])
@@ -210,9 +236,9 @@ def output_size(spec: dict[str, Any], source: dict[str, Any], width: int | None)
 
 
 # ── the art ──────────────────────────────────────────────────────────────────
-def caption_html(lines: list[str], w: int, h: int, look: dict[str, Any], bar: str) -> str:
+def caption_html(lines: list[str], w: int, h: int, look: dict[str, Any], bar: str, position: str = "bottom") -> str:
     """A transparent full-frame page holding one caption (the no-drawtext engine)."""
-    g = geometry(w, h, len(lines))
+    g = geometry(w, h, len(lines), position)
     c = look["colors"]
     font = re.sub(r"[^A-Za-z0-9 \-_]", "", look["fonts"].get("heading") or "")
     stack = (
@@ -233,7 +259,16 @@ def caption_html(lines: list[str], w: int, h: int, look: dict[str, Any], bar: st
 
 
 def drawtext_png_cmd(
-    ff: str, textfile: str, fontfile: str, lines: int, w: int, h: int, colors: dict[str, str], bar: str, dst: str
+    ff: str,
+    textfile: str,
+    fontfile: str,
+    lines: int,
+    w: int,
+    h: int,
+    colors: dict[str, str],
+    bar: str,
+    dst: str,
+    position: str = "bottom",
 ) -> list[str]:
     """One caption as an RGBA PNG via drawtext. drawbox/drawtext don't write alpha onto a
     transparent canvas, so the colour and the coverage are drawn on two opaque canvases and
@@ -242,7 +277,7 @@ def drawtext_png_cmd(
     so it is exactly the box's height for one line or two."""
     from . import montage
 
-    g = geometry(w, h, lines)
+    g = geometry(w, h, lines, position)
     common = (
         f"fontfile={fontfile}:textfile={textfile}:expansion=none:fontsize={g['size']}:line_spacing={g['gap']}:"
         f"y={g['y']}:box=1:boxborderw={g['pad']}"
@@ -330,7 +365,7 @@ class Art:
         self._cache: dict[tuple, list[str]] = {}
 
     def pngs(self, timed: list[dict[str, Any]], w: int, h: int) -> list[str]:
-        key = (w, h, tuple(c["text"] for c in timed))  # same size AND the same captions
+        key = (w, h, tuple((c["text"], c.get("position")) for c in timed))  # same size AND the same captions
         if key in self._cache:
             return self._cache[key]
         d = self.workdir / f"captions-{w}x{h}-{len(self._cache)}"  # never overwrite an earlier set
@@ -346,8 +381,9 @@ class Art:
             if self.engine == "drawtext":
                 (d / f"caption{k:02d}.txt").write_text("\n".join(lines), encoding="utf-8")
                 cmd = drawtext_png_cmd(
-                    self.ff, f"caption{k:02d}.txt", font_rel, len(lines), w, h, self.look["colors"], self.bar, png.name
-                )
+                    self.ff, f"caption{k:02d}.txt", font_rel, len(lines), w, h, self.look["colors"], self.bar, png.name,
+                    c.get("position") or "bottom",
+                )  # fmt: skip
                 try:
                     res = self.png_runner(cmd, str(d))
                 except (OSError, subprocess.TimeoutExpired) as e:
@@ -357,7 +393,7 @@ class Art:
                     raise CaptionError(f"ffmpeg couldn't draw caption {k + 1}: {tail or 'no output'}")
                 out.append(str(png))
             else:
-                page = caption_html(lines, w, h, self.look, self.bar)
+                page = caption_html(lines, w, h, self.look, self.bar, c.get("position") or "bottom")
                 out.append(str(self._page(page, w, h, str(png))))
         self._cache[key] = out
         return out

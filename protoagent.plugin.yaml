@@ -1,6 +1,6 @@
 id: campaign
 name: Campaign Studio
-version: 0.9.2
+version: 0.10.0
 description: >-
   Campaign plans and deterministic, repeatable media production for launching ANY app or
   product. Plans hold the goal and its math, lanes, a shot list of assets (who records what),
@@ -10,7 +10,7 @@ description: >-
   limits; branded HTML cards render to PNG (social preview, 16:9, square, end slide); montages
   cut many short themed beats + tagline/end cards into one launch video with colour-wipe
   transitions (landscape, vertical, square), reviewed first as a storyboard. Adds a background
-  producer subagent, five skills, and an asset gallery for approving what ships.
+  producer subagent, six skills, and an asset gallery for approving what ships.
   Draft-only: it never posts to a social platform, holds no platform credentials, and only the
   operator approves. Approved media can be backed up to protoContent (GitHub release assets +
   a catalog PR) as a GitHub App (repo-scoped installation tokens) or with an operator-set token. Daily retention prunes old intermediates

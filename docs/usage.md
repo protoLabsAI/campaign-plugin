@@ -57,7 +57,7 @@ the [HTTP API reference](api.md).
 
 ## Skills and the producer
 
-Five skills ship in `skills/`: `campaign-planning` (a brief → a plan), `shot-scripting` (robust
+Six skills ship in `skills/`: `campaign-planning` (a brief → a plan), `viral-clip-craft` (clips that hold attention), `shot-scripting` (robust
 shot scripts), `asset-review` (the self-check before `ready_for_review`), `montage-editing`
 (plan, storyboard and cut a montage) and `produce-walkthrough-video` (a finished video from a
 plain request). The `campaign_producer` subagent and its tool allowlist are described in the

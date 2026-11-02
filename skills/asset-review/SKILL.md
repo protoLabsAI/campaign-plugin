@@ -6,7 +6,7 @@ description: >-
   loops cleanly, plays as one continuous run with no missing action, and ends on the result in
   its own view — and when an operator rejects one. Triggers: "is it ready", "mark it ready",
   "check the render", "review the assets", "the operator rejected", "why was it rejected".
-tools: [campaign_view, campaign_assets, campaign_asset, campaign_asset_update, campaign_render, campaign_shoot, campaign_limits, campaign_status]
+tools: [campaign_pacing, campaign_view, campaign_assets, campaign_asset, campaign_asset_update, campaign_render, campaign_shoot, campaign_limits, campaign_status]
 ---
 
 # Self-check before ready_for_review
@@ -14,6 +14,13 @@ tools: [campaign_view, campaign_assets, campaign_asset, campaign_asset_update, c
 The operator's review is the last gate, not the first. Hand them only things you'd ship.
 `campaign_asset_update(id, status="ready_for_review")` refuses a missing file or a broken hard
 limit; everything below is on you.
+
+## Measure the pacing
+
+Run `campaign_pacing(asset_id)` on every cut before you view it: first action, longest quiet span,
+change cadence, each caption's reading speed, bookend share, length. Deal with each warn, or say in
+the ready note why you kept it, such as a held frame while a reply is read. Clean stills don't prove
+a clip is worth watching; see `viral-clip-craft`.
 
 ## Look first — with `campaign_view`, never from the path
 

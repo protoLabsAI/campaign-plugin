@@ -70,7 +70,7 @@ playwright. CI runs both: the unit job, and an integration job that installs Chr
 | `subagents.py` | The `campaign_producer` subagent |
 | `sandbox.py` | `campaign_sandbox_reset`: resolve + guard a sandbox console, then clear it via the worker |
 | `threads.py` | Run a blocking call on a fresh worker thread |
-| `skills/` | The five skills |
+| `skills/` | The six skills |
 | `docs/assets/` | Screenshots used by the README and docs (WebP) |
 | `tests/` | The host-free suite (`conftest.py` bootstraps the plugin as a package) |
 
