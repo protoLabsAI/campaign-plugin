@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.2
+
 - **`drag` lands on native HTML5 drag-and-drop.** The pointer settles on the target so
   Chromium fires `dragover` before the release, and the visible pointer now follows the
   whole drag instead of freezing where it started. Kanban-style boards can be recorded with
