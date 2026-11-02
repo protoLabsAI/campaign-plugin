@@ -872,6 +872,43 @@ def test_real_focus_within_press_repeat_drag_and_mouse_move(site, tmp_path):
     assert "matches 2 elements" in str(e.value)
 
 
+NATIVE_DRAG_PAGE = """<!doctype html><html><body style="margin:0;font:16px system-ui">
+<div id="card" draggable="true" style="position:absolute;left:20px;top:20px;width:120px;height:60px;background:#444">Card</div>
+<div id="col" style="position:absolute;left:400px;top:0;width:200px;height:300px;background:#222"></div>
+<div id="log" style="position:absolute;top:320px"></div>
+<script>
+  const col = document.getElementById('col');
+  document.getElementById('card').addEventListener('dragstart', e => e.dataTransfer.setData('text/plain', 'card'));
+  col.addEventListener('dragover', e => e.preventDefault());
+  col.addEventListener('drop', e => {
+    e.preventDefault();
+    const dot = document.getElementById('__campaign_cursor').style.transform;
+    document.getElementById('log').textContent = 'dropped, dot ' + dot.match(/translate\\((\\d+)/)[1];
+  });
+</script></body></html>"""
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not have_chromium(), reason="playwright Chromium not installed")
+def test_real_drag_lands_a_native_html5_drop_with_the_pointer_following(site, tmp_path):
+    (Path(tmp_path) / "site" / "native-drag.html").write_text(NATIVE_DRAG_PAGE, encoding="utf-8")
+    script = validate(
+        {
+            "base_url": site,
+            "viewport": {"width": 640, "height": 400},
+            "device_scale_factor": 1,
+            "step_timeout_ms": 3000,
+            "steps": [
+                {"goto": "/native-drag.html"},
+                {"drag": {"target": "#card", "to": {"dx": 400, "dy": 0}}},
+                {"wait_for": {"text": "dropped, dot 480", "exact": True}},
+            ],
+        }
+    )
+    res = shoot.run(script, tmp_path / "take")
+    assert res["error"] == "", res["error"]
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(not (have_chromium() and have_ffmpeg()), reason="needs playwright Chromium + ffmpeg")
 def test_real_device_pixel_take_is_twice_the_viewport_and_as_long_as_the_take(site, tmp_path):

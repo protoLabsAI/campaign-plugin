@@ -536,7 +536,15 @@ def test_focus_mouse_move_and_drag_drive_the_real_pointer(tmp_path):
     # The fake box is x=10 y=20 100×40 → centre (60, 40): press there, move by the offset, release.
     i = pw.calls.index(("mouse.down",))
     assert pw.calls[i - 1] == ("mouse.move", 60.0, 40.0), "the pointer glides to the handle first"
-    assert pw.calls[i + 1 : i + 3] == [("mouse.move", -240.0, 40.0), ("mouse.up",)]
+    # …then settle on the target, so a native HTML5 drag gets its dragover before the release.
+    moves = [c for c in pw.calls[i + 1 :] if c[0] in ("mouse.move", "mouse.up")]
+    assert moves[:4] == [
+        ("mouse.move", -240.0, 40.0),
+        ("mouse.move", -239.0, 40.0),
+        ("mouse.move", -240.0, 40.0),
+        ("mouse.up",),
+    ]
+    assert ("wait_for_timeout", pw_worker.DRAG_SETTLE_MS) in pw.calls[i:]
 
 
 def test_an_ambiguous_drag_or_focus_target_names_the_matches(tmp_path):

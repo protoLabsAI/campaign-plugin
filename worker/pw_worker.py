@@ -175,6 +175,8 @@ CURSOR_JS = r"""
 (() => {
   if (window.__campaignCursor) return; window.__campaignCursor = true;
   const KEY = '__campaignCursor';
+  // A native HTML5 drag replaces mousemove with dragover, so the dot must follow both.
+  const POINTER_EVENTS = ['mousemove', 'mousedown', 'mouseup', 'dragover'];
   const inFrame = window.top !== window;
   // A pointer event from a child frame arrives as a message; offset it by that iframe's box.
   // Registered by the init script, so it runs first: our messages never reach page listeners
@@ -192,7 +194,7 @@ CURSOR_JS = r"""
     // up to the parent, which offsets it and passes it on, so the top-level dot follows the
     // mouse into the frame instead of freezing at its edge.
     const post = (x, y, t) => { try { window.parent.postMessage({[KEY]: {x, y, t}}, '*'); } catch (e) {} };
-    for (const t of ['mousemove', 'mousedown', 'mouseup'])
+    for (const t of POINTER_EVENTS)
       document.addEventListener(t, e => post(e.clientX, e.clientY, t), true);
     fromChild(post);
     return;
@@ -213,7 +215,7 @@ CURSOR_JS = r"""
       'transition:transform .12s ease;transform:translate(-100px,-100px)';
     document.body.appendChild(c);
   };
-  for (const t of ['mousemove', 'mousedown', 'mouseup'])
+  for (const t of POINTER_EVENTS)
     document.addEventListener(t, e => set(e.clientX, e.clientY, t), true);
   fromChild(set);
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install); else install();
@@ -1022,9 +1024,14 @@ def _park_below(page, loc, timeout: float) -> None:
         page.mouse.move(box["x"] + box["width"] * 0.85, box["y"] + box["height"] + 16, steps=8)
 
 
+DRAG_SETTLE_MS = 150
+
+
 def drag(page, loc, dx: float, dy: float, timeout: float) -> None:
     """Grab ``loc`` at its centre, move the pointer by (dx, dy) and release — a resizable dock
-    divider, a slider handle. Real mouse events, so the visible pointer follows the drag."""
+    divider, a slider handle, a draggable card. Real mouse events, so the visible pointer follows
+    the drag. Chromium only drops a native HTML5 drag after dragover has fired on the target, so
+    the pointer settles there with one last small move before the release."""
     _move_to(page, loc, timeout)
     box = loc.bounding_box(timeout=timeout)
     if not box:
@@ -1033,6 +1040,10 @@ def drag(page, loc, dx: float, dy: float, timeout: float) -> None:
     page.mouse.down()
     try:
         page.mouse.move(x + dx, y + dy, steps=24)
+        page.wait_for_timeout(DRAG_SETTLE_MS)
+        page.mouse.move(x + dx + 1, y + dy, steps=2)
+        page.mouse.move(x + dx, y + dy, steps=2)
+        page.wait_for_timeout(DRAG_SETTLE_MS)
     finally:
         page.mouse.up()
 
