@@ -1,12 +1,9 @@
 name: CI
 
-# Lint + test the plugin. Runs on the org's Namespace Linux profile (not a GitHub-hosted
-# runner) to keep CI cost down; a fork without the profile overrides the NSC_RUNNER variable.
-#
-# Two jobs: `test` is the host-free unit suite (Playwright mocked at its boundary — the
-# integration tests skip themselves). `integration` installs a real headless Chromium and
-# ffmpeg and runs ONLY the `integration`-marked tests: a real take of a tiny local page, a
-# real render, a real card.
+# Lint + test the plugin. Two jobs: `test` is the host-free unit suite (Playwright mocked at
+# its boundary — the integration tests skip themselves). `integration` installs a real
+# headless Chromium and ffmpeg and runs ONLY the `integration`-marked tests: a real take of a
+# tiny local page, a real render, a real card. Runs on a GitHub-hosted runner (ubuntu-latest).
 on:
   pull_request:
   push:
@@ -15,7 +12,7 @@ on:
 
 jobs:
   test:
-    runs-on: ${{ vars.NSC_RUNNER || 'namespace-profile-protolabs-linux' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +31,7 @@ jobs:
         run: pytest -q -m "not integration"
 
   integration:
-    runs-on: ${{ vars.NSC_RUNNER || 'namespace-profile-protolabs-linux' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
