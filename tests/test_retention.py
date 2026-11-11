@@ -25,9 +25,9 @@ from fastapi.testclient import TestClient
 NOW = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 
 
-def _age(asset_id: int, days: float) -> None:
-    """Back-date a row's created/updated/reviewed_at by ``days`` before NOW."""
-    ts = (NOW - timedelta(days=days)).isoformat(timespec="seconds")
+def _age(asset_id: int, days: float, now: datetime = NOW) -> None:
+    """Back-date a row's created/updated/reviewed_at by ``days`` before ``now`` (default NOW)."""
+    ts = (now - timedelta(days=days)).isoformat(timespec="seconds")
     conn = store.connect()
     try:
         with conn:
@@ -578,6 +578,9 @@ def test_api_and_view_never_drop_the_manifest_setting():
 def test_a_pruned_tombstone_serves_no_file(client, c):
     old = _asset(c, "renders/o/o.mp4", "rendered", days=3650)
     keep = _asset(c, "renders/k/k.mp4", "rendered", days=0)
+    # The prune route runs on the real clock, not the frozen NOW: keep must be fresh *today*,
+    # or it ages past the window once the calendar passes NOW + 7 days and gets pruned too.
+    _age(keep["id"], 0, now=datetime.now(UTC))
     s = store.update_asset(old["id"], status="superseded", superseded_by=[keep["id"]])
     _age(s["id"], 3650)
     client.post("/api/plugins/campaign/retention/prune", json={"dry_run": False})
